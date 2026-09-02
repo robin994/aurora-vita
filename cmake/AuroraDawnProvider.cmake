@@ -1,5 +1,4 @@
 include_guard(GLOBAL)
-include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
 
 # Resolve Dawn/WebGPU dependency based on AURORA_DAWN_PROVIDER and AURORA_DAWN_LINKAGE.
 #
@@ -14,7 +13,8 @@ include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
 function(_aurora_dawn_set_platform_backends)
   if (WIN32)
     set(DAWN_ENABLE_D3D12 ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_D3D11 ON CACHE INTERNAL "")
+    # Disable D3D11 because this Aurora fork does not support it.
+    set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "")
     set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
@@ -28,67 +28,31 @@ function(_aurora_dawn_set_platform_backends)
     set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
-  elseif (ANDROID)
-    set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_OPENGLES ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
   else () # Linux / other
     set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "")
     set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_DESKTOP_GL ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_OPENGLES ON CACHE INTERNAL "")
+    set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
+    set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
   endif ()
 endfunction()
 
-# Prebuilt Dawn Android package has non-portable paths in it
-# Will fix upstream but this works for now
-function(_aurora_dawn_fix_android_link_interface)
-  if (NOT ANDROID OR NOT TARGET dawn::webgpu_dawn)
-    return()
-  endif ()
-
-  get_target_property(_dawn_link_libs dawn::webgpu_dawn INTERFACE_LINK_LIBRARIES)
-  if (NOT _dawn_link_libs)
-    return()
-  endif ()
-
-  set(_dawn_fixed_link_libs "")
-  set(_dawn_replaced_log FALSE)
-  foreach (_dawn_link_lib IN LISTS _dawn_link_libs)
-    if (_dawn_link_lib MATCHES "^/.*/sysroot/usr/lib/[^/]+/[0-9]+/liblog\\.so$")
-      list(APPEND _dawn_fixed_link_libs "$<LINK_ONLY:log>")
-      set(_dawn_replaced_log TRUE)
-    else ()
-      list(APPEND _dawn_fixed_link_libs "${_dawn_link_lib}")
-    endif ()
-  endforeach ()
-
-  if (_dawn_replaced_log)
-    set_target_properties(dawn::webgpu_dawn PROPERTIES
-      INTERFACE_LINK_LIBRARIES "${_dawn_fixed_link_libs}")
-  endif ()
-endfunction()
-
-aurora_get_target_arch(_dawn_target_arch)
-string(TOLOWER "${CMAKE_SYSTEM_NAME}" _dawn_system)
-string(TOLOWER "${_dawn_target_arch}" _dawn_arch)
-set(_has_dawn_package FALSE)
-if ("${_dawn_system}-${_dawn_arch}" MATCHES "^(windows-(amd64|arm64)|linux-(x86_64|aarch64)|darwin-(arm64|x86_64)|ios-arm64|android-aarch64)$")
-  set(_has_dawn_package TRUE)
-endif ()
-
 # ── Auto: resolve provider based on platform availability ──
 set(_aurora_dawn_provider "${AURORA_DAWN_PROVIDER}")
 if (_aurora_dawn_provider STREQUAL "auto")
-  # Prebuilt Dawn packages available for: windows-{amd64,arm64}, linux-{x86_64,aarch64}, darwin-{arm64,x86_64}, ios-arm64, android-aarch64
-  if (_has_dawn_package)
+  # Prebuilt Dawn packages available for: windows-{amd64,arm64}, linux-{x86_64,aarch64}, darwin-{arm64,x86_64}
+  set(_has_package FALSE)
+  if (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|ARM64|aarch64)$")
+    set(_has_package TRUE)
+  elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|aarch64)$")
+    set(_has_package TRUE)
+  elseif (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|x86_64)$")
+    set(_has_package TRUE)
+  endif ()
+
+  if (_has_package)
     set(_aurora_dawn_provider "package")
   else ()
     set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL ON)
@@ -119,6 +83,8 @@ if (_aurora_dawn_provider STREQUAL "vendor")
     set(DAWN_BUILD_SAMPLES OFF CACHE INTERNAL "Disable Dawn sample applications")
     set(DAWN_BUILD_BENCHMARKS OFF CACHE INTERNAL "Disable Dawn benchmarks")
     set(DAWN_SUPPORTS_GLFW_FOR_WINDOWING OFF CACHE INTERNAL "Disable Dawn GLFW windowing")
+    set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "Enable compilation of the OpenGL backend")
+    set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "Enable compilation of the OpenGL ES backend")
     set(DAWN_FETCH_DEPENDENCIES ON CACHE INTERNAL
       "Use fetch_dawn_dependencies.py as an alternative to using depot_tools")
     if (CMAKE_SYSTEM_NAME STREQUAL Linux)
@@ -134,8 +100,8 @@ if (_aurora_dawn_provider STREQUAL "vendor")
 
     include(FetchContent)
     FetchContent_Declare(dawn
-      URL "https://github.com/encounter/dawn/archive/${AURORA_DAWN_REF}.tar.gz"
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+      URL "https://github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz"
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(dawn)
@@ -147,9 +113,9 @@ if (_aurora_dawn_provider STREQUAL "vendor")
   endif ()
 
   if (AURORA_DAWN_LINKAGE STREQUAL "shared")
-    set(AURORA_DAWN_IS_SHARED TRUE)
+    set(AURORA_DAWN_IS_SHARED TRUE PARENT_SCOPE)
   else ()
-    set(AURORA_DAWN_IS_SHARED FALSE)
+    set(AURORA_DAWN_IS_SHARED FALSE PARENT_SCOPE)
   endif ()
 
 elseif (_aurora_dawn_provider STREQUAL "system")
@@ -163,34 +129,51 @@ elseif (_aurora_dawn_provider STREQUAL "system")
   if (NOT TARGET dawn::webgpu_dawn)
     message(FATAL_ERROR "find_package(Dawn) succeeded but dawn::webgpu_dawn target not found")
   endif ()
-  _aurora_dawn_fix_android_link_interface()
   _aurora_dawn_set_platform_backends()
 
   get_target_property(_dawn_type dawn::webgpu_dawn TYPE)
   if (_dawn_type STREQUAL "SHARED_LIBRARY")
-    set(AURORA_DAWN_IS_SHARED TRUE)
+    set(AURORA_DAWN_IS_SHARED TRUE PARENT_SCOPE)
   else ()
-    set(AURORA_DAWN_IS_SHARED FALSE)
+    set(AURORA_DAWN_IS_SHARED FALSE PARENT_SCOPE)
   endif ()
 
 elseif (_aurora_dawn_provider STREQUAL "package")
   # ── Package: download prebuilt Dawn install tree ──
   if (NOT AURORA_DAWN_PACKAGE_URL)
-    if (NOT _has_dawn_package)
-      message(FATAL_ERROR
-        "AURORA_DAWN_PROVIDER=package requires AURORA_DAWN_PACKAGE_URL on this platform.\n"
-        "No prebuilt Dawn package is available for ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}"
-        " with CMAKE_OSX_ARCHITECTURES='${CMAKE_OSX_ARCHITECTURES}'.")
+    string(TOLOWER "${CMAKE_SYSTEM_NAME}" _dawn_system)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _dawn_arch)
+    if (_dawn_system STREQUAL "windows")
+      if (_dawn_arch STREQUAL "x86_64")
+        set(_dawn_arch "amd64")
+      elseif (_dawn_arch STREQUAL "aarch64")
+        set(_dawn_arch "arm64")
+      endif ()
     endif ()
     set(AURORA_DAWN_PACKAGE_URL
-      "https://github.com/encounter/dawn/releases/download/${AURORA_DAWN_VERSION}/dawn-${_dawn_system}-${_dawn_arch}.tar.gz")
+      "https://github.com/encounter/dawn-build/releases/download/${AURORA_DAWN_VERSION}/dawn-${_dawn_system}-${_dawn_arch}.tar.gz")
+
+    # A release asset is mutable: the same tag has already served two different windows-amd64 archives,
+    # and a cached extraction is never re-verified. Pin the digest for the combinations we ship.
+    if (NOT AURORA_DAWN_PACKAGE_URL_HASH
+        AND AURORA_DAWN_VERSION STREQUAL "v20260603.191052"
+        AND _dawn_system STREQUAL "windows" AND _dawn_arch STREQUAL "amd64")
+      set(AURORA_DAWN_PACKAGE_URL_HASH
+        "SHA256=7785373d569b3b0237918ec9c523239f7d0667857c5ea8242e3cdfde95e6aeab")
+    endif ()
   endif ()
   message(STATUS "aurora: Fetching prebuilt Dawn package from ${AURORA_DAWN_PACKAGE_URL}")
+
+  set(_dawn_prebuilt_hash_argument "")
+  if (AURORA_DAWN_PACKAGE_URL_HASH)
+    set(_dawn_prebuilt_hash_argument URL_HASH "${AURORA_DAWN_PACKAGE_URL_HASH}")
+  endif ()
 
   include(FetchContent)
   FetchContent_Declare(dawn_prebuilt
     URL "${AURORA_DAWN_PACKAGE_URL}"
-    DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    ${_dawn_prebuilt_hash_argument}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   )
   FetchContent_MakeAvailable(dawn_prebuilt)
 
@@ -223,11 +206,11 @@ elseif (_aurora_dawn_provider STREQUAL "package")
   )
     if (EXISTS "${_cmake_path}/DawnConfig.cmake")
       set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL ON)
-      find_package(Dawn REQUIRED CONFIG
-        PATHS "${_cmake_path}"
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH
-      )
+      # NO_CMAKE_FIND_ROOT_PATH: this is already a fully resolved, self-contained
+      # path into the downloaded package (not a host system location), so it
+      # must not be re-rooted under CMAKE_FIND_ROOT_PATH when cross-compiling
+      # (that would look for it nested inside the sysroot and never find it).
+      find_package(Dawn REQUIRED CONFIG PATHS "${_cmake_path}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
       set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL OFF)
       set(_dawn_cmake_found TRUE)
       break()
@@ -241,15 +224,14 @@ elseif (_aurora_dawn_provider STREQUAL "package")
       "The package must be a Dawn install tree built with DAWN_ENABLE_INSTALL=ON.")
   endif ()
 
-  _aurora_dawn_fix_android_link_interface()
   _aurora_dawn_set_platform_backends()
 
   get_target_property(_dawn_pkg_type dawn::webgpu_dawn TYPE)
   if (_dawn_pkg_type STREQUAL "SHARED_LIBRARY")
-    set(AURORA_DAWN_IS_SHARED TRUE)
+    set(AURORA_DAWN_IS_SHARED TRUE PARENT_SCOPE)
 
   else ()
-    set(AURORA_DAWN_IS_SHARED FALSE)
+    set(AURORA_DAWN_IS_SHARED FALSE PARENT_SCOPE)
   endif ()
 
 else ()

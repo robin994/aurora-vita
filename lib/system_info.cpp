@@ -4,14 +4,33 @@
 #if _WIN32
 #define WIN32_LEAN_AND_MEAN 1
 #include <windows.h>
-#include <combaseapi.h>
-#include <Wbemidl.h>
-#include <comutil.h>
 #include <dxgi.h>
-#include <wrl/client.h>
 
-template <typename T>
-using ComPtr = Microsoft::WRL::ComPtr<T>;
+template<typename T>
+class ComPtr {
+public:
+  ComPtr() = default;
+  ComPtr(const ComPtr&) = delete;
+  ComPtr& operator=(const ComPtr&) = delete;
+  ~ComPtr() { reset(); }
+
+  T* Get() const { return value; }
+  T* operator->() const { return value; }
+  T** Put() {
+    reset();
+    return &value;
+  }
+
+private:
+  void reset() {
+    if (value != nullptr) {
+      value->Release();
+      value = nullptr;
+    }
+  }
+
+  T* value = nullptr;
+};
 typedef LONG NTSTATUS, *PNTSTATUS;
 extern "C" NTSYSAPI NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOEXW lpVersionInformation);
 #elif __APPLE__
@@ -23,13 +42,14 @@ extern "C" NTSYSAPI NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOEXW lpVersion
 #include <sys/sysinfo.h>
 #endif
 
+
 using namespace std::string_literals;
 
 namespace aurora {
-namespace {
-constexpr Module Log{"aurora::system_info"};
-constexpr auto Unknown = "Unknown";
-} // namespace
+
+static constexpr auto Unknown = "Unknown";
+
+static Module Log("aurora::system_info");
 
 static std::string GetOSVersion();
 static std::string GetCpuModel();
@@ -54,123 +74,66 @@ void log_system_information() {
 }
 
 #if _WIN32
-struct ComGuard {
-  ~ComGuard() { CoUninitialize(); }
-};
-
 static std::string wideStringToUtf8(std::wstring_view str) {
-  const auto size =
-      WideCharToMultiByte(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), nullptr, 0, nullptr, nullptr);
+  const auto size = WideCharToMultiByte(
+    CP_UTF8,
+    0,
+    str.data(),
+    static_cast<int>(str.size()),
+    nullptr,
+    0,
+    nullptr,
+    nullptr
+    );
 
   std::string result{};
   result.resize(size);
 
-  WideCharToMultiByte(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), result.data(),
-                      static_cast<int>(result.size()), nullptr, nullptr);
+  WideCharToMultiByte(
+    CP_UTF8,
+    0,
+    str.data(),
+    static_cast<int>(str.size()),
+    result.data(),
+    static_cast<int>(result.size()),
+    nullptr,
+    nullptr
+    );
 
   return result;
 }
 
 std::string GetCpuModel() {
-  // Good fucking lord Microsoft, what the fuck is this?
-  // https://learn.microsoft.com/en-us/windows/win32/wmisdk/example--getting-wmi-data-from-the-local-computer
-
-  HRESULT hres = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  if (FAILED(hres)) {
-    Log.error("COM initialization failed");
+  HKEY key = nullptr;
+  const auto opened = RegOpenKeyExW(
+    HKEY_LOCAL_MACHINE,
+    L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+    0,
+    KEY_QUERY_VALUE,
+    &key);
+  if (opened != ERROR_SUCCESS) {
+    Log.error("Unable to open the processor registry key");
     return Unknown;
   }
 
-  hres = CoInitializeSecurity(NULL,
-                              -1,                          // COM authentication
-                              NULL,                        // Authentication services
-                              NULL,                        // Reserved
-                              RPC_C_AUTHN_LEVEL_DEFAULT,   // Default authentication
-                              RPC_C_IMP_LEVEL_IMPERSONATE, // Default Impersonation
-                              NULL,                        // Authentication info
-                              EOAC_NONE,                   // Additional capabilities
-                              NULL                         // Reserved
-  );
-
-  if (FAILED(hres)) {
-    Log.error("COM security initialization failed");
+  wchar_t value[256]{};
+  DWORD type = 0;
+  DWORD size = sizeof(value);
+  const auto queried = RegQueryValueExW(
+    key,
+    L"ProcessorNameString",
+    nullptr,
+    &type,
+    reinterpret_cast<BYTE*>(value),
+    &size);
+  RegCloseKey(key);
+  if (queried != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+    Log.error("Unable to read the processor name");
     return Unknown;
   }
 
-  ComGuard comGuard{};
-
-  ComPtr<IWbemLocator> pLoc;
-
-  hres = CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER, IID_IWbemLocator, &pLoc);
-  if (FAILED(hres)) {
-    Log.error("CoCreateInstance failed for IWbemLocator");
-    return Unknown;
-  }
-
-  ComPtr<IWbemServices> pSvc;
-
-  // Connect to the root\cimv2 namespace with
-  // the current user and obtain pointer pSvc
-  // to make IWbemServices calls.
-  hres = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), // Object path of WMI namespace
-                             NULL,                    // User name. NULL = current user
-                             NULL,                    // User password. NULL = current
-                             0,                       // Locale. NULL indicates current
-                             NULL,                    // Security flags.
-                             0,                       // Authority (for example, Kerberos)
-                             0,                       // Context object
-                             &pSvc                    // pointer to IWbemServices proxy
-  );
-  if (FAILED(hres)) {
-    Log.error("ConnectServer failed");
-    return Unknown;
-  }
-
-  hres = CoSetProxyBlanket(pSvc.Get(),                  // Indicates the proxy to set
-                           RPC_C_AUTHN_WINNT,           // RPC_C_AUTHN_xxx
-                           RPC_C_AUTHZ_NONE,            // RPC_C_AUTHZ_xxx
-                           NULL,                        // Server principal name
-                           RPC_C_AUTHN_LEVEL_CALL,      // RPC_C_AUTHN_LEVEL_xxx
-                           RPC_C_IMP_LEVEL_IMPERSONATE, // RPC_C_IMP_LEVEL_xxx
-                           NULL,                        // client identity
-                           EOAC_NONE                    // proxy capabilities
-  );
-
-  if (FAILED(hres)) {
-    Log.error("CoSetProxyBlanket failed");
-    return Unknown;
-  }
-
-  ComPtr<IEnumWbemClassObject> pEnumerator;
-  hres = pSvc->ExecQuery(bstr_t(L"WQL"), bstr_t(L"select Name from Win32_Processor"),
-                         WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
-  if (FAILED(hres)) {
-    Log.error("ExecQuery failed");
-    return Unknown;
-  }
-
-  ULONG uReturn = 0;
-
-  std::string result{};
-
-  while (pEnumerator) {
-    ComPtr<IWbemClassObject> pclsObj;
-    HRESULT hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
-
-    if (0 == uReturn) {
-      break;
-    }
-
-    VARIANT vtProp;
-
-    VariantInit(&vtProp);
-    // Get the value of the Name property
-    hr = pclsObj->Get(L"Name", 0, &vtProp, nullptr, nullptr);
-    result = wideStringToUtf8(vtProp.bstrVal);
-    VariantClear(&vtProp);
-  }
-
-  return result;
+  const auto length = wcsnlen(value, sizeof(value) / sizeof(value[0]));
+  return wideStringToUtf8(std::wstring_view(value, length));
 }
 
 uint64_t GetMemoryAmount() {
@@ -190,20 +153,26 @@ std::string GetOSVersion() {
     return Unknown;
   }
 
-  return fmt::format("Microsoft Windows {}.{} build {}", info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber);
+  return fmt::format(
+    "Microsoft Windows {}.{} build {}",
+    info.dwMajorVersion,
+    info.dwMinorVersion,
+    info.dwBuildNumber);
 }
 
 static void LogGpus() {
   ComPtr<IDXGIFactory1> factory;
-  auto result = CreateDXGIFactory1(__uuidof(IDXGIFactory1), &factory);
+  auto result = CreateDXGIFactory1(
+    __uuidof(IDXGIFactory1),
+    reinterpret_cast<void**>(factory.Put()));
   if (FAILED(result)) {
     Log.error("Unable to create IDXGIFactory1");
     return;
   }
 
-  for (UINT i = 0;; i++) {
+  for (UINT i = 0;;i++) {
     ComPtr<IDXGIAdapter1> adapter;
-    result = factory->EnumAdapters1(i, &adapter);
+    result = factory->EnumAdapters1(i, adapter.Put());
     if (result == DXGI_ERROR_NOT_FOUND)
       break;
 
@@ -215,7 +184,9 @@ static void LogGpus() {
   }
 }
 
-void LogMisc() { LogGpus(); }
+void LogMisc() {
+  LogGpus();
+}
 
 #elif __APPLE__
 
@@ -241,7 +212,9 @@ static std::string sysCtlToString(const char* name) {
   return value;
 }
 
-std::string GetCpuModel() { return sysCtlToString("machdep.cpu.brand_string"); }
+std::string GetCpuModel() {
+  return sysCtlToString("machdep.cpu.brand_string");
+}
 
 uint64_t GetMemoryAmount() {
   uint64_t result;
@@ -266,7 +239,7 @@ std::string GetOSVersion() {
   constexpr auto name = Unknown;
 #endif
 
-  return fmt::format("{} {}", name, detail::system_version_string());
+  return fmt::format("{} {}", name, system_info::getSystemVersionString());
 }
 
 void LogMisc() {
@@ -275,12 +248,15 @@ void LogMisc() {
 #elif linux
 
 // https://stackoverflow.com/questions/216823/how-can-i-trim-a-stdstring
-static void ltrim(std::string& s) {
-  s.erase(s.begin(), std::ranges::find_if(s.begin(), s.end(), [](unsigned char ch) { return !std::isspace(ch); }));
+static void ltrim(std::string &s) {
+  s.erase(s.begin(), std::ranges::find_if(s.begin(), s.end(), [](unsigned char ch) {
+    return !std::isspace(ch);
+  }));
 }
-static void rtrim(std::string& s) {
-  s.erase(std::ranges::find_if(s.rbegin(), s.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(),
-          s.end());
+static void rtrim(std::string &s) {
+    s.erase(std::ranges::find_if(s.rbegin(), s.rend(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }).base(), s.end());
 }
 inline std::string trim(std::string str) {
   ltrim(str);
@@ -290,7 +266,8 @@ inline std::string trim(std::string str) {
 
 std::string GetCpuModel() {
   std::ifstream cpuInfo("/proc/cpuinfo");
-  if (!cpuInfo) {
+  if (!cpuInfo)
+  {
     Log.error("Failed to open /proc/cpuinfo");
     return Unknown;
   }
@@ -329,7 +306,8 @@ std::string GetOSVersion() {
   }
 
   std::ifstream releaseInfo(path);
-  if (!releaseInfo) {
+  if (!releaseInfo)
+  {
     Log.error("Failed to open /etc/os-release or /usr/lib/os-release");
     return Unknown;
   }
@@ -348,8 +326,8 @@ std::string GetOSVersion() {
     auto left = trim(line.substr(0, split));
     auto right = trim(line.substr(split + 1));
 
-    if (right[0] == '"' && right[right.size() - 1] == '"') {
-      right = right.substr(1, right.size() - 2);
+    if (right[0] == '"' && right[right.size()-1] == '"') {
+      right = right.substr(1, right.size()-2);
     }
 
     if (left == "NAME") {
@@ -366,15 +344,25 @@ std::string GetOSVersion() {
   return fmt::format("{} {}", name, version);
 }
 
-void LogMisc() {}
+void LogMisc() {
+
+}
 #else
-std::string GetCpuModel() { return Unknown; }
+std::string GetCpuModel() {
+  return Unknown;
+}
 
-uint64_t GetMemoryAmount() { return 0; }
+uint64_t GetMemoryAmount() {
+  return 0;
+}
 
-std::string GetOSVersion() { return Unknown; }
+std::string GetOSVersion() {
+  return Unknown;
+}
 
-void LogMisc() {}
+void LogMisc() {
+
+}
 #endif
 
 } // namespace aurora

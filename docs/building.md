@@ -52,5 +52,4 @@ See [examples/simple.c](../examples/simple.c) for a minimal application template
 - `AURORA_ENABLE_GX` (default: ON) - Enable GX implementation and WebGPU renderer
 - `AURORA_ENABLE_DVD` (default: OFF) - Enable DVD implementation backed by nod
 - `AURORA_ENABLE_CARD` (default: ON) - Enable CARD implementation based on kabufuda
-- `AURORA_ENABLE_RMLUI` (default: OFF) - Enable HTML/CSS based UI library
 - `AURORA_CACHE_USE_ZSTD` (default: ON) - Compress WebGPU cache entries with zstd

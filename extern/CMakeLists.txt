@@ -18,7 +18,6 @@ endfunction()
 
 if (AURORA_ENABLE_GX)
   include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/AuroraDawnProvider.cmake)
-  set(AURORA_DAWN_IS_SHARED "${AURORA_DAWN_IS_SHARED}" PARENT_SCOPE)
 endif ()
 
 # Abseil is needed for core libraries. It normally comes via Dawn's vendor build.
@@ -39,7 +38,7 @@ else ()
   set(ABSL_PROPAGATE_CXX_STD ON)
   FetchContent_Declare(abseil-cpp
     URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(abseil-cpp)
@@ -56,33 +55,16 @@ if (NOT TARGET xxhash)
     URL https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.tar.gz
     URL_HASH SHA256=aae608dfe8213dfd05d909a57718ef82f30722c392344583d3f39050c7f29a80
     SOURCE_SUBDIR cmake_unofficial
-    DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     EXCLUDE_FROM_ALL
   )
   set(XXHASH_BUILD_XXHSUM OFF CACHE INTERNAL "Build the xxhsum binary")
   # xxhash uses CMAKE_DEPENDENT_OPTION(BUILD_SHARED_LIBS ...) which writes
-  # a sticky CACHE INTERNAL entry on reconfigure. Undo it afterward, but keep
-  # an existing preset/toolchain cache entry intact for build-time regenerates.
-  set(_aurora_xxhash_had_bsl_var OFF)
-  set(_aurora_xxhash_had_bsl_cache OFF)
-  if (DEFINED BUILD_SHARED_LIBS)
-    set(_aurora_xxhash_had_bsl_var ON)
-    set(_aurora_xxhash_saved_bsl "${BUILD_SHARED_LIBS}")
-  endif ()
-  if (DEFINED CACHE{BUILD_SHARED_LIBS})
-    set(_aurora_xxhash_had_bsl_cache ON)
-  endif ()
+  # a sticky CACHE INTERNAL entry on reconfigure. Undo it afterward.
+  set(_aurora_xxhash_saved_bsl "${BUILD_SHARED_LIBS}")
   FetchContent_MakeAvailable(xxhash)
   unset(BUILD_SHARED_LIBS CACHE)
-  if (_aurora_xxhash_had_bsl_cache)
-    set(BUILD_SHARED_LIBS "${_aurora_xxhash_saved_bsl}" CACHE BOOL "Build shared libraries" FORCE)
-  elseif (_aurora_xxhash_had_bsl_var)
-    set(BUILD_SHARED_LIBS "${_aurora_xxhash_saved_bsl}")
-  else ()
-    unset(BUILD_SHARED_LIBS)
-  endif ()
-  unset(_aurora_xxhash_had_bsl_cache)
-  unset(_aurora_xxhash_had_bsl_var)
+  set(BUILD_SHARED_LIBS "${_aurora_xxhash_saved_bsl}")
   unset(_aurora_xxhash_saved_bsl)
   if (NOT TARGET xxhash)
     message(FATAL_ERROR "Failed to make xxhash available")
@@ -91,23 +73,28 @@ else ()
   message(STATUS "aurora: Using existing xxhash")
 endif ()
 
-if (NOT TARGET fmt::fmt)
-  aurora_find_package_global(fmt 11 QUIET)
-  if (NOT TARGET fmt::fmt)
-    message(STATUS "aurora: Fetching fmt")
-    FetchContent_Declare(fmt
-      URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
-      URL_HASH SHA256=ea7de4299689e12b6dddd392f9896f08fb0777ac7168897a244a6d6085043fea
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
-      EXCLUDE_FROM_ALL
-    )
-    FetchContent_MakeAvailable(fmt)
-    if (NOT TARGET fmt)
-      message(FATAL_ERROR "Failed to make fmt available")
-    endif ()
-  else ()
-    message(STATUS "aurora: Using existing fmt")
+if (NOT TARGET fmt)
+  message(STATUS "aurora: Fetching fmt")
+  FetchContent_Declare(fmt
+    URL https://github.com/fmtlib/fmt/archive/refs/tags/11.1.4.tar.gz
+    URL_HASH SHA256=ac366b7b4c2e9f0dde63a59b3feb5ee59b67974b14ee5dc9ea8ad78aa2c1ee1e
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    EXCLUDE_FROM_ALL
+  )
+  FetchContent_MakeAvailable(fmt)
+  if (NOT TARGET fmt)
+    message(FATAL_ERROR "Failed to make fmt available")
   endif ()
+else ()
+  message(STATUS "aurora: Using existing fmt")
+endif ()
+
+# fmt 11.1 drops its libc++ transitive includes but still calls malloc/free without <cstdlib>.
+# Force the missing header for fmt and its consumers until the pinned release is updated.
+if (MINGW AND TARGET fmt)
+  target_compile_options(fmt PUBLIC
+    $<$<COMPILE_LANGUAGE:CXX>:-include>
+    $<$<COMPILE_LANGUAGE:CXX>:cstdlib>)
 endif ()
 
 if (AURORA_ENABLE_GX)
@@ -116,24 +103,29 @@ if (AURORA_ENABLE_GX)
   endif ()
   if (NOT TARGET ZLIB::ZLIB)
     message(STATUS "aurora: Fetching zlib")
-    set(ZLIB_BUILD_SHARED ${_USE_SHARED} CACHE BOOL "Enable building zlib shared library" FORCE)
+    set(_AURORA_ZLIB_SHARED ${_USE_SHARED})
+    # ClangCL injects Clang's C headers into the MSVC resource compiler path, and zlib's DLL version
+    # resource then hits syntax rc.exe cannot parse. Use the resource-free static target here.
+    if (MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      set(_AURORA_ZLIB_SHARED OFF)
+    endif ()
+    set(ZLIB_BUILD_SHARED ${_AURORA_ZLIB_SHARED} CACHE BOOL "Enable building zlib shared library" FORCE)
     set(ZLIB_BUILD_TESTING OFF CACHE BOOL "Enable Zlib Examples as tests" FORCE)
     set(ZLIB_INSTALL OFF CACHE BOOL "Enable installation of zlib" FORCE)
-    set(ZLIB_COMPAT ON CACHE BOOL "Use the compat version of zlib instead of the newer zlib-ng" FORCE)
-    if (MSVC AND CMAKE_C_COMPILER_ID STREQUAL "Clang" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-      # zlib-ng's NEON LD4 probe passes GNU-style -march flags that clang-cl rejects
-      set(NEON_HAS_LD4 1 CACHE INTERNAL "")
-    endif ()
     FetchContent_Declare(
       ZLIB
-      URL https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.tar.gz
-      URL_HASH SHA256=f9c65aa9c852eb8255b636fd9f07ce1c406f061ec19a2e7d508b318ca0c907d1
-      PATCH_COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/PatchZlib.cmake"
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+      URL https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
+      URL_HASH SHA256=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(ZLIB)
-    add_library(ZLIB::ZLIB ALIAS zlib-ng)
+    if (NOT TARGET ZLIB::ZLIB AND TARGET ZLIB::ZLIBSTATIC)
+      add_library(ZLIB::ZLIB ALIAS zlibstatic)
+    endif ()
+    if (NOT TARGET ZLIB::ZLIB)
+      message(FATAL_ERROR "Failed to make zlib available")
+    endif ()
     # libpng calls find_package(ZLIB) even when zlib was already provided by FetchContent.
     file(WRITE "${CMAKE_FIND_PACKAGE_REDIRECTS_DIR}/ZLIBConfig.cmake"
       "set(ZLIB_FOUND TRUE)\n"
@@ -160,7 +152,7 @@ if (AURORA_ENABLE_GX)
       PNG
       URL https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.58.tar.gz
       URL_HASH SHA256=A9D4DF463D36A6E5F9C29BD6F4967312D17E996C1854F3511F833924EB1993CF
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(PNG)
@@ -184,7 +176,7 @@ if (AURORA_ENABLE_GX)
     FetchContent_Declare(Freetype
       URL https://files.twilitrealm.dev/freetype-2.14.3.tar.gz
       URL_HASH SHA256=e61b31ab26358b946e767ed7eb7f4bb2e507da1cfefeb7a8861ace7fd5c899a1
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(Freetype)
@@ -198,7 +190,7 @@ if (AURORA_ENABLE_GX)
     FetchContent_Declare(imgui
       URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
       URL_HASH SHA256=466fdef9b18de15f0bb6e288e3d00ffa3d82200ec458ce5e4f724a161d9528a5
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(imgui)
@@ -238,78 +230,62 @@ if (AURORA_ENABLE_GX)
     target_link_libraries(imgui PRIVATE ${AURORA_SDL3_TARGET})
   endif ()
 
-  aurora_find_package_global(SQLite3)
-  if (TARGET SQLite3::SQLite3)
-    message(STATUS "aurora: Using existing sqlite3")
-    add_library(sqlite3 ALIAS SQLite3::SQLite3)
-  elseif (TARGET SQLite::SQLite3) # CMake < 4.3
-    message(STATUS "aurora: Using existing sqlite3")
-    add_library(sqlite3 ALIAS SQLite::SQLite3)
-  else ()
+  if (NOT TARGET sqlite3)
     message(STATUS "aurora: Fetching sqlite3")
     FetchContent_Declare(sqlite3
       URL https://sqlite.org/2026/sqlite-amalgamation-3510300.zip
       URL_HASH SHA256=acb1e6f5d832484bf6d32b681e858c38add8b2acdfd42ac5df24b8afb46552b4
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(sqlite3)
 
     add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
     target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+  else ()
+    message(STATUS "aurora: Using existing sqlite3")
   endif ()
 
   if (AURORA_CACHE_USE_ZSTD)
-    aurora_find_package_global(zstd CONFIG QUIET)
-    if (NOT TARGET zstd::libzstd)
-      find_package(PkgConfig QUIET)
-      if(PkgConfig_FOUND)
-        pkg_check_modules(ZSTD libzstd IMPORTED_TARGET GLOBAL)
-        if(ZSTD_FOUND)
-          add_library(zstd::libzstd ALIAS PkgConfig::ZSTD)
-        endif()
-      endif()
-    endif()
-    if (NOT TARGET zstd::libzstd)
+    if (NOT TARGET libzstd_static)
       message(STATUS "aurora: Fetching zstd")
       set(ZSTD_BUILD_STATIC ON)
       set(ZSTD_BUILD_SHARED OFF)
+      set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "BUILD PROGRAMS" FORCE)
+      set(ZSTD_BUILD_TESTS OFF CACHE BOOL "BUILD TESTS" FORCE)
+
+      if (WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(C_FLAG_WALL TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WALL TRUE CACHE INTERNAL "")
+        set(C_FLAG_WEXTRA TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WEXTRA TRUE CACHE INTERNAL "")
+        set(C_FLAG_WUNDEF TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WUNDEF TRUE CACHE INTERNAL "")
+        set(C_FLAG_WSHADOW TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WSHADOW TRUE CACHE INTERNAL "")
+        set(C_FLAG_WCAST_ALIGN TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WCAST_ALIGN TRUE CACHE INTERNAL "")
+        set(C_FLAG_WCAST_QUAL TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WCAST_QUAL TRUE CACHE INTERNAL "")
+        set(C_FLAG_WSTRICT_PROTOTYPES TRUE CACHE INTERNAL "")
+        set(LD_FLAG_WL_Z_NOEXECSTACK FALSE CACHE INTERNAL "")
+        set(C_FLAG_QUNUSED_ARGUMENTS TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_QUNUSED_ARGUMENTS TRUE CACHE INTERNAL "")
+        set(C_FLAG_WA_NOEXECSTACK TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WA_NOEXECSTACK TRUE CACHE INTERNAL "")
+      endif()
 
       FetchContent_Declare(zstd
         URL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
         URL_HASH SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
-        DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         SOURCE_SUBDIR build/cmake
         EXCLUDE_FROM_ALL
       )
       FetchContent_MakeAvailable(zstd)
-      add_library(zstd::libzstd ALIAS libzstd_static)
     else ()
       message(STATUS "aurora: Using existing zstd")
     endif ()
-  endif ()
-
-  if (AURORA_ENABLE_RMLUI AND NOT TARGET RmlUi)
-    message(STATUS "aurora: Fetching RmlUi")
-    FetchContent_Declare(rmlui
-      URL https://github.com/mikke89/RmlUi/archive/0ae381e00d7426762bb5ed897973366358b16642.tar.gz
-      URL_HASH SHA256=fa4b84db1bae7b929996beb51d79b7037cd7aec438737a0df4d3c816d9b13bd8
-      DOWNLOAD_EXTRACT_TIMESTAMP FALSE
-      PATCH_COMMAND ${CMAKE_COMMAND}
-        -DRMLUI_SOURCE_DIR=<SOURCE_DIR>
-        -P "${CMAKE_CURRENT_LIST_DIR}/../cmake/patches/apply-rmlui-keyboard-showed-state.cmake"
-      EXCLUDE_FROM_ALL
-    )
-    block(SCOPE_FOR VARIABLES PROPAGATE rmlui_SOURCE_DIR rmlui_BINARY_DIR rmlui_POPULATED)
-      set(BUILD_SHARED_LIBS OFF) # Force block scope; RmlUi uses option(BUILD_SHARED_LIBS)
-      FetchContent_MakeAvailable(rmlui)
-    endblock()
-
-    add_library(rmlui_backends STATIC ${rmlui_SOURCE_DIR}/Backends/RmlUi_Platform_SDL.cpp)
-    # TODO: maybe dont hardcode this to SDL3?
-    target_compile_definitions(rmlui_backends PUBLIC RMLUI_SDL_VERSION_MAJOR=3)
-    target_include_directories(rmlui_backends PUBLIC ${rmlui_SOURCE_DIR}/Backends)
-    target_link_libraries(rmlui_backends PRIVATE rmlui ${AURORA_SDL3_TARGET})
   endif ()
 endif ()
 
@@ -318,14 +294,12 @@ if (NOT TARGET TracyClient)
 
   # Default to off, users can enable the cache variable if they want to use it.
   set(TRACY_ENABLE OFF CACHE BOOL "Enable Tracy profiling")
-  set(TRACY_ON_DEMAND ON CACHE BOOL "On-demand profiling")
-  set(TRACY_STATIC ON CACHE BOOL "Whether to build Tracy as a static library" FORCE)
 
   FetchContent_Declare(
           tracy
-          URL https://github.com/wolfpld/tracy/archive/6789e7d6f9a65ec98926b602097a33a9676d2606.tar.gz
-          URL_HASH SHA256=ebfe4fb50d7c254901979355c80a7d4cd33624aa2ec0fe90b3b238153cd5d69b
-          DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+          URL https://github.com/wolfpld/tracy/archive/a64b9a20294d59421a2f57aeca3c6383d8c48169.tar.gz
+          URL_HASH SHA256=24d342b5127d7f659dc3cf94f24347b348cc736f25b17a691fd7f69541937658
+          DOWNLOAD_EXTRACT_TIMESTAMP TRUE
           EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(tracy)

@@ -1,5 +1,4 @@
 include_guard(GLOBAL)
-include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
 
 # Resolve nod dependency based on AURORA_NOD_PROVIDER.
 #
@@ -14,13 +13,12 @@ include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
 set(_aurora_nod_provider "${AURORA_NOD_PROVIDER}")
 if (_aurora_nod_provider STREQUAL "auto")
   # Prebuilt nod packages available for: windows-x86_64, linux-x86_64, macos-arm64
-  aurora_get_target_arch(_target_arch)
   set(_has_package FALSE)
-  if (CMAKE_SYSTEM_NAME STREQUAL "Windows" AND _target_arch STREQUAL "AMD64")
+  if (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64)$")
     set(_has_package TRUE)
-  elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND _target_arch STREQUAL "x86_64")
+  elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64)$")
     set(_has_package TRUE)
-  elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND _target_arch STREQUAL "arm64")
+  elseif (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64)$")
     set(_has_package TRUE)
   endif ()
 
@@ -103,16 +101,13 @@ elseif (_aurora_nod_provider STREQUAL "system")
 elseif (_aurora_nod_provider STREQUAL "package")
   # ── Package: download prebuilt nod library ──
   if (NOT AURORA_NOD_PACKAGE_URL)
-    aurora_get_target_arch(_target_arch)
-    set(_nod_platform "")
-    if (CMAKE_SYSTEM_NAME STREQUAL "Windows" AND _target_arch STREQUAL "AMD64")
+    if (WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
       set(_nod_platform "windows-x86_64")
-    elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND _target_arch STREQUAL "x86_64")
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
       set(_nod_platform "linux-x86_64")
-    elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND _target_arch STREQUAL "arm64")
+    elseif (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
       set(_nod_platform "macos-arm64")
-    endif ()
-    if (NOT _nod_platform)
+    else ()
       message(FATAL_ERROR
         "AURORA_NOD_PROVIDER=package requires AURORA_NOD_PACKAGE_URL on this platform.\n"
         "Prebuilt packages: https://github.com/encounter/nod/releases")
@@ -125,7 +120,7 @@ elseif (_aurora_nod_provider STREQUAL "package")
   include(FetchContent)
   FetchContent_Declare(nod_prebuilt
     URL "${AURORA_NOD_PACKAGE_URL}"
-    DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(nod_prebuilt)

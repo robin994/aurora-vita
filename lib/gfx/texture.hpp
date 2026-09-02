@@ -3,24 +3,28 @@
 
 #include <utility>
 
-#include "types.hpp"
+#include "common.hpp"
 
 namespace aurora::gfx {
+constexpr uint32_t max_texture_mip_count(uint32_t width, uint32_t height) noexcept {
+  uint32_t dimension = std::max(width, height);
+  uint32_t count = 1;
+  while (dimension > 1) {
+    dimension >>= 1;
+    ++count;
+  }
+  return count;
+}
+
 struct TextureUpload {
   wgpu::TexelCopyBufferLayout layout;
   wgpu::TexelCopyTextureInfo tex;
   wgpu::Extent3D size;
-  wgpu::Buffer buffer;
 
   TextureUpload(wgpu::TexelCopyBufferLayout layout, wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size) noexcept
   : layout(layout), tex(std::move(tex)), size(size) {}
-  TextureUpload(wgpu::TexelCopyBufferLayout layout, wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size,
-                wgpu::Buffer buffer) noexcept
-  : layout(layout), tex(std::move(tex)), size(size), buffer(std::move(buffer)) {}
 };
-void queue_texture_upload(TextureUpload upload);
-void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage,
-                               wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size);
+extern std::vector<TextureUpload> g_textureUploads;
 
 struct TextureFormatInfo {
   uint8_t blockWidth;
@@ -30,7 +34,6 @@ struct TextureFormatInfo {
 };
 TextureFormatInfo format_info(wgpu::TextureFormat format) noexcept;
 uint64_t calc_texture_size(wgpu::TextureFormat format, uint32_t width, uint32_t height, uint32_t mips) noexcept;
-bool is_block_aligned(wgpu::TextureFormat format, uint32_t width, uint32_t height) noexcept;
 
 constexpr u32 InvalidTextureFormat = -1;
 struct TextureRef {
@@ -89,13 +92,19 @@ struct GXTexObj_ {
   GXTexWrapMode wrap_t() const noexcept { return static_cast<GXTexWrapMode>(get_bits(mode0, 2, 2)); }
   GXTexFilter min_filter() const noexcept {
     constexpr GXTexFilter kHwToGxFilter[8] = {
-        GX_NEAR, GX_NEAR_MIP_NEAR, GX_LIN_MIP_NEAR, GX_NEAR, GX_LINEAR, GX_NEAR_MIP_LIN, GX_LIN_MIP_LIN, GX_NEAR,
+        GX_NEAR, GX_NEAR_MIP_NEAR, GX_NEAR_MIP_LIN, GX_NEAR, GX_LINEAR, GX_LIN_MIP_NEAR, GX_LIN_MIP_LIN, GX_NEAR,
     };
     return kHwToGxFilter[get_bits(mode0, 3, 5)];
   }
   GXTexFilter mag_filter() const noexcept { return get_bits(mode0, 1, 4) != 0 ? GX_LINEAR : GX_NEAR; }
   GXBool has_mips() const noexcept { return (flags & 1u) != 0 ? GX_TRUE : GX_FALSE; }
-  u32 mip_count() const noexcept { return has_mips() ? std::max<u32>(static_cast<u32>(max_lod()) + 1, 1u) : 1; }
+  u32 mip_count() const noexcept {
+    if (!has_mips()) {
+      return 1;
+    }
+    const u32 requested = std::max<u32>(static_cast<u32>(max_lod()) + 1, 1u);
+    return std::min(requested, aurora::gfx::max_texture_mip_count(width(), height()));
+  }
   GXBool do_edge_lod() const noexcept { return get_bits(mode0, 1, 8) == 0 ? GX_TRUE : GX_FALSE; }
   float lod_bias() const noexcept { return static_cast<float>(static_cast<int8_t>(get_bits(mode0, 8, 9))) / 32.0f; }
   GXAnisotropy max_aniso() const noexcept { return static_cast<GXAnisotropy>(get_bits(mode0, 2, 19)); }
@@ -106,10 +115,6 @@ struct GXTexObj_ {
   // Custom flag for texture caching
   bool no_cache() const noexcept { return (flags & 0x80) != 0; }
   void set_no_cache(bool value) noexcept { flags = value ? flags | 0x80 : flags & ~0x80; }
-
-  // Hacky workaround for an instances where incremental IDs are used for GXCopyTex, but the copy tex was invalidated
-  // and the texture reference is still present.
-  bool has_data() const noexcept { return reinterpret_cast<uintptr_t>(data) >= 0x10000; }
 };
 static_assert(sizeof(GXTexObj_) <= sizeof(GXTexObj), "GXTexObj too small!");
 struct GXTlutObj_ {
@@ -132,11 +137,9 @@ namespace aurora::gfx {
 struct TextureBind {
   TextureHandle ref;
   GXTexObj_ texObj;
-  uint64_t generation = 0;
 
   TextureBind() noexcept = default;
-  TextureBind(const GXTexObj_& obj, TextureHandle handle, uint64_t bindGeneration = 0) noexcept
-  : ref(std::move(handle)), texObj(obj), generation(bindGeneration) {}
+  TextureBind(const GXTexObj_& obj, TextureHandle handle) noexcept : ref(std::move(handle)), texObj(obj) {}
   void reset() noexcept { ref.reset(); }
   [[nodiscard]] wgpu::SamplerDescriptor get_descriptor() const noexcept;
   operator bool() const noexcept { return ref.operator bool(); }

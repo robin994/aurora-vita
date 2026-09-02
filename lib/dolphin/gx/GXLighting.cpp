@@ -55,14 +55,14 @@ void GXInitLightSpot(GXLightObj* light_, float cutoff, GXSpotFn spotFn) {
     break;
   case GX_SP_SHARP: {
     const float d = (1.f - cr) * (1.f - cr);
-    a0 = cr * (cr - 2.f);
+    a0 = cr * (cr - 2.f) / d;
     a1 = 2.f / d;
     a2 = -1.f / d;
     break;
   }
   case GX_SP_RING1: {
     const float d = (1.f - cr) * (1.f - cr);
-    a0 = 4.f * cr / d;
+    a0 = -4.f * cr / d;
     a1 = 4.f * (1.f + cr) / d;
     a2 = -4.f / d;
     break;
@@ -280,8 +280,8 @@ void GXSetChanCtrl(GXChannelID id, bool lightingEnabled, GXColorSrc ambSrc, GXCo
   SET_REG_FIELD(0, reg, 4, 2, lightState & 0xF); // lights 0-3
   SET_REG_FIELD(0, reg, 1, 6, ambSrc);
   SET_REG_FIELD(0, reg, 2, 7, (attnFn == GX_AF_SPEC) ? GX_DF_NONE : diffFn);
-  SET_REG_FIELD(0, reg, 1, 9, (attnFn != GX_AF_NONE));   // attn enable
-  SET_REG_FIELD(0, reg, 1, 10, (attnFn != GX_AF_SPEC));  // attn select
+  SET_REG_FIELD(0, reg, 1, 9, (attnFn != GX_AF_NONE));   // raw XF attn bit 0
+  SET_REG_FIELD(0, reg, 1, 10, (attnFn != GX_AF_SPEC));  // raw XF attn bit 1
   SET_REG_FIELD(0, reg, 4, 11, (lightState >> 4) & 0xF); // lights 4-7
 
   // XF channel control registers: 0x100E-0x1011

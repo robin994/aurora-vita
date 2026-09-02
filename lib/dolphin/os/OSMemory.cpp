@@ -1,7 +1,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
-#include <Windows.h>
+#include <windows.h>
 #endif
 
 #include "fmt/base.h"
@@ -76,9 +76,9 @@ static void GuardGCMemory() {
   TryGuardRegion(0x00000000 + GetAllocationGranularity(), 0x017fffff, "MEM1 Physical");
   TryGuardRegion(0x80000000, 0x817fffff, "MEM1 Logical (cached)");
   TryGuardRegion(0xC0000000, 0xC17fffff, "MEM1 Logical (uncached)");
-  TryGuardRegion(0x10000000, 0x13FFFFFF, "MEM2 Physical");
-  TryGuardRegion(0x90000000, 0x93FFFFFF, "MEM2 Logical (cached)");
-  TryGuardRegion(0xD0000000, 0xD3FFFFFF, "MEM2 Logical (uncached)");
+  TryGuardRegion(0x10000000, 0x18000000, "MEM2 Physical");
+  TryGuardRegion(0x90000000, 0x98000000, "MEM2 Logical (cached)");
+  TryGuardRegion(0xD0000000, 0xD8000000, "MEM2 Logical (uncached)");
   TryGuardRegion(0x08000000, 0x08300000, "EFB Physical");
   TryGuardRegion(0xC8000000, 0xC8300000, "EFB Logical");
   TryGuardRegion(0x0D000000, 0x0D008000, "Hollywood HW registers Physical");

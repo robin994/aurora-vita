@@ -1,6 +1,6 @@
 #pragma once
 
-#include "types.hpp"
+#include "common.hpp"
 
 namespace aurora::gfx::tex_palette_conv {
 

@@ -3,13 +3,11 @@
 #include <string>
 
 namespace aurora {
+  void log_system_information();
 
-void log_system_information();
-
-#ifdef __APPLE__
-namespace detail {
-std::string system_version_string();
-} // namespace detail
+  namespace system_info {
+#if __APPLE__
+    std::string getSystemVersionString();
 #endif
-
-} // namespace aurora
+  }
+}

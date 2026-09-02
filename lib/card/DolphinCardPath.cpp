@@ -109,33 +109,7 @@ std::string ResolveDolphinCardPath(ECardSlot slot, const char* regionCode, bool 
     path += fmt::format("GC/MemoryCard{}.{}.raw", slot == ECardSlot::SlotA ? 'A' : 'B', regionCode);
   }
 
-  if (!std::filesystem::exists(path)) {
-    /* legacy case for older dolphin versions */
-    const char* home = getenv("HOME");
-    if (home == nullptr || home[0] != '/') {
-      return {};
-    }
-
-    path = home;
-#ifndef __APPLE__
-    if (isGciFolder) {
-      path += fmt::format("/.dolphin-emu/GC/{}/Card {}",
-                        regionCode, slot == ECardSlot::SlotA ? 'A' : 'B');
-    }else {
-      path += fmt::format("/.dolphin-emu/GC/MemoryCard{}.{}.raw",
-                        slot == ECardSlot::SlotA ? 'A' : 'B', regionCode);
-    }
-#else
-    if (isGciFolder) {
-      path += fmt::format("/Library/Application Support/Dolphin/GC/{}/Card {}", home, slot == ECardSlot::SlotA ? 'A' : 'B', regionCode);
-    }else {
-      path += fmt::format("/Library/Application Support/Dolphin/GC/MemoryCard{}.{}.raw", home, slot == ECardSlot::SlotA ? 'A' : 'B', regionCode);
-    }
-#endif
-    if (!std::filesystem::exists(path)) {
-      return {};
-    }
-  }
+  if (!std::filesystem::exists(path)) return {};
 
   return path;
 }

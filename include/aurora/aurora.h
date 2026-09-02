@@ -13,11 +13,6 @@ extern "C" {
 #endif
 
 typedef enum {
-  SAMPLER_BILINEAR,
-  SAMPLER_AREA,
-} AuroraSampler;
-
-typedef enum {
   BACKEND_AUTO,
   BACKEND_D3D11,
   BACKEND_D3D12,
@@ -36,6 +31,12 @@ typedef enum {
   LOG_ERROR,
   LOG_FATAL,
 } AuroraLogLevel;
+
+typedef enum {
+  AURORA_DISPLAY_MODE_WINDOWED,
+  AURORA_DISPLAY_MODE_BORDERLESS,
+  AURORA_DISPLAY_MODE_EXCLUSIVE,
+} AuroraDisplayMode;
 
 typedef struct {
   int32_t x;
@@ -76,23 +77,27 @@ typedef struct AuroraEvent AuroraEvent;
 typedef void (*AuroraLogCallback)(AuroraLogLevel level, const char* module, const char* message, unsigned int len);
 typedef void (*AuroraImGuiInitCallback)(const AuroraWindowSize* size);
 
-#define MEM1_DEFAULT_SIZE (24 * 1024 * 1024)
-#define ARAM_DEFAULT_SIZE (16 * 1024 * 1024)
-
 typedef struct {
   const char* appName;
   const char* userPath;
   const char* cachePath;
+  // Read-only application resources. Defaults to SDL_GetBasePath(), which is
+  // where release builds place initial_pipeline_cache.db.
   const char* resourcesPath;
   AuroraBackend desiredBackend;
   uint32_t msaa;
   uint16_t maxTextureAnisotropy;
-  bool vsync;
+  // No vsync knob exists: the swapchain is always configured for a
+  // non-blocking present mode (Immediate, else Mailbox). See best_present_mode.
   bool startFullscreen;
   bool allowJoystickBackgroundEvents;
   bool pauseOnFocusLost;
+  bool allowTextureReplacements;
   bool allowTextureDumps;
-  bool allowCpuAdapter;
+  bool disableCopyFilter;
+  // When false, Aurora centers the first window. When true, windowPosX/Y are restored verbatim,
+  // including negative coordinates on monitors left of or above the primary display.
+  bool hasWindowPosition;
   int32_t windowPosX;
   int32_t windowPosY;
   uint32_t windowWidth;
@@ -116,6 +121,10 @@ typedef struct {
    * This can be set to 0 to disable allocating this region.
    */
   uint32_t mem2Size;
+
+  // Optional directory for the portable GX pipeline database. When null, the
+  // database is stored in cachePath with Dawn's machine-specific cache.
+  const char* pipelineCachePath;
 } AuroraConfig;
 
 typedef struct {
@@ -131,17 +140,30 @@ void aurora_shutdown();
 const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
+typedef void (*AuroraFrameWorkerWaitCallback)();
+// Called from the producer thread at bounded intervals while Aurora waits for
+// the asynchronous frame worker. The callback must not enter Aurora.
+void aurora_set_frame_worker_wait_callback(AuroraFrameWorkerWaitCallback callback);
+void aurora_wait_for_frame_worker();
+bool aurora_wait_for_frame_worker_for(uint32_t timeoutMicros);
+// Absolute schedule for the next sealed frame, on steady_clock: baseNanos anchors the group and
+// intervalNanos is the period, so slot k of N+1 fires at base + k*interval/(N+1). Zeros clear it.
+void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos);
+// Reports whether the frame about to be sealed met its display boundary. Interpolation sizes its
+// slot group from this, backing off after misses. Only paced presents may report.
+void aurora_report_producer_paced(bool paced);
+void aurora_request_frame_capture(uint32_t frame, const char* outputPath);
+bool aurora_flush_efb_copies_to_ram();
+bool aurora_flush_efb_copy_to_ram(void* dest);
 
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);
-void aurora_set_resampler(AuroraSampler sampler);
-/** Sets the clock timescale. Default 1.0f. 0.0f is paused. Range 0.0f-16.0f. */
-void aurora_set_timescale(float scale);
+void aurora_set_display_mode(AuroraDisplayMode mode);
+AuroraDisplayMode aurora_get_display_mode();
 
 AuroraBackend aurora_get_backend();
 const AuroraBackend* aurora_get_available_backends(size_t* count);
-float aurora_get_timescale();
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,7 @@
 #include "gx.hpp"
 #include "__gx.h"
 
+#include "../../gx/command_processor.hpp"
 #include "../../gx/fifo.hpp"
 
 #include <cstring>
@@ -57,9 +58,32 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
     __GXSendFlushPrim();
   }
 
-  // Write display list contents to the FIFO
-  aurora::gx::fifo::write_data(data, nbytes);
-  aurora::gx::fifo::publish();
+  // Nested display-list calls add bytes instead of changing live renderer state.
+  if (aurora::gx::fifo::in_display_list()) {
+    aurora::gx::fifo::write_data(data, nbytes);
+    return;
+  }
+
+  // Decode the display list immediately while its borrowed resources are valid.
+  aurora::gx::fifo::drain();
+  aurora::gx::fifo::process(static_cast<const u8*>(data), nbytes, true);
 }
 
+void GXCallDisplayListLE(const void* data, u32 nbytes) {
+  // Flush any pending dirty state before calling
+  if (__gx->dirtyState != 0) {
+    __GXSetDirtyState();
+  }
+
+  // Flush pending primitives
+  if (*reinterpret_cast<u32*>(&__gx->vNum) != 0) {
+    __GXSendFlushPrim();
+  }
+
+  // Decode little-endian lists separately after finishing the normal FIFO work.
+  aurora::gx::fifo::drain();
+
+  // Process the display list through the command processor (little-endian)
+  aurora::gx::fifo::process(static_cast<const u8*>(data), nbytes, false);
+}
 }

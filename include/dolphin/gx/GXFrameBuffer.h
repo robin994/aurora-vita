@@ -41,12 +41,15 @@ void GXSetDispCopyGamma(GXGamma gamma);
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht);
 void GXSetDispCopyDst(u16 wd, u16 ht);
 void GXSetCopyClamp(GXFBClamp clamp);
+void GXSetDispCopyFrame2Field(u32 mode);
 u32 GXSetDispCopyYScale(f32 vscale);
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]);
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt);
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht);
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap);
 void GXCopyTex(void* dest, GXBool clear);
+void GXClearBoundingBox(void);
+void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom);
 u16 GXGetNumXfbLines(u16 efbHeight, f32 yScale);
 f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight);
 

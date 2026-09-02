@@ -1,12 +1,29 @@
 #include "gx.hpp"
 #include "__gx.h"
 
+#if defined(MKW_TARGET_VITA)
+#include "../../vita/gfx_frontend.hpp"
+#else
 #include "../../gfx/texture.hpp"
+#include "../../gfx/texture_replacement.hpp"
+#endif
 #include "dolphin/gx/GXAurora.h"
 
-#include <algorithm>
+#if !defined(MKW_TARGET_VITA)
+#include <absl/container/flat_hash_map.h>
+#endif
 
+#include <algorithm>
+#include <cstddef>
+#if defined(MKW_TARGET_VITA)
+#include <map>
+#include <tuple>
+#endif
+#include <utility>
+
+#if !defined(MKW_TARGET_VITA)
 #include "tracy/Tracy.hpp"
+#endif
 
 namespace {
 constexpr u8 GXTexMode0Ids[8] = {0x80, 0x81, 0x82, 0x83, 0xA0, 0xA1, 0xA2, 0xA3};
@@ -33,6 +50,86 @@ u32 next_tlut_obj_id() {
     FATAL("tlutObj ID overflow");
   }
   return sNextTlutObjId++;
+}
+
+  // Give each palette buffer a stable ID so its GPU cache can be reused.
+struct TlutIdentity {
+  const void* data = nullptr;
+  u32 format = 0;
+  u32 entries = 0;
+
+  bool operator==(const TlutIdentity& rhs) const noexcept {
+    return data == rhs.data && format == rhs.format && entries == rhs.entries;
+  }
+
+#if defined(MKW_TARGET_VITA)
+  bool operator<(const TlutIdentity& rhs) const noexcept {
+    return std::tie(data, format, entries) < std::tie(rhs.data, rhs.format, rhs.entries);
+  }
+#endif
+
+  template <typename H>
+  friend H AbslHashValue(H h, const TlutIdentity& key) {
+    return H::combine(std::move(h), key.data, key.format, key.entries);
+  }
+};
+
+struct TlutIdentityRecord {
+  u32 objId = 0;
+  u32 dataVersion = 0;
+  u64 digest = 0;
+};
+
+  // Limit cached palette IDs; evicted palettes are safely uploaded again.
+constexpr size_t MaxTlutIdentities = 4096;
+#if defined(MKW_TARGET_VITA)
+std::map<TlutIdentity, TlutIdentityRecord> sTlutIdentities;
+#else
+absl::flat_hash_map<TlutIdentity, TlutIdentityRecord> sTlutIdentities;
+#endif
+
+  // Use separate high-range versions when a palette points to a new buffer.
+u32 sNextRepointedTlutDataVersion = 0;
+
+u32 next_repointed_tlut_data_version() {
+  if (sNextRepointedTlutDataVersion == 0x7FFFFFFFu) {
+    sNextRepointedTlutDataVersion = 0;
+  }
+  return 0x80000000u | ++sNextRepointedTlutDataVersion;
+}
+
+std::pair<u32, u32> resolve_tlut_identity(const void* data, GXTlutFmt format, u16 entries) {
+  if (data == nullptr || entries == 0) {
+    return {next_tlut_obj_id(), 1};
+  }
+
+  const auto digest =
+      static_cast<u64>(aurora::xxh3_hash_s(data, static_cast<size_t>(entries) * sizeof(u16)));
+  if (sTlutIdentities.size() >= MaxTlutIdentities) {
+    sTlutIdentities.clear();
+  }
+
+  const TlutIdentity key{
+      .data = data,
+      .format = static_cast<u32>(format),
+      .entries = entries,
+  };
+  auto [it, inserted] = sTlutIdentities.try_emplace(key);
+  auto& record = it->second;
+  if (inserted) {
+    record.objId = next_tlut_obj_id();
+    record.dataVersion = 1;
+    record.digest = digest;
+  } else if (record.digest != digest) {
+    // Same buffer, different palette: invalidate everything keyed on this ID.
+    record.digest = digest;
+    if (record.dataVersion >= 0x7FFFFFFFu) {
+      record.dataVersion = 1;
+    } else {
+      ++record.dataVersion;
+    }
+  }
+  return {record.objId, record.dataVersion};
 }
 
 int __cntlzw(unsigned int val) {
@@ -78,7 +175,7 @@ void init_texobj_common(GXTexObj_& obj, const void* data, u16 width, u16 height,
 }
 
 void emit_loaded_texobj_metadata(const GXTexObj_& obj, GXTexMapID id) {
-  GX_WRITE_AURORA(GX_AURORA_LOAD_TEXOBJ);
+  GX_WRITE_AURORA(GX_LOAD_AURORA_TEXOBJ);
   GX_WRITE_U8(static_cast<u8>(id));
   GX_WRITE_U64(reinterpret_cast<u64>(obj.data));
   GX_WRITE_U32(obj.width());
@@ -91,7 +188,7 @@ void emit_loaded_texobj_metadata(const GXTexObj_& obj, GXTexMapID id) {
 }
 
 void emit_loaded_tlut_metadata(const GXTlutObj_& obj, u32 idx) {
-  GX_WRITE_AURORA(GX_AURORA_LOAD_TLUT);
+  GX_WRITE_AURORA(GX_LOAD_AURORA_TLUT);
   GX_WRITE_U8(static_cast<u8>(idx));
   GX_WRITE_U64(reinterpret_cast<u64>(obj.data));
   GX_WRITE_U32(static_cast<u32>(obj.format));
@@ -238,6 +335,22 @@ void GXLoadTexObj(GXTexObj* obj_, GXTexMapID id) {
 }
 
 u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
+  if (fmt == GX_TF_R8_PC || fmt == GX_TF_RGBA8_PC) {
+    const u32 bytesPerPixel = fmt == GX_TF_R8_PC ? 1u : 4u;
+    const u32 mipCount = mips ? static_cast<u32>(maxLod) + 1u : 1u;
+    u64 byteCount = 0;
+    for (u32 mip = 0; mip < mipCount; ++mip) {
+      byteCount += static_cast<u64>(width) * height * bytesPerPixel;
+      if (width == 1 && height == 1) {
+        break;
+      }
+      width = std::max<u16>(width / 2, 1);
+      height = std::max<u16>(height / 2, 1);
+    }
+    CHECK(byteCount <= UINT32_MAX, "GXGetTexBufferSize: linear PC texture is too large ({} bytes)", byteCount);
+    return static_cast<u32>(byteCount);
+  }
+
   s32 shiftX = 0;
   s32 shiftY = 0;
   switch (fmt) {
@@ -283,7 +396,8 @@ u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
   u32 bitSize = fmt == GX_TF_RGBA8 || fmt == GX_TF_Z24X8 ? 64 : 32;
   u32 bufLen = 0;
   if (mips) {
-    while (maxLod != 0) {
+    const u32 mipCount = static_cast<u32>(maxLod) + 1;
+    for (u32 mip = 0; mip < mipCount; ++mip) {
       const u32 tileX = ((width + (1 << shiftX) - 1) >> shiftX);
       const u32 tileY = ((height + (1 << shiftY) - 1) >> shiftY);
       bufLen += bitSize * tileX * tileY;
@@ -294,8 +408,7 @@ u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
 
       width = (width < 2) ? 1 : width / 2;
       height = (height < 2) ? 1 : height / 2;
-      --maxLod;
-    };
+    }
   } else {
     const u32 tileX = ((width + (1 << shiftX) - 1) >> shiftX);
     const u32 tileY = ((height + (1 << shiftY) - 1) >> shiftY);
@@ -311,17 +424,19 @@ void GXInitTlutObj(GXTlutObj* obj_, const void* data, GXTlutFmt format, u16 entr
   obj->data = data;
   obj->format = format;
   obj->numEntries = entries;
-  obj->tlutObjId = next_tlut_obj_id();
-  obj->tlutDataVersion = 1;
+  const auto [tlutObjId, tlutDataVersion] = resolve_tlut_identity(data, format, entries);
+  obj->tlutObjId = tlutObjId;
+  obj->tlutDataVersion = tlutDataVersion;
 
   SET_REG_FIELD(0, obj->tlut, 2, 10, format);
   SET_REG_FIELD(0, obj->loadTlut0, 8, 24, 0x64);
+  aurora::gfx::texture_replacement::register_tlut(obj_, data, format, entries);
 }
 
 void GXInitTlutObjData(GXTlutObj* obj_, const void* data) {
   auto* obj = reinterpret_cast<GXTlutObj_*>(obj_);
   obj->data = data;
-  ++obj->tlutDataVersion;
+  obj->tlutDataVersion = next_repointed_tlut_data_version();
 }
 
 void GXLoadTlut(const GXTlutObj* obj_, u32 idx) {
@@ -336,6 +451,7 @@ void GXLoadTlut(const GXTlutObj* obj_, u32 idx) {
   GX_WRITE_RAS_REG(loadTlut1);
   __GXFlushTextureState();
 
+  aurora::gfx::texture_replacement::load_tlut(obj_, idx);
   emit_loaded_tlut_metadata(*obj, idx);
 }
 
@@ -345,7 +461,7 @@ void GXLoadTlut(const GXTlutObj* obj_, u32 idx) {
 // TODO GXInvalidateTexRegion
 
 void GXInvalidateTexAll() {
-  // no-op?
+  GX_WRITE_AURORA(GX_LOAD_AURORA_INVALIDATE_TEX_ALL);
 }
 
 // TODO GXPreLoadEntireTexture

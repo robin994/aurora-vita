@@ -1,16 +1,12 @@
 #include "BackendBinding.hpp"
 
-#include <aurora/webgpu.hpp>
-
 #include <memory>
 
 #if !defined(SDL_PLATFORM_MACOS) && !defined(SDL_PLATFORM_IOS) && !defined(SDL_PLATFORM_TVOS)
 #include <SDL3/SDL_video.h>
 #endif
 
-namespace aurora::webgpu {
-namespace utils {
-
+namespace aurora::webgpu::utils {
 std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptorCocoa(SDL_Window* window);
 
 std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Window* window) {
@@ -47,21 +43,4 @@ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Wind
 #endif
 }
 
-} // namespace utils
-
-wgpu::Surface create_window_surface(const wgpu::Instance& instance, SDL_Window* window, const char* label) {
-  if (!instance || window == nullptr) {
-    return nullptr;
-  }
-  const auto chainedDescriptor = utils::SetupWindowAndGetSurfaceDescriptor(window);
-  if (!chainedDescriptor) {
-    return nullptr;
-  }
-  const wgpu::SurfaceDescriptor descriptor{
-      .nextInChain = chainedDescriptor.get(),
-      .label = label,
-  };
-  return instance.CreateSurface(&descriptor);
-}
-
-} // namespace aurora::webgpu
+} // namespace aurora::webgpu::utils

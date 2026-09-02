@@ -103,9 +103,8 @@ void GXSetTevColor(GXTevRegID id, GXColor color) {
   SET_REG_FIELD(0, regBG, 8, 24, 0xE1 + id * 2);
   GX_WRITE_RAS_REG(regRA);
   GX_WRITE_RAS_REG(regBG);
-  // NOTE: The SDK writes regBG three additional times here for hardware timing.
-  // We omit the redundant writes since they don't change the register value and
-  // our software command processor doesn't need the sync delay.
+  // NOTE: the SDK writes regBG three more times here for hardware timing. The value does not
+  // change and our software command processor needs no sync delay, so skip them.
   __gx->bpSent = 1;
 }
 
@@ -121,9 +120,8 @@ void GXSetTevColorS10(GXTevRegID id, GXColorS10 color) {
   SET_REG_FIELD(0, regBG, 8, 24, 0xE1 + id * 2);
   GX_WRITE_RAS_REG(regRA);
   GX_WRITE_RAS_REG(regBG);
-  // NOTE: The SDK writes regBG three additional times here for hardware timing.
-  // We omit the redundant writes since they don't change the register value and
-  // our software command processor doesn't need the sync delay.
+  // NOTE: the SDK writes regBG three more times here for hardware timing. The value does not
+  // change and our software command processor needs no sync delay, so skip them.
   __gx->bpSent = 1;
 }
 
@@ -148,7 +146,13 @@ void GXSetTevOrder(GXTevStageID id, GXTexCoordID tcid, GXTexMapID tmid, GXChanne
 
   u32 tmap = tmid & ~0x100u;
   tmap = (tmap >= GX_MAX_TEXMAP) ? GX_TEXMAP0 : tmap;
-  u32 tcoord = (tcid >= GX_MAX_TEXCOORD) ? GX_TEXCOORD0 : tcid;
+  const bool texCoordValid = tcid < GX_MAX_TEXCOORD;
+  if (texCoordValid) {
+    __gx->texmapValid |= 1u << id;
+  } else {
+    __gx->texmapValid &= ~(1u << id);
+  }
+  u32 tcoord = texCoordValid ? tcid : GX_TEXCOORD0;
   u32 chanHw = (cid == GX_COLOR_NULL) ? 7 : c2r[cid];
 
   if (id & 1) {
@@ -169,7 +173,25 @@ void GXSetTevOrder(GXTevStageID id, GXTexCoordID tcid, GXTexMapID tmid, GXChanne
 }
 
 void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
-  // TODO
+  u32 zfmt;
+  switch (fmt) {
+  case GX_TF_Z8:
+    zfmt = 0;
+    break;
+  case GX_TF_Z16:
+    zfmt = 1;
+    break;
+  case GX_TF_Z24X8:
+    zfmt = 2;
+    break;
+  default:
+    zfmt = 2;
+    break;
+  }
+
+  GX_WRITE_RAS_REG(0xF4000000u | (bias & 0x00FFFFFFu));
+  GX_WRITE_RAS_REG(0xF5000000u | ((static_cast<u32>(op) & 0x3u) << 2) | (zfmt & 0x3u));
+  __gx->bpSent = 1;
 }
 
 void GXSetNumTevStages(u8 num) {

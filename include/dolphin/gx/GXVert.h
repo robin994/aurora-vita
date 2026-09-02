@@ -46,7 +46,9 @@ void GXPosition1x16(u16 index);
 void GXPosition1x8(u8 index);
 
 void GXNormal3f32(f32 x, f32 y, f32 z);
+void GXNormal3u16(u16 x, u16 y, u16 z);
 void GXNormal3s16(s16 x, s16 y, s16 z);
+void GXNormal3u8(u8 x, u8 y, u8 z);
 void GXNormal3s8(s8 x, s8 y, s8 z);
 
 void GXNormal1x16(u16 index);
@@ -139,6 +141,7 @@ void GXParam1s32(const s32 x);
 void GXParam1f32(const f32 x);
 void GXParam3f32(const f32 x, const f32 y, const f32 z);
 void GXParam4f32(const f32 x, const f32 y, const f32 z, const f32 w);
+void GXMatrixIndex1u8(GXAttr attr, u8 index);
 
 #ifdef __cplusplus
 }

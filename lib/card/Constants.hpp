@@ -63,11 +63,6 @@ enum class ECardSize : uint16_t {
   Card2043Mb = 0x80
 };
 
-constexpr uint32_t BannerWidth = 96;
-constexpr uint32_t BannerHeight = 64;
-constexpr uint32_t IconWidth = 32;
-constexpr uint32_t IconHeight = 32;
-
 /**
  * @brief The EEncoding enum
  */

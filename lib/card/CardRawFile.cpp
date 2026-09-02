@@ -6,29 +6,12 @@
 #include <filesystem>
 #include <memory>
 
-#include "../io.hpp"
 #include "../internal.hpp"
 #include "SRAM.hpp"
 
 namespace aurora::card {
-namespace {
-Module Log("aurora::card");
 
-bool is_supported_card_size(const uint16_t sizeMb) {
-  switch (static_cast<ECardSize>(sizeMb)) {
-  case ECardSize::Card59Mb:
-  case ECardSize::Card123Mb:
-  case ECardSize::Card251Mb:
-  case ECardSize::Card507Mb:
-  case ECardSize::Card1019Mb:
-  case ECardSize::Card2043Mb:
-    return true;
-  }
-  return false;
-}
-
-void null_file_access() { fprintf(stderr, "Attempted to access null file\n"); }
-} // namespace
+static void NullFileAccess() { fprintf(stderr, "Attempted to access null file\n"); }
 
 void CardRawFile::CardHeader::_swapEndian() {
   m_formatTime = bswap(m_formatTime);
@@ -117,44 +100,6 @@ ECardResult CardRawFile::_pumpOpen() {
   return ECardResult::READY;
 }
 
-void CardRawFile::_repair_card() {
-  // The old formatter wrote one block at the data-block count offset, leaving the image four blocks short.
-  constexpr uint32_t MissingBlocks = 4;
-
-  const uint16_t sizeMb = bswap(m_ch.m_sizeMb);
-  if (!is_supported_card_size(sizeMb))
-    return;
-
-  const uint32_t expectedBlocks = static_cast<uint32_t>(sizeMb) * MbitToBlocks;
-  const uintmax_t expectedSize = static_cast<uintmax_t>(expectedBlocks) * BlockSize;
-  const uintmax_t legacySize = expectedSize - MissingBlocks * BlockSize;
-  if (m_fileHandle.fileSize() != legacySize)
-    return;
-
-  if (_pumpOpen() != ECardResult::READY || getError() != ECardResult::READY) {
-    Log.warn("Not repairing legacy raw card image with invalid metadata: {}", io::fs_path_to_string(m_filename));
-    return;
-  }
-
-  const BlockAllocationTable& bat = m_bats[m_currentBat];
-  for (uint32_t block = expectedBlocks - MissingBlocks; block < expectedBlocks; ++block) {
-    if (bat.getNextBlock(static_cast<uint16_t>(block)) != 0) {
-      Log.warn("Not repairing legacy raw card image because missing block {} is allocated: {}", block,
-               io::fs_path_to_string(m_filename));
-      return;
-    }
-  }
-
-  std::array<uint8_t, MissingBlocks * BlockSize> missingBlocks;
-  missingBlocks.fill(0xFF);
-  if (!m_fileHandle.fileWrite(missingBlocks.data(), missingBlocks.size(), legacySize)) {
-    Log.error("Failed to repair legacy raw card image: {}", io::fs_path_to_string(m_filename));
-    return;
-  }
-
-  Log.info("Repaired legacy raw card image: {}", io::fs_path_to_string(m_filename));
-}
-
 void CardRawFile::InitCard(const char* game, const char* maker) {
   m_ch.raw.fill(0xFF);
 
@@ -226,7 +171,7 @@ void CardRawFile::_updateChecksum() {
 
 File* CardRawFile::_fileFromHandle(const FileHandle& fh) const {
   if (!fh) {
-    null_file_access();
+    NullFileAccess();
     return nullptr;
   }
   return const_cast<Directory&>(m_dirs[m_currentDir]).getFile(fh.idx);
@@ -285,7 +230,7 @@ FileHandle CardRawFile::firstFile() {
 
 FileHandle CardRawFile::nextFile(const FileHandle& cur) {
   if (!cur) {
-    null_file_access();
+    NullFileAccess();
     return {};
   }
 
@@ -320,7 +265,7 @@ void CardRawFile::_deleteFile(File& f, BlockAllocationTable& bat) {
 
 void CardRawFile::deleteFile(const FileHandle& fh) {
   if (!fh) {
-    null_file_access();
+    NullFileAccess();
     return;
   }
   Directory dir = m_dirs[m_currentDir];
@@ -397,7 +342,7 @@ ECardResult CardRawFile::fileWrite(FileHandle& fh, const void* buf, size_t size)
     return openRes;
 
   if (!fh) {
-    null_file_access();
+    NullFileAccess();
     return ECardResult::NOFILE;
   }
   File* file = m_dirs[m_currentDir].getFile(fh.idx);
@@ -446,7 +391,7 @@ ECardResult CardRawFile::fileRead(FileHandle& fh, void* dst, size_t size) {
     return openRes;
 
   if (!fh) {
-    null_file_access();
+    NullFileAccess();
     return ECardResult::NOFILE;
   }
   File* file = m_dirs[m_currentDir].getFile(fh.idx);
@@ -490,7 +435,7 @@ ECardResult CardRawFile::fileRead(FileHandle& fh, void* dst, size_t size) {
 
 void CardRawFile::seek(FileHandle& fh, int32_t pos, SeekOrigin whence) {
   if (!fh) {
-    null_file_access();
+    NullFileAccess();
     return;
   }
   File* file = m_dirs[m_currentDir].getFile(fh.idx);
@@ -571,7 +516,7 @@ bool CardRawFile::canMove(const FileHandle& fh) const {
 
 ECardResult CardRawFile::getStatus(const FileHandle& fh, CardStat& statOut) const {
   if (!fh) {
-    null_file_access();
+    NullFileAccess();
     return ECardResult::NOFILE;
   }
   return getStatus(fh.idx, statOut);
@@ -589,8 +534,8 @@ ECardResult CardRawFile::getStatus(uint32_t fileNo, CardStat& statOut) const {
   std::strncpy(statOut.x0_fileName, file->m_filename, 32);
   statOut.x20_length = file->m_blockCount * BlockSize;
   statOut.x24_time = file->m_modifiedTime;
-  memmove(statOut.x28_gameName.data(), file->m_game, statOut.x28_gameName.size());
-  memmove(statOut.x2c_company.data(), file->m_maker, statOut.x2c_company.size());
+  memmove(statOut.x28_gameName.data(), file->m_game, 4);
+  memmove(statOut.x2c_company.data(), file->m_maker, 4);
 
   statOut.x2e_bannerFormat = file->m_bannerFlags;
   statOut.x30_iconAddr = file->m_iconAddress;
@@ -632,7 +577,7 @@ ECardResult CardRawFile::getStatus(uint32_t fileNo, CardStat& statOut) const {
 
 ECardResult CardRawFile::setStatus(const FileHandle& fh, const CardStat& stat) {
   if (!fh) {
-    null_file_access();
+    NullFileAccess();
     return ECardResult::NOFILE;
   }
   return setStatus(fh.idx, stat);
@@ -657,67 +602,6 @@ ECardResult CardRawFile::setStatus(uint32_t fileNo, const CardStat& stat) {
   _updateDirAndBat(dir, m_bats[m_currentBat]);
   return ECardResult::READY;
 }
-
-#if 0 // TODO: Async-friendly implementations
-bool Card::copyFileTo(FileHandle& fh, Card& dest)
-{
-    if (!canCopy(fh))
-        return false;
-
-    /* Do a self test to avoid adding a file to itself */
-    if (this == &dest)
-        return false;
-
-    /* Now to add fh */
-    File* toCopy = _fileFromHandle(fh);
-    if (!toCopy)
-        return false;
-
-    /* Check to make sure dest does not already contain fh */
-    FileHandle tmpHandle;
-    dest.openFile(toCopy->m_filename, tmpHandle);
-    if (tmpHandle)
-        return false;
-
-    /* Try to allocate a new file */
-    dest.createFile(toCopy->m_filename, toCopy->m_blockCount * BlockSize, tmpHandle);
-    if (!tmpHandle)
-        return false;
-
-    /* Now copy the file information over */
-    File* copyDest = dest._fileFromHandle(tmpHandle);
-    File copyTmp = *copyDest;
-    *copyDest = *toCopy;
-    copyDest->m_firstBlock = copyTmp.m_firstBlock;
-    copyDest->m_copyCounter++;
-
-    /* Finally lets get the data copied over! */
-    uint32_t len = toCopy->m_blockCount * BlockSize;
-    uint32_t oldPos = tell(fh);
-    seek(fh, 0, SeekOrigin::Begin);
-    while (len > 0)
-    {
-        uint8_t tmp[BlockSize];
-        read(fh, tmp, BlockSize);
-        dest.write(tmpHandle, tmp, BlockSize);
-        len -= BlockSize;
-    }
-
-    seek(fh, oldPos, SeekOrigin::Begin);
-    return true;
-}
-
-bool Card::moveFileTo(FileHandle& fh, Card& dest)
-{
-    if (copyFileTo(fh, dest) && canMove(fh))
-    {
-        deleteFile(fh);
-        return true;
-    }
-
-    return false;
-}
-#endif
 
 void CardRawFile::setCurrentGame(const char* game) {
   if (game == nullptr) {
@@ -840,7 +724,7 @@ void CardRawFile::format(ECardSlot id, ECardSize size, EEncoding encoding) {
     std::unique_ptr<uint8_t[]> dummyBlock;
     dummyBlock.reset(new uint8_t[BlockSize * blockCount]);
     memset(dummyBlock.get(), 0xFF, BlockSize * blockCount);
-    m_fileHandle.fileWrite(dummyBlock.get(), BlockSize * blockCount, BlockSize * FSTBlocks);
+    m_fileHandle.fileWrite(dummyBlock.get(), BlockSize, BlockSize * blockCount);
     m_dirty = false;
   }
 }
@@ -894,7 +778,6 @@ bool CardRawFile::open(const std::filesystem::path& filepath) {
       return false;
     if (!m_fileHandle.fileRead(m_bats[1].raw.data(), BlockSize, BlockSize * 4))
       return false;
-    _repair_card();
     return true;
   }
   return false;

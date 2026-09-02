@@ -4,16 +4,40 @@
 #include "aurora/math.hpp"
 #include "vi_internal.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <optional>
 
 namespace aurora::vi {
 std::optional<GXRenderModeObj> g_renderMode;
+namespace {
+std::atomic<float> g_presentAspectCorrection{1.f};
+
+float calculate_present_aspect_correction(const GXRenderModeObj& rm) noexcept {
+  if (rm.viWidth == 0 || rm.viHeight == 0) {
+    return 1.f;
+  }
+
+  // Dolphin derives the displayed aspect from the VI active region instead of assuming an exact
+  // 4:3 or 16:9 signal. These are its BT.601 active sample and line counts.
+  const auto format = (static_cast<uint32_t>(rm.viTVmode) >> 2) & 0x7u;
+  const bool pal = format == VI_PAL || format == VI_DEBUG_PAL;
+  const float nominalActiveWidth =
+      pal ? 864.f * (52.f / 64.f) : 858.f * (52.655555f / 63.555555f);
+  const float nominalActiveHeight = pal ? 576.f : 486.f;
+  const float horizontalFill = static_cast<float>(rm.viWidth) / nominalActiveWidth;
+  const float verticalFill = static_cast<float>(rm.viHeight) / nominalActiveHeight;
+  return horizontalFill / verticalFill;
+}
+} // namespace
 
 Vec2<uint32_t> render_mode_size() noexcept {
   if (!g_renderMode) {
-    return {640, 480};
+    return {640, 528};
   }
-  return {g_renderMode->fbWidth, g_renderMode->efbHeight};
+  // GX has a fixed 640x528 EFB workspace. Games can configure a narrower visible framebuffer, but
+  // effects such as MKW's DOF use the remaining EFB area as scratch.
+  return {std::max<uint32_t>(g_renderMode->fbWidth, 640), std::max<uint32_t>(g_renderMode->efbHeight, 528)};
 }
 
 void configure(const GXRenderModeObj* rm) noexcept {
@@ -22,6 +46,10 @@ void configure(const GXRenderModeObj* rm) noexcept {
     g_renderMode.reset();
   } else {
     g_renderMode = *rm;
+    g_presentAspectCorrection.store(calculate_present_aspect_correction(*rm), std::memory_order_release);
+  }
+  if (rm == nullptr) {
+    g_presentAspectCorrection.store(1.f, std::memory_order_release);
   }
   if (render_mode_size() != oldSize) {
     window::request_frame_buffer_resize();
@@ -30,6 +58,17 @@ void configure(const GXRenderModeObj* rm) noexcept {
 
 Vec2<uint32_t> configured_fb_size() noexcept {
   return render_mode_size();
+}
+
+Vec2<uint32_t> visible_fb_size() noexcept {
+  if (!g_renderMode) {
+    return {640, 528};
+  }
+  return {g_renderMode->fbWidth, g_renderMode->efbHeight};
+}
+
+float present_aspect_correction() noexcept {
+  return g_presentAspectCorrection.load(std::memory_order_acquire);
 }
 } // namespace aurora::vi
 
@@ -52,4 +91,6 @@ void VISetWindowSize(uint32_t width, uint32_t height) { aurora::window::set_wind
 void VISetWindowPosition(uint32_t x, uint32_t y) { aurora::window::set_window_position(x, y); }
 void VICenterWindow() { aurora::window::center_window(); }
 void VISetFrameBufferScale(float scale) { aurora::window::set_frame_buffer_scale(scale); }
+void VILockAspectRatio(int width, int height) { aurora::window::lock_present_aspect_ratio(width, height); }
+void VIUnlockAspectRatio() { aurora::window::unlock_present_aspect_ratio(); }
 }

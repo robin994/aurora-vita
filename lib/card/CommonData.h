@@ -52,23 +52,8 @@ struct CardStat {
   uint32_t x64_offsetIconTlut;
   uint32_t x68_offsetData;
 
-  uint32_t GetFileLength() const { return x20_length; }
-  uint32_t GetTime() const { return x24_time; }
   EImageFormat GetBannerFormat() const { return EImageFormat(x2e_bannerFormat & 0x3); }
-  void SetBannerFormat(EImageFormat fmt) { x2e_bannerFormat = (x2e_bannerFormat & ~0x3) | uint8_t(fmt); }
   EImageFormat GetIconFormat(int idx) const { return EImageFormat((x34_iconFormat >> (idx * 2)) & 0x3); }
-  void SetIconFormat(EImageFormat fmt, int idx) {
-    x34_iconFormat &= ~(0x3 << (idx * 2));
-    x34_iconFormat |= uint16_t(fmt) << (idx * 2);
-  }
-  void SetIconSpeed(EAnimationSpeed sp, int idx) {
-    x36_iconSpeed &= ~(0x3 << (idx * 2));
-    x36_iconSpeed |= uint16_t(sp) << (idx * 2);
-  }
-  uint32_t GetIconAddr() const { return x30_iconAddr; }
-  void SetIconAddr(uint32_t addr) { x30_iconAddr = addr; }
-  uint32_t GetCommentAddr() const { return x38_commentAddr; }
-  void SetCommentAddr(uint32_t addr) { x38_commentAddr = addr; }
 };
 
 }

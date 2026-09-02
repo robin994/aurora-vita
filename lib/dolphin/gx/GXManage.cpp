@@ -2,7 +2,6 @@
 #include "__gx.h"
 
 #include "../../gx/fifo.hpp"
-#include "dolphin/gd/GDGeometry.h"
 
 #include <cstring>
 
@@ -10,9 +9,10 @@
 static __GXData_struct sGXData;
 __GXData_struct* __gx = &sGXData;
 static GXFifoObj sFifoObj;
-constexpr u32 kDrawDoneCommand = static_cast<u32>(GX_BP_REG_DRAWDONE) << 24 | 2;
 
 extern "C" {
+static GXDrawDoneCallback DrawDoneCB = nullptr;
+
 GXFifoObj* GXInit(void* base, u32 size) {
   GXRenderModeObj* rmode;
   f32 identity_mtx[3][4];
@@ -29,6 +29,7 @@ GXFifoObj* GXInit(void* base, u32 size) {
   __gx->vNum = 0;
 
   // Initialize FIFO subsystem
+  aurora::gx::fifo::init();
   GXInitFifoBase(&sFifoObj, base, size);
   GXSetCPUFifo(&sFifoObj);
   GXSetGPFifo(&sFifoObj);
@@ -70,7 +71,6 @@ GXFifoObj* GXInit(void* base, u32 size) {
   SET_REG_FIELD(0, __gx->cmode1, 8, 24, 0x42);
   SET_REG_FIELD(0, __gx->zmode, 8, 24, 0x40);
   SET_REG_FIELD(0, __gx->peCtrl, 8, 24, 0x43);
-  SET_REG_FIELD(0, __gx->cpTex, 2, 7, 0);
   SET_REG_FIELD(0, __gx->IndTexScale0, 8, 24, 0x25);
   SET_REG_FIELD(0, __gx->IndTexScale1, 8, 24, 0x26);
 
@@ -262,18 +262,22 @@ GXFifoObj* GXInit(void* base, u32 size) {
 }
 
 void GXDrawDone() {
-  GXFlush();
-  GX_WRITE_RAS_REG(kDrawDoneCommand);
   aurora::gx::fifo::drain();
+  if (DrawDoneCB != nullptr)
+    DrawDoneCB();
 }
 
 void GXSetDrawDone() {
-  GXFlush();
-  GX_WRITE_RAS_REG(kDrawDoneCommand);
-  aurora::gx::fifo::publish();
+  aurora::gx::fifo::drain();
+  if (DrawDoneCB != nullptr)
+    DrawDoneCB();
 }
 
-GXDrawDoneCallback GXSetDrawDoneCallback(GXDrawDoneCallback cb) { return aurora::gx::fifo::set_draw_done_callback(cb); }
+GXDrawDoneCallback GXSetDrawDoneCallback(GXDrawDoneCallback cb) {
+  GXDrawDoneCallback old = DrawDoneCB;
+  DrawDoneCB = cb;
+  return old;
+}
 
 void GXFlush() {
   if (__gx->dirtyState) {
@@ -318,9 +322,8 @@ void __GXSetGenMode() {
 }
 
 void __GXSendFlushPrim() {
-  // Originally, this writes a dummy triangle strip draw to force the GP
-  // to process the FIFO up to this point, flushing pending BP register changes.
-  // We can skip the FIFO writes and just clear the bpSent flag.
+  // Originally a dummy triangle strip to push the GP through the FIFO and flush pending BP
+  // register changes. We can skip the FIFO writes and just clear the bpSent flag.
 
   // GX_WRITE_U8(0x98);
   // GX_WRITE_U16(__gx->vNum);
@@ -417,9 +420,8 @@ static void __SetSURegs(u32 tmap, u32 tcoord) {
 }
 
 void __GXSetSUTexRegs() {
-  // Write SU texture size/bias registers for each active TEV stage and indirect stage.
-  // Skip coords that have manual scale enabled (tcsManEnab bit set).
-  // If all coords are manual (0xFF), skip entirely.
+  // SU texture size/bias registers for each active TEV and indirect stage, skipping coords with
+  // manual scale (tcsManEnab). If all coords are manual (0xFF), skip entirely.
   if (__gx->tcsManEnab == 0xFF) {
     return;
   }
@@ -464,7 +466,7 @@ void __GXSetSUTexRegs() {
     } else {
       coord = GET_REG_FIELD(*ptref, 3, 3);
     }
-    if (tmap != 0xFF && !(__gx->tcsManEnab & (1 << coord))) {
+    if (tmap != 0xFF && !(__gx->tcsManEnab & (1 << coord)) && (__gx->texmapValid & (1u << i))) {
       __SetSURegs(tmap, coord);
     }
   }

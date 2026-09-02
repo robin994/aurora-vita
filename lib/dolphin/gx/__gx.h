@@ -72,7 +72,7 @@
 
 #define GX_WRITE_AURORA(cmd)     \
   do {                           \
-    GX_WRITE_U8(GX_AURORA);      \
+    GX_WRITE_U8(GX_LOAD_AURORA); \
     GX_WRITE_U16(cmd);           \
   } while (0)
 
@@ -83,7 +83,7 @@
   GX_WRITE_U32(value);                \
   } while (0)
 
-// Shadow register struct
+// This shadow register struct contains the GX state Aurora needs on PC.
 struct __GXData_struct {
   u16 vNum;         // vertex count for flush prim
   u16 bpSent;       // BP register was sent (need flush prim before next draw)
@@ -125,13 +125,13 @@ struct __GXData_struct {
   u32 cmode1;       // destination alpha register
   u32 zmode;        // Z-buffer mode register
   u32 peCtrl;       // pixel engine control
-  u32 cpTex;        // copy texture trigger register
 
   u32 genMode;      // general mode (numTexGens, numChans, numTevStages, cullMode, numIndStages)
 
   u32 tImage0[8];   // texture image 0 registers
   u32 tMode0[8];    // texture mode 0 registers
   u32 texmapId[16]; // texture map ID tracking
+  u32 texmapValid;  // bitmask of TEV stages with a valid texture coordinate
 
   GXAttrType nrmType; // normal attribute type
   u8 hasNrms;       // has normal vectors

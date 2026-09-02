@@ -5,6 +5,9 @@
 
 Aurora is a source-level GameCube & Wii compatibility layer intended for use with game decompilation projects.
 
+> **Aurora Vita is an experimental project made for fun and research. It is not a serious, production-ready, or
+> officially supported port. Expect incomplete functionality, rough edges, and breaking changes.**
+
 Originally developed for use in [Metaforce](https://github.com/AxioDL/metaforce), a Metroid Prime reverse engineering project.
 It now powers several completed source ports, including [Dusklight](https://github.com/TwilitRealm/dusklight).
 
@@ -28,7 +31,6 @@ It now powers several completed source ports, including [Dusklight](https://gith
 - CARD compatibility layer
   - Full compatibility with Dolphin `.gci` and `.raw` for game saves
 - [Dear ImGui](https://github.com/ocornut/imgui) built-in for simple debug UIs
-- [RmlUi](https://github.com/mikke89/RmlUi) built-in for full-fledged HTML/CSS-based UIs
 
 ### Graphics
 

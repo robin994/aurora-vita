@@ -1,6 +1,6 @@
 #pragma once
 
-#include "types.hpp"
+#include "common.hpp"
 
 #include <functional>
 
@@ -12,17 +12,7 @@ namespace aurora::gx {
 struct PipelineConfig;
 } // namespace aurora::gx
 
-namespace aurora::rmlui {
-struct PipelineConfig;
-} // namespace aurora::rmlui
-
 namespace aurora::gfx {
-
-enum class ShaderType : uint8_t {
-  Clear = 0,
-  GX = 1,
-  Rml = 2,
-};
 
 using NewPipelineCallback = std::function<wgpu::RenderPipeline()>;
 
@@ -30,10 +20,17 @@ void initialize_pipeline_cache();
 void shutdown_pipeline_cache();
 void begin_pipeline_frame();
 void end_pipeline_frame();
+void set_skip_unready_pipelines(bool enabled) noexcept;
+bool skip_unready_pipelines() noexcept;
+uint32_t queued_pipeline_count() noexcept;
 
 template <typename Config>
 PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCallback&& cb);
 
-bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline);
+bool wait_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline);
+bool try_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline);
+// Waits indefinitely for a draw about to be committed to a persistent texture with no re-issue
+// path. Separate from wait_pipeline so skip-unready mode never becomes blocking for other passes.
+bool wait_pipeline_for_persistent_pass(PipelineRef ref, wgpu::RenderPipeline& pipeline);
 
 } // namespace aurora::gfx

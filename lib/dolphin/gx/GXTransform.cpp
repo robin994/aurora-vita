@@ -64,14 +64,6 @@ void GXLoadPosMtxImm(const void* mtx_, u32 id) {
   }
 }
 
-void GXLoadPosMtxIndx(u16 mtxIndx, u32 id) {
-  CHECK(id >= GX_PNMTX0 && id <= GX_PNMTX9, "invalid pn mtx {}", static_cast<int>(id));
-
-  GX_WRITE_U8(GX_LOAD_INDX_A);
-  GX_WRITE_U16(mtxIndx);
-  GX_WRITE_U16((11u << 12) | id * 4);
-}
-
 void GXLoadNrmMtxImm(const void* mtx_, u32 id) {
   CHECK(id >= GX_PNMTX0 && id <= GX_PNMTX9, "invalid pn mtx {}", static_cast<int>(id));
   const auto* mtx = reinterpret_cast<const f32*>(mtx_);
@@ -192,8 +184,33 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
   *sz = vp[5] + (wc * (zc * (vp[5] - vp[4])));
 }
 
+// TODO GXLoadPosMtxIndx
 // TODO GXLoadNrmMtxImm3x3
 // TODO GXLoadNrmMtxIndx3x3
 // TODO GXLoadTexMtxIndx
-// TODO GXSetZScaleOffset
+void GXSetZScaleOffset(f32 scale, f32 offset) {
+  g_gxState.zScale = scale;
+  g_gxState.zOffset = offset;
+  constexpr f32 z24Scale = 16777215.0f;
+  const f32 sz = z24Scale * offset;
+  const f32 oz = 1.0f + z24Scale * scale;
+
+  GX_WRITE_U8(0x10);
+  GX_WRITE_U32(0x101c);
+  GX_WRITE_F32(sz);
+  GX_WRITE_U8(0x10);
+  GX_WRITE_U32(0x101f);
+  GX_WRITE_F32(oz);
+  __gx->bpSent = 0;
+}
+
+void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
+  g_gxState.scissorOffsetX = x_off;
+  g_gxState.scissorOffsetY = y_off;
+
+  const u32 reg = 0x59000000u | (((static_cast<u32>(y_off + 0x156) * 0x200u) & 0x000ffc00u)) |
+                  ((static_cast<u32>(x_off + 0x156) >> 1) & 0x000003ffu);
+  GX_WRITE_RAS_REG(reg);
+  __gx->bpSent = 0;
+}
 }
