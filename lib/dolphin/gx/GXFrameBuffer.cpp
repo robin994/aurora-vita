@@ -434,11 +434,14 @@ void GXCopyDisp(void* dest, GXBool clear) {
   // is therefore an ordering boundary rather than a second GPU texture copy.
   aurora::vita::draw_sink().flush();
   if (clear) {
-    const aurora::vita::gfx::Color color{
+    // GameCube copies the completed EFB to XFB first and clears the EFB only
+    // for the next frame. On Vita the presentable backbuffer is also our EFB;
+    // clearing it here erases the just-rendered frame before vglSwapBuffers().
+    // Defer the clear until begin_frame(), after the swap selected a new backbuffer.
+    aurora::vita::schedule_display_clear(
         g_gxState.clearColor[0], g_gxState.clearColor[1],
-        g_gxState.clearColor[2], g_gxState.clearColor[3]};
-    aurora::vita::renderer().clear_current(
-        color, aurora::gx::clear_depth_value(),
+        g_gxState.clearColor[2], g_gxState.clearColor[3],
+        aurora::gx::clear_depth_value(),
         g_gxState.colorUpdate, g_gxState.alphaUpdate, g_gxState.depthUpdate);
   }
   return;

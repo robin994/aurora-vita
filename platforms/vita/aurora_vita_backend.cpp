@@ -26,6 +26,13 @@ integration::FeatureCoverage g_coverage;
 std::unique_ptr<integration::FrameTrace> g_trace;
 InitFailure g_initFailure=InitFailure::None;
 char g_initFailureDetail[384]{};
+struct PendingDisplayClear {
+  bool pending=false;
+  gfx::Color color{0.f,0.f,0.f,1.f};
+  float depth=0.f;
+  bool clearRgb=false,clearAlpha=false,clearDepth=false;
+};
+PendingDisplayClear g_pendingDisplayClear{};
 
 uint64_t now_us() noexcept {
 #if defined(__vita__)
@@ -179,8 +186,24 @@ bool begin_frame() noexcept {
   if(!g_initialized) return false;
   g_start=now_us();
   if (g_config.diagnostics) g_telemetry.begin_frame(g_frame);
-  g_renderer->begin_frame(); g_drawSink->begin_frame(g_frame);
+  g_renderer->begin_frame();
+  if (g_pendingDisplayClear.pending) {
+    g_renderer->clear_current(g_pendingDisplayClear.color,g_pendingDisplayClear.depth,
+                              g_pendingDisplayClear.clearRgb,g_pendingDisplayClear.clearAlpha,
+                              g_pendingDisplayClear.clearDepth);
+    g_pendingDisplayClear.pending=false;
+  }
+  g_drawSink->begin_frame(g_frame);
   return true;
+}
+
+void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept {
+  g_pendingDisplayClear.pending=true;
+  g_pendingDisplayClear.color={r,g,b,a};
+  g_pendingDisplayClear.depth=depth;
+  g_pendingDisplayClear.clearRgb=clearRgb;
+  g_pendingDisplayClear.clearAlpha=clearAlpha;
+  g_pendingDisplayClear.clearDepth=clearDepth;
 }
 
 void end_frame() noexcept {

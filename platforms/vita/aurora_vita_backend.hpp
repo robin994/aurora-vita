@@ -51,6 +51,7 @@ bool initialize(const BackendConfig& config={}) noexcept;
 InitFailure last_init_failure() noexcept;
 const char* last_init_failure_detail() noexcept;
 bool begin_frame() noexcept;void end_frame() noexcept;void shutdown() noexcept;
+void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
 uint64_t frame_index() noexcept;uint64_t last_frame_time_us() noexcept;uint32_t width() noexcept;uint32_t height() noexcept;
 gfx::Renderer& renderer() noexcept;
 gxbridge::DrawSink& draw_sink() noexcept;
