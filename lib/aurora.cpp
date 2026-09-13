@@ -1,4 +1,5 @@
 #include <aurora/aurora.h>
+#include <aurora/gfx.h>
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
@@ -19,7 +20,15 @@
 #include <magic_enum.hpp>
 
 #include "system_info.hpp"
+#if defined(AURORA_VITA_SDL3_NATIVE)
+#define ZoneScoped
+#define ZoneScopedN(...)
+#define TracyPlotConfig(...)
+#define TracyPlot(...)
+#define FrameMarkNamed(...)
+#else
 #include "tracy/Tracy.hpp"
+#endif
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -460,6 +469,10 @@ bool write_bmp(const char* path, const uint8_t* pixels, uint32_t width, uint32_t
   }
   return out.good();
 }
+
+#if !defined(AURORA_ENABLE_GX)
+std::recursive_mutex g_rendererGpuMutex;
+#endif
 
 #ifdef AURORA_ENABLE_GX
 // GPU
@@ -1751,8 +1764,10 @@ void end_frame() noexcept {
   // Seal all current GX work on the CPU while the renderer is known ready.
   // Later FIFO writes belong exclusively to the next frame.
   {
+#ifdef AURORA_ENABLE_GX
     std::lock_guard gpuLock(g_rendererGpuMutex);
     gx::fifo::drain();
+#endif
   }
   {
     std::lock_guard lock(g_frameWorker.mutex);
@@ -1808,9 +1823,12 @@ void aurora_report_producer_paced(bool paced) {
 #endif
 }
 void aurora_get_frame_interpolation_diagnostics(AuroraFrameInterpolationDiagnostics* diagnostics) {
-  if (diagnostics != nullptr) {
-    aurora::gx::get_frame_interpolation_diagnostics(*diagnostics);
-  }
+  if (diagnostics == nullptr) return;
+#ifdef AURORA_ENABLE_GX
+  aurora::gx::get_frame_interpolation_diagnostics(*diagnostics);
+#else
+  *diagnostics = {};
+#endif
 }
 
 void aurora_get_present_timing(AuroraPresentTiming* timing) {

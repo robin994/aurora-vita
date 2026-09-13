@@ -15,7 +15,12 @@ if (VITA AND AURORA_VITA_SDL3_NATIVE)
 endif ()
 target_include_directories(aurora_core PUBLIC include)
 target_link_libraries(aurora_core PUBLIC fmt::fmt ${AURORA_SDL3_TARGET} xxhash)
-target_link_libraries(aurora_core PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient)
+if (VITA AND AURORA_VITA_SDL3_NATIVE)
+    # The Vita core path uses std::unordered_map and no Dawn/SQLite cache. Tracy
+    # does not support Vita, so keep desktop-only dependencies out of the target.
+else ()
+    target_link_libraries(aurora_core PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient)
+endif ()
 if (AURORA_ENABLE_GX AND AURORA_CACHE_USE_ZSTD)
     target_compile_definitions(aurora_core PRIVATE AURORA_CACHE_USE_ZSTD)
     target_link_libraries(aurora_core PRIVATE libzstd_static)

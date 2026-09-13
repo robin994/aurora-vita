@@ -9,10 +9,20 @@
 #include "SDL3/SDL_mouse.h"
 #include "logging.hpp"
 
+#if defined(AURORA_VITA_SDL3_NATIVE)
+#include <unordered_map>
+#else
 #include <absl/container/flat_hash_map.h>
+#endif
 
 namespace aurora::input {
 extern Module Log;
+
+#if defined(AURORA_VITA_SDL3_NATIVE)
+template <typename K, typename V> using ControllerMapBase = std::unordered_map<K, V>;
+#else
+template <typename K, typename V> using ControllerMapBase = absl::flat_hash_map<K, V>;
+#endif
 
 struct GameController {
   SDL_Gamepad* m_controller = nullptr;
@@ -63,7 +73,8 @@ void controller_rumble(uint32_t instance, uint16_t low_freq_intensity, uint16_t 
 uint32_t controller_count() noexcept;
 void initialize() noexcept;
 void persist_controller_for_player(uint32_t player, const GameController* controller) noexcept;
-extern absl::flat_hash_map<Uint32, GameController> g_GameControllers;
+using ControllerMap = ControllerMapBase<Uint32, GameController>;
+extern ControllerMap g_GameControllers;
 
 void set_mouse_scroll(float scrollX, float scrollY) noexcept;
 void get_mouse_scroll(float* scrollX, float* scrollY) noexcept;

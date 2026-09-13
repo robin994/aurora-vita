@@ -62,3 +62,13 @@ The experimental Vita backend includes the optimization paths validated during t
 - `AURORA_VITA_RUNTIME_MIPMAP_GENERATION=OFF` is the default. Explicit source mip levels are still uploaded, but missing chains are not generated at runtime on Vita, reducing allocation pressure and avoiding historical OOM failures. It can be re-enabled after validating runtime mip generation with the selected vitaGL build.
 
 The Vita texture cache also pre-evicts LRU textures before allocation, preserves textures referenced by the current frame, validates vitaGL backing storage after upload, and tracks allocation/pre-eviction telemetry. EFB passthrough copies use a GPU blit fast path while GX copy formats that require channel or quantization conversion keep the shader conversion path.
+
+### Native SDL3 platform layer on PS Vita
+
+When cross-compiling with VitaSDK, `AURORA_VITA_SDL3_NATIVE` defaults to `ON`. Aurora vendors SDL3 3.4.4 as a static library and uses SDL native Vita backends for window/events/touch, gamepad/joystick, audio, filesystem, threading, locale, timer, power and sensors.
+
+Aurora/vitaGL remains the only graphics owner. The Vita profile disables SDL GPU, SDL Renderer, PIB and PVR integration, and Aurora deliberately does not create an `SDL_Renderer` on Vita. The SDL window is fullscreen 960x544 and exists only as the native platform/event surface. This avoids a second SDL GXM renderer/context competing with vitaGL.
+
+Vita SELF builds also disable position-independent code because `vita-elf-create` does not accept ARM PIC relocations such as `R_ARM_BASE_PREL`.
+
+For an isolated hardware gate, configure `AURORA_VITA_BUILD_SDL3_PROBE=ON`. The resulting `aurora_vita_sdl3_probe.vpk` initializes SDL3 Vita platform services first, then the Aurora vitaGL backend, renders a changing clear color, polls SDL gamepad events, and exits when START is pressed.
