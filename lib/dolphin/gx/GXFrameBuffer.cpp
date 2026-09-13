@@ -430,9 +430,32 @@ void GXCopyDisp(void* dest, GXBool clear) {
     aurora::gx::fifo::drain();
   }
 #if defined(MKW_TARGET_VITA)
-  // The Vita backend renders directly into the presentable EFB. A display copy
-  // is therefore an ordering boundary rather than a second GPU texture copy.
   aurora::vita::draw_sink().flush();
+
+  // GameCube presents only dispCopySrc, scaled into the XFB. Presenting the
+  // raw 640x528 EFB on Vita exposes the unused rows below the game's visible
+  // image as a black band. Recreate the display copy on-GPU: crop the mapped
+  // source rectangle and scale it to the full Vita backbuffer before swap.
+  const auto vitaRect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
+  const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
+  static aurora::vita::gfx::Handle s_displayCopy = aurora::vita::gfx::InvalidHandle;
+  const aurora::vita::gfx::Scissor source{
+      vitaRect.x, vitaRect.y, vitaRect.width, vitaRect.height};
+  const auto copied = aurora::vita::renderer().capture_current(
+      s_displayCopy, source,
+      std::max<u32>(targetWidth, 1), std::max<u32>(targetHeight, 1),
+      aurora::vita::gfx::EfbCopyFormat::Passthrough);
+  if (copied != aurora::vita::gfx::InvalidHandle) {
+    s_displayCopy = copied;
+    aurora::vita::renderer().blit_efb(s_displayCopy);
+  } else {
+    static bool s_warnedDisplayCopy = false;
+    if (!s_warnedDisplayCopy) {
+      std::printf("[aurora-vita] display copy failed; presenting raw EFB\n");
+      s_warnedDisplayCopy = true;
+    }
+  }
+
   if (clear) {
     // GameCube copies the completed EFB to XFB first and clears the EFB only
     // for the next frame. On Vita the presentable backbuffer is also our EFB;
