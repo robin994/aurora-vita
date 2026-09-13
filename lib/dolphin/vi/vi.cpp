@@ -1,6 +1,10 @@
 #include <dolphin/vi.h>
 
+#if defined(MKW_TARGET_VITA)
+#include "../../vita/gfx_frontend.hpp"
+#else
 #include "../../window.hpp"
+#endif
 #include "aurora/math.hpp"
 #include "vi_internal.hpp"
 

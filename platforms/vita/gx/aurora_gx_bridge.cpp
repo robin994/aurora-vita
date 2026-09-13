@@ -123,7 +123,7 @@ aurora::gx::ShaderConfig build_current_shader_config(GXVtxFmt fmt, uint8_t lineM
   const auto& g = aurora::gx::g_gxState;
   aurora::gx::ShaderConfig sc{};
   sc.fogType = static_cast<u8>(g.fog.type);
-  sc.fogRangeEnabled = g.fog.rangeEnabled;
+  sc.fogRangeAdjust = (g.fogRange[0] & (1u << 10)) != 0;
   sc.lineMode = lineMode;
   const auto& vf = g.vtxFmts[static_cast<size_t>(fmt)];
   uint16_t streamOffset = 0;
@@ -139,13 +139,14 @@ aurora::gx::ShaderConfig build_current_shader_config(GXVtxFmt fmt, uint8_t lineM
     m.compType = af.type;
     m.offset = static_cast<decltype(m.offset)>(streamOffset);
     m.frac = af.frac;
-    m.nbt3 = attr == GX_VA_NRM && af.cnt == GX_NRM_NBT3;
+    m.nrmIndexCount = attr == GX_VA_NRM && af.cnt == GX_NRM_NBT3 ? 3 :
+                      (attr == GX_VA_NRM && (source == GX_INDEX8 || source == GX_INDEX16) ? 1 : 0);
     if (source == GX_INDEX8 || source == GX_INDEX16) {
       const auto& arr = g.arrays[static_cast<size_t>(i)];
       m.stride = arr.stride;
       m.le = arr.le;
       const uint16_t indexSize = source == GX_INDEX16 ? 2u : 1u;
-      streamOffset += static_cast<uint16_t>(indexSize * (m.nbt3 ? 3u : 1u));
+      streamOffset += static_cast<uint16_t>(indexSize * (m.nrmIndexCount == 3 ? 3u : 1u));
     } else {
       m.stride = 0;
       m.le = false;
@@ -176,11 +177,6 @@ aurora::gx::PipelineConfig build_current_pipeline_config(GXPrimitive primitive, 
   pc.blendFacDst = g.blendFacDst;
   pc.blendOp = g.blendOp;
   pc.dstAlpha = g.dstAlpha;
-  const float offset = g.cullMode == GX_CULL_FRONT ? g.backOffset : g.frontOffset;
-  const float slope = g.cullMode == GX_CULL_FRONT ? g.backScale : g.frontScale;
-  pc.polygonOffsetBits = std::bit_cast<uint32_t>(offset);
-  pc.polygonOffsetScaleBits = std::bit_cast<uint32_t>(slope);
-  pc.polygonOffsetClampBits = std::bit_cast<uint32_t>(g.clamp);
   pc.depthCompare = g.depthCompare;
   pc.depthUpdate = g.depthUpdate;
   pc.colorUpdate = g.colorUpdate;
@@ -204,9 +200,9 @@ Capabilities inspect_current(uint8_t primitive, uint8_t fmt) noexcept {
 }
 
 gfx::PipelineDesc translate_pipeline(const aurora::gx::PipelineConfig& c) noexcept {
-  gfx::PipelineDesc o{};o.primitive=gfx::Primitive::Triangles;o.depthFunc=cmp(c.depthFunc);o.cull=cull(c.cullMode);o.blendMode=blend(c.blendMode);o.srcFactor=blend_factor(c.blendFacSrc,false);o.dstFactor=blend_factor(c.blendFacDst,true);o.logicOp=logic(c.blendOp);o.depthTest=c.depthCompare;o.depthWrite=c.depthCompare&&c.depthUpdate;o.colorWrite=c.colorUpdate;o.alphaWrite=c.alphaUpdate;o.reversedZ=aurora::gx::UseReversedZ;o.dstAlpha=c.dstAlpha==UINT32_MAX?-1:static_cast<int16_t>(c.dstAlpha);o.fogMode=fog_mode(static_cast<GXFogType>(c.shaderConfig.fogType));o.fogOrthographic=(c.shaderConfig.fogType&0x08)!=0;o.fogRangeEnabled=c.shaderConfig.fogRangeEnabled;o.layout=gfx::canonical_vertex_layout();
+  gfx::PipelineDesc o{};o.primitive=gfx::Primitive::Triangles;o.depthFunc=cmp(c.depthFunc);o.cull=cull(c.cullMode);o.blendMode=blend(c.blendMode);o.srcFactor=blend_factor(c.blendFacSrc,false);o.dstFactor=blend_factor(c.blendFacDst,true);o.logicOp=logic(c.blendOp);o.depthTest=c.depthCompare;o.depthWrite=c.depthCompare&&c.depthUpdate;o.colorWrite=c.colorUpdate;o.alphaWrite=c.alphaUpdate;o.reversedZ=aurora::gx::UseReversedZ;o.dstAlpha=c.dstAlpha==UINT32_MAX?-1:static_cast<int16_t>(c.dstAlpha);o.fogMode=fog_mode(static_cast<GXFogType>(c.shaderConfig.fogType));o.fogOrthographic=(c.shaderConfig.fogType&0x08)!=0;o.fogRangeEnabled=c.shaderConfig.fogRangeAdjust;o.layout=gfx::canonical_vertex_layout();
   const auto&sc=c.shaderConfig;
-  for(unsigned i=0;i<sc.tcgs.size()&&i<gfx::MaxTextures;i++){const auto&t=sc.tcgs[i];if(t.src==GX_MAX_TEXGENSRC)continue;o.texgenCount=static_cast<uint8_t>(i+1);auto&d=o.texgens[i];d.type=texgen_type(t.type);d.source=texgen_source(t.src);d.matrix=tex_mtx(t.mtx);d.postMatrix=post_mtx(t.postMtx);d.embossSource=t.embossSrc;d.normalize=t.normalize;d.matrixFromVertex=sc.attrs[GX_VA_TEX0MTXIDX+i].attrType!=GX_NONE;}
+  for(unsigned i=0;i<sc.tcgs.size()&&i<gfx::MaxTextures;i++){const auto&t=sc.tcgs[i];if(t.src==GX_MAX_TEXGENSRC)continue;o.texgenCount=static_cast<uint8_t>(i+1);auto&d=o.texgens[i];d.type=texgen_type(t.type);d.source=texgen_source(t.src);d.matrix=tex_mtx(t.mtx);d.postMatrix=post_mtx(t.postMtx);d.embossSource=(t.type>=GX_TG_BUMP0&&t.type<=GX_TG_BUMP7)?static_cast<uint8_t>(t.type-GX_TG_BUMP0):0;d.normalize=t.normalize;d.matrixFromVertex=sc.attrs[GX_VA_TEX0MTXIDX+i].attrType!=GX_NONE;}
   for(unsigned i=0;i<o.colorChannels.size()&&i<sc.colorChannels.size();i++){const auto&s=sc.colorChannels[i];auto&d=o.colorChannels[i];d.materialSource=color_source(s.matSrc);d.ambientSource=color_source(s.ambSrc);d.diffuse=diffuse(s.diffFn);d.attenuation=attenuation(s.attnFn);d.lightingEnabled=s.lightingEnabled;}
   for(unsigned i=0;i<o.tev.swapTable.size()&&i<sc.tevSwapTable.size();i++){const auto&s=sc.tevSwapTable[i];o.tev.swapTable[i]={tev_chan(s.red),tev_chan(s.green),tev_chan(s.blue),tev_chan(s.alpha)};}
   o.tev.indirectStageCount=static_cast<uint8_t>(std::min<size_t>(sc.numIndStages,gfx::MaxIndStages));for(unsigned i=0;i<o.tev.indirectStageCount;i++){const auto&s=sc.indStages[i];auto&d=o.tev.indirectStages[i];d.texCoord=s.texCoordId>=GX_TEXCOORD0&&s.texCoordId<=GX_TEXCOORD7?static_cast<uint8_t>(s.texCoordId-GX_TEXCOORD0):0xff;d.texture=s.texMapId>=GX_TEXMAP0&&s.texMapId<=GX_TEXMAP7?static_cast<uint8_t>(s.texMapId-GX_TEXMAP0):0xff;d.scaleSShift=ind_scale(s.scaleS);d.scaleTShift=ind_scale(s.scaleT);}
@@ -225,31 +221,40 @@ VertexSource vertex_source(GXAttrType v) noexcept {
   default: return VertexSource::None;
   }
 }
-VertexComponent vertex_component(GXCompType v) noexcept {
+VertexComponent vertex_component(GXAttr attr, GXCompType v) noexcept {
+  if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
+    switch (v) {
+    case GX_RGB565: return VertexComponent::RGB565;
+    case GX_RGB8: return VertexComponent::RGB8;
+    case GX_RGBX8: return VertexComponent::RGBX8;
+    case GX_RGBA4: return VertexComponent::RGBA4;
+    case GX_RGBA6: return VertexComponent::RGBA6;
+    case GX_RGBA8: return VertexComponent::RGBA8;
+    default: return VertexComponent::RGBA8;
+    }
+  }
   switch (v) {
   case GX_U8: return VertexComponent::U8;
   case GX_S8: return VertexComponent::S8;
   case GX_U16: return VertexComponent::U16;
   case GX_S16: return VertexComponent::S16;
   case GX_F32: return VertexComponent::F32;
-  case GX_RGB565: return VertexComponent::RGB565;
-  case GX_RGB8: return VertexComponent::RGB8;
-  case GX_RGBX8: return VertexComponent::RGBX8;
-  case GX_RGBA4: return VertexComponent::RGBA4;
-  case GX_RGBA6: return VertexComponent::RGBA6;
-  case GX_RGBA8: return VertexComponent::RGBA8;
   default: return VertexComponent::F32;
   }
 }
-uint16_t vertex_component_size(GXCompType v) noexcept {
+uint16_t vertex_component_size(GXAttr attr, GXCompType v) noexcept {
+  if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
+    switch (v) {
+    case GX_RGB565: case GX_RGBA4: return 2;
+    case GX_RGB8: case GX_RGBA6: return 3;
+    case GX_RGBX8: case GX_RGBA8: return 4;
+    default: return 4;
+    }
+  }
   switch (v) {
   case GX_U8: case GX_S8: return 1;
   case GX_U16: case GX_S16: return 2;
   case GX_F32: return 4;
-  case GX_RGB565: case GX_RGBA4: return 2;
-  case GX_RGB8: return 3;
-  case GX_RGBX8: case GX_RGBA8: return 4;
-  case GX_RGBA6: return 3;
   default: return 1;
   }
 }
@@ -281,7 +286,7 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
     auto& d = out.attributes[out.count++];
     d.semantic = semantic;
     d.source = vertex_source(static_cast<GXAttrType>(m.attrType));
-    d.component = vertex_component(static_cast<GXCompType>(m.compType));
+    d.component = vertex_component(attr, static_cast<GXCompType>(m.compType));
     d.components = components;
     d.frac = m.frac;
     d.streamOffset = static_cast<uint16_t>(m.offset + streamExtra);
@@ -310,13 +315,14 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
   const auto& n = c.attrs[GX_VA_NRM];
   if (n.attrType != GX_NONE) {
     if (n.cnt == 9) {
-      const uint16_t comp3 = static_cast<uint16_t>(3u * vertex_component_size(static_cast<GXCompType>(n.compType)));
+      const uint16_t comp3 = static_cast<uint16_t>(3u * vertex_component_size(GX_VA_NRM, static_cast<GXCompType>(n.compType)));
       const uint16_t indexBytes = n.attrType == GX_INDEX16 ? 2u : 1u;
+      const bool nbt3 = n.nrmIndexCount == 3;
       // NBT3 has three independent indices in the display list; ordinary NBT has one
       // index/direct value referencing nine consecutive components.
       add(GX_VA_NRM, VertexSemantic::Normal, n, 3, 0, 0);
-      add(GX_VA_NRM, VertexSemantic::Binormal, n, 3, n.nbt3 ? indexBytes : 0, n.nbt3 ? 0 : comp3);
-      add(GX_VA_NRM, VertexSemantic::Tangent, n, 3, n.nbt3 ? indexBytes * 2u : 0, n.nbt3 ? 0 : comp3 * 2u);
+      add(GX_VA_NRM, VertexSemantic::Binormal, n, 3, nbt3 ? indexBytes : 0, nbt3 ? 0 : comp3);
+      add(GX_VA_NRM, VertexSemantic::Tangent, n, 3, nbt3 ? indexBytes * 2u : 0, nbt3 ? 0 : comp3 * 2u);
     } else {
       add(GX_VA_NRM, VertexSemantic::Normal, n, std::min<uint8_t>(n.cnt, 3));
     }
@@ -372,19 +378,21 @@ void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms&
   uniforms.fogColor = copy_vec4(g.fog.color);
   const float logicalWidth = std::max(g.logicalViewport.width, 1.f);
   const float renderWidth = std::max(g.renderViewport.width, 1.f);
-  const float rangeCenter = ((static_cast<float>(g.fog.rangeCenter) - g.logicalViewport.left) / logicalWidth) * 2.f - 1.f +
+  const int32_t rawCenter = static_cast<int32_t>(g.fogRange[0] & 0x3ffu) - 342;
+  const float rangeCenter = ((static_cast<float>(rawCenter) - g.logicalViewport.left) / logicalWidth) * 2.f - 1.f +
                             (g.renderViewport.left / renderWidth) * 2.f;
   uniforms.fogParams = {g.fog.a, g.fog.b, g.fog.c, rangeCenter};
   uniforms.renderViewportWidth = renderWidth;
-  for (unsigned i=0;i<g.fog.rangeK.size();++i) {
-    const unsigned source=(i&~1u)|(1u-(i&1u));
-    uniforms.fogRangeK[i]=static_cast<float>(g.fog.rangeK[source])/64.f;
+  for (unsigned i=0;i<uniforms.fogRangeK.size();++i) {
+    const u32 packed = g.fogRange[1 + i / 2];
+    const u32 raw = (packed >> ((i & 1u) * 12u)) & 0xfffu;
+    uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
   }
 
   for (unsigned i = 0; i < gfx::MaxTextures; ++i) {
     const auto& s = g.texCoordScales[i];
     uniforms.texcoordScale[i] = {static_cast<float>(s.scaleS) + 1.f, static_cast<float>(s.scaleT) + 1.f, 0.f, 0.f};
-    const auto& t = g.textures[i].texObj;
+    const auto& t = g.loadedTextures[i];
     uniforms.textureSizeBias[i] = {static_cast<float>(t.width()), static_cast<float>(t.height()), t.lod_bias(), 0.f};
   }
   for (unsigned i = 0; i < gfx::MaxIndMatrices; ++i) {
@@ -409,8 +417,10 @@ uint8_t texcoord_mask(bool point) noexcept {uint8_t m=0;for(unsigned i=0;i<gfx::
 TextureTranslation translate_texture(unsigned slot) noexcept {
   TextureTranslation out{};
   if(slot>=gfx::MaxTextures)return out;
-  const auto& bind=aurora::gx::g_gxState.textures[slot];
-  const auto& o=bind.texObj;
+  // The Vita frontend does not resolve GX textures into Dawn TextureBind objects.
+  // The FIFO decoder keeps the complete guest metadata in loadedTextures instead,
+  // which is exactly what the native Vita decoder needs.
+  const auto& o=aurora::gx::g_gxState.loadedTextures[slot];
 
   // Sampler state is meaningful for both static textures and GXCopyTex-backed textures.
   auto& sm=out.sampler;
@@ -424,10 +434,7 @@ TextureTranslation translate_texture(unsigned slot) noexcept {
     out.dynamicCopy=true;
     return out;
   }
-  if(!o.has_data()){
-    out.dynamicCopy=static_cast<bool>(bind.ref);
-    return out;
-  }
+  if(!o.data)return out;
   bool supported=false;
   const auto f=texture_format(static_cast<GXTexFmt>(o.format()),supported);
   if(!supported)return out;

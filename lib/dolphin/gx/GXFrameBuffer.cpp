@@ -3,6 +3,8 @@
 
 #if defined(MKW_TARGET_VITA)
 #include "../../vita/gfx_frontend.hpp"
+#include "../../../platforms/vita/aurora_vita_backend.hpp"
+#include "../../../platforms/vita/gx/aurora_vita_draw_sink.hpp"
 #else
 #include "../../gfx/tex_copy_conv.hpp"
 #include "../../gfx/efb_ram_copy.hpp"
@@ -427,6 +429,20 @@ void GXCopyDisp(void* dest, GXBool clear) {
   if (aurora::gx::fifo::get_buffer_size() != 0) {
     aurora::gx::fifo::drain();
   }
+#if defined(MKW_TARGET_VITA)
+  // The Vita backend renders directly into the presentable EFB. A display copy
+  // is therefore an ordering boundary rather than a second GPU texture copy.
+  aurora::vita::draw_sink().flush();
+  if (clear) {
+    const aurora::vita::gfx::Color color{
+        g_gxState.clearColor[0], g_gxState.clearColor[1],
+        g_gxState.clearColor[2], g_gxState.clearColor[3]};
+    aurora::vita::renderer().clear_current(
+        color, aurora::gx::clear_depth_value(),
+        g_gxState.colorUpdate, g_gxState.alphaUpdate, g_gxState.depthUpdate);
+  }
+  return;
+#endif
   const auto rect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
   const auto logicalDstWidth =
       std::max<u32>(g_gxState.dispCopyDstWidth != 0 ? g_gxState.dispCopyDstWidth : static_cast<u32>(g_gxState.dispCopySrc.width), 1);
@@ -460,6 +476,17 @@ void GXCopyTex(void* dest, GXBool clear) {
   if (aurora::gx::fifo::get_buffer_size() != 0) {
     aurora::gx::fifo::drain();
   }
+#if defined(MKW_TARGET_VITA)
+  if (aurora::vita::draw_sink().copy_tex(dest, clear != GX_FALSE)) {
+    auto& copy = g_gxState.copyTextures[dest];
+    ++copy.revision;
+    copy.width = std::max<u32>(g_gxState.texCopyDstWidth, 1);
+    copy.height = std::max<u32>(g_gxState.texCopyDstHeight, 1);
+    copy.format = g_gxState.texCopyFmt;
+    aurora::gx::notify_copy_texture_created();
+  }
+  return;
+#endif
   const auto sourceRect = map_texture_copy_source(g_gxState.texCopySrc, g_gxState.texCopySrcRenderSpace);
   const auto rect = sourceRect.clearRect;
   // Keep guest dimensions for cache identity while preserving scaled GPU detail.

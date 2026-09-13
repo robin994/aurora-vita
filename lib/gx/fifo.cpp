@@ -7,7 +7,12 @@
 #include <cstdlib>
 #include <cstring>
 
+#if defined(MKW_TARGET_VITA)
+#define ZoneScopedN(name) ((void)0)
+#define TracyPlot(name, value) ((void)0)
+#else
 #include "tracy/Tracy.hpp"
+#endif
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
@@ -73,11 +78,13 @@ static void note_drain_wait(uint64_t nanos) noexcept {
 }
 
 void drain() {
+#if !defined(MKW_TARGET_VITA)
   // SEALED, not DONE.
   const auto waited = aurora::wait_for_frame_worker_sealed();
   if (waited.count() > 0) UNLIKELY {
     note_drain_wait(static_cast<uint64_t>(waited.count()));
   }
+#endif
   if (detail::sBufferSize == 0) {
     return;
   }

@@ -2,6 +2,7 @@
 # can be built with AURORA_ENABLE_GX=OFF. Optional upstream-GX mode is a desktop
 # integration/syntax gate while Aurora's upstream GX target still owns Dawn.
 option(AURORA_VITA_WITH_UPSTREAM_GX "Compile the Vita bridge against Aurora's real GX structs (requires AURORA_ENABLE_GX)" OFF)
+option(AURORA_VITA_WITH_GX_FRONTEND "Build the Dawn-free Dolphin GX/VI frontend for native Vita ports" OFF)
 option(AURORA_VITA_DIRECT_STREAM_WRITE "Write frame streaming data directly into mapped Vita GL buffers" OFF)
 option(AURORA_VITA_RUNTIME_MIPMAP_GENERATION "Generate missing texture mip chains at runtime on Vita" OFF)
 option(AURORA_VITA_BUILD_SDL3_PROBE "Build SDL3 native-platform + vitaGL coexistence probe" OFF)
@@ -42,6 +43,35 @@ if (AURORA_VITA_WITH_UPSTREAM_GX)
     )
 endif ()
 
+if (AURORA_VITA_WITH_GX_FRONTEND)
+    list(APPEND AURORA_VITA_BACKEND_SOURCES
+        ${PROJECT_SOURCE_DIR}/platforms/vita/gx/aurora_gx_bridge.cpp
+        ${PROJECT_SOURCE_DIR}/lib/vita/runtime.cpp
+        ${PROJECT_SOURCE_DIR}/lib/vita/gx_frontend_state.cpp
+        ${PROJECT_SOURCE_DIR}/lib/gx/fifo.cpp
+        ${PROJECT_SOURCE_DIR}/lib/gx/command_processor.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXBump.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXCull.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXCpu2Efb.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXDispList.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXDraw.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXExtra.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXFifo.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXFrameBuffer.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXGeometry.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXGet.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXLighting.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXManage.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXPixel.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXTev.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXTexture.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXTransform.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXVert.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXAurora.cpp
+        ${PROJECT_SOURCE_DIR}/lib/dolphin/vi/vi.cpp
+    )
+endif ()
+
 add_library(aurora_vita_backend STATIC ${AURORA_VITA_BACKEND_SOURCES})
 add_library(aurora::vita_backend ALIAS aurora_vita_backend)
 set_target_properties(aurora_vita_backend PROPERTIES FOLDER "aurora")
@@ -60,6 +90,11 @@ if (AURORA_VITA_WITH_UPSTREAM_GX)
     target_link_libraries(aurora_vita_backend PRIVATE aurora::gx)
 endif ()
 
+if (AURORA_VITA_WITH_GX_FRONTEND)
+    target_compile_definitions(aurora_vita_backend PRIVATE
+        AURORA_VITA_UPSTREAM=1 MKW_TARGET_VITA=1 TARGET_PC=1)
+endif ()
+
 # When cross-compiling with VitaSDK the toolchain normally exposes these by name.
 if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi")
     if (AURORA_VITA_WITH_UPSTREAM_GX)
@@ -73,13 +108,13 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
         target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_RUNTIME_MIPMAP_GENERATION=1)
     endif ()
     target_compile_options(aurora_vita_backend PRIVATE
-        -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
+        -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -fshort-wchar
         -mtune=cortex-a9 -mfpu=neon -ffast-math -fsigned-char
     )
     target_link_options(aurora_vita_backend PRIVATE -Wl,--gc-sections -Wl,-q)
     target_link_libraries(aurora_vita_backend PUBLIC
         vitaGL vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
-        SceGxm_stub SceDisplay_stub SceCtrl_stub SceAppMgr_stub
+        SceGxm_stub SceDisplay_stub SceCtrl_stub SceAppMgr_stub SceCommonDialog_stub
         SceKernelDmacMgr_stub SceSysmodule_stub SceLibKernel_stub
         mathneon pthread m
     )
