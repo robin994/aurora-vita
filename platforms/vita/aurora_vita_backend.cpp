@@ -97,20 +97,50 @@ bool initialize(const BackendConfig& c) noexcept {
       return false;
     }
   }
+  // Bound vitaGL's transient allocator before initialization. The upstream
+  // default circular pool is intentionally large (32 MiB total); console ports
+  // can lower it when they already own separate streaming arenas. Scratch
+  // routing is a no-op when vitaGL was built without USE_SCRATCH_MEMORY.
+  if(g_config.vgl_circular_pool_size)
+    vglSetCircularPoolSize(g_config.vgl_circular_pool_size);
+  if(g_config.vgl_display_buffer_count>=2 && g_config.vgl_display_buffer_count<=3)
+    vglSetDisplayBufferCount(static_cast<int>(g_config.vgl_display_buffer_count));
+  vglSetupScratchMemory(g_config.vgl_scratch_dynamic?GL_TRUE:GL_FALSE,
+                        g_config.vgl_scratch_stream?GL_TRUE:GL_FALSE);
+
   // vitaGL's current API does not return a success flag here. The value is
   // `res_fallback`: GL_TRUE means the requested framebuffer was clamped to
   // the maximum supported resolution, while the normal successful path for
   // 960x544 returns GL_FALSE after setting vgl_inited=GL_TRUE.
-  const GLboolean resolutionFallback =
-      vglInitExtended(static_cast<int>(g_config.vgl_legacy_pool_size),
-                      static_cast<int>(g_config.width),
-                      static_cast<int>(g_config.height),
-                      static_cast<int>(g_config.vgl_ram_threshold),
-                      SCE_GXM_MULTISAMPLE_NONE);
+  const bool explicitPools = g_config.vgl_ram_pool_size || g_config.vgl_cdram_pool_size ||
+                             g_config.vgl_phycont_pool_size || g_config.vgl_cdlg_pool_size;
+  const GLboolean resolutionFallback = explicitPools
+      ? vglInitWithCustomSizes(static_cast<int>(g_config.vgl_legacy_pool_size),
+                               static_cast<int>(g_config.width),
+                               static_cast<int>(g_config.height),
+                               static_cast<int>(g_config.vgl_ram_pool_size),
+                               static_cast<int>(g_config.vgl_cdram_pool_size),
+                               static_cast<int>(g_config.vgl_phycont_pool_size),
+                               static_cast<int>(g_config.vgl_cdlg_pool_size),
+                               SCE_GXM_MULTISAMPLE_NONE)
+      : vglInitExtended(static_cast<int>(g_config.vgl_legacy_pool_size),
+                        static_cast<int>(g_config.width),
+                        static_cast<int>(g_config.height),
+                        static_cast<int>(g_config.vgl_ram_threshold),
+                        SCE_GXM_MULTISAMPLE_NONE);
   if(resolutionFallback){
     std::printf("[aurora-vita] vitaGL framebuffer resolution fallback requested=%ux%u\n",
                 g_config.width,g_config.height);
   }
+  std::printf("[aurora-vita] vitaGL pools mode=%s ram=%llu/%llu cdram=%llu/%llu phycont=%llu/%llu circular=%u display_buffers=%u\n",
+              explicitPools?"fixed":"threshold",
+              static_cast<unsigned long long>(vglMemFree(VGL_MEM_RAM)),
+              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_RAM)),
+              static_cast<unsigned long long>(vglMemFree(VGL_MEM_VRAM)),
+              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_VRAM)),
+              static_cast<unsigned long long>(vglMemFree(VGL_MEM_SLOW)),
+              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_SLOW)),
+              g_config.vgl_circular_pool_size,g_config.vgl_display_buffer_count);
   vglWaitVblankStart(g_config.wait_vblank?GL_TRUE:GL_FALSE);
   glViewport(0,0,g_config.width,g_config.height);
   glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
