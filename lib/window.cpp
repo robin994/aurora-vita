@@ -188,11 +188,13 @@ void resize_swapchain() noexcept {
     }
   }
   g_windowSize = size;
+#if !defined(AURORA_VITA_SDL3_NATIVE)
   if (g_renderer != nullptr) {
     SDL_SetRenderLogicalPresentation(g_renderer, static_cast<int>(size.native_fb_width),
                                      static_cast<int>(size.native_fb_height), SDL_LOGICAL_PRESENTATION_DISABLED);
     SDL_SetRenderScale(g_renderer, size.scale, size.scale);
   }
+#endif
 #ifdef AURORA_ENABLE_GX
   webgpu::resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height);
 #endif
@@ -365,7 +367,10 @@ const AuroraEvent* poll_events() {
 
 bool create_window(AuroraBackend backend) {
   SDL_WindowFlags flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
-#if TARGET_OS_IOS || TARGET_OS_TV
+#if defined(AURORA_VITA_SDL3_NATIVE)
+  // SDL3 Vita is fullscreen-only. Aurora/vitaGL owns the framebuffer and presentation.
+  flags |= SDL_WINDOW_FULLSCREEN;
+#elif TARGET_OS_IOS || TARGET_OS_TV
   flags |= SDL_WINDOW_FULLSCREEN;
 #else
   flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
@@ -395,6 +400,10 @@ bool create_window(AuroraBackend backend) {
   default:
     break;
   }
+#if defined(AURORA_VITA_SDL3_NATIVE)
+  Sint32 width = 960;
+  Sint32 height = 544;
+#else
   auto width = static_cast<Sint32>(g_config.windowWidth);
   auto height = static_cast<Sint32>(g_config.windowHeight);
   if (width == 0 || height == 0) {
@@ -407,6 +416,7 @@ bool create_window(AuroraBackend backend) {
   if (height < 480) {
     height = 480;
   }
+#endif
 
   const Sint32 posX = g_config.hasWindowPosition ? g_config.windowPosX : SDL_WINDOWPOS_CENTERED;
   const Sint32 posY = g_config.hasWindowPosition ? g_config.windowPosY : SDL_WINDOWPOS_CENTERED;
@@ -429,7 +439,9 @@ bool create_window(AuroraBackend backend) {
     Log.error("Failed to create window: {}", SDL_GetError());
     return false;
   }
+#if !defined(AURORA_VITA_SDL3_NATIVE)
   SDL_SetWindowMinimumSize(g_window, 640, 480);
+#endif
   g_displayMode.store(g_config.startFullscreen ? AURORA_DISPLAY_MODE_BORDERLESS : AURORA_DISPLAY_MODE_WINDOWED,
                       std::memory_order_release);
 #if defined(_WIN32)
@@ -443,6 +455,12 @@ bool create_renderer() {
   if (g_window == nullptr) {
     return false;
   }
+#if defined(AURORA_VITA_SDL3_NATIVE)
+  // SDL3's Vita renderer owns its own GXM context. Creating it alongside vitaGL
+  // would duplicate graphics state and memory. Keep SDL3 for the platform layer only.
+  g_renderer = nullptr;
+  return true;
+#else
   const auto props = SDL_CreateProperties();
   TRY(SDL_SetPointerProperty(props, SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, g_window), "Failed to set {}: {}",
       SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, SDL_GetError());
@@ -455,16 +473,21 @@ bool create_renderer() {
     return false;
   }
   return true;
+#endif
 }
 
 void destroy_window() {
 #if defined(_WIN32)
   uninstall_window_proc_hook();
 #endif
+#if !defined(AURORA_VITA_SDL3_NATIVE)
   if (g_renderer != nullptr) {
     SDL_DestroyRenderer(g_renderer);
     g_renderer = nullptr;
   }
+#else
+  g_renderer = nullptr;
+#endif
   if (g_window != nullptr) {
     SDL_DestroyWindow(g_window);
     g_window = nullptr;
