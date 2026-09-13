@@ -7,14 +7,14 @@ namespace aurora::vita::gfx {
 BufferPool::~BufferPool(){clear();}
 Handle BufferPool::create_vertex(const void* data,size_t bytes,bool dynamic) noexcept {
 #if defined(__vita__)
-  GLuint id=0;glGenBuffers(1,&id);if(!id)return InvalidHandle;glBindBuffer(GL_ARRAY_BUFFER,id);glBufferData(GL_ARRAY_BUFFER,bytes,data,dynamic?GL_DYNAMIC_DRAW:GL_STATIC_DRAW);Handle h=next_++;map_[h]={id,GL_ARRAY_BUFFER,bytes,dynamic};return h;
+  GLuint id=0;glGenBuffers(1,&id);if(!id)return InvalidHandle;glBindBuffer(GL_ARRAY_BUFFER,id);glBufferData(GL_ARRAY_BUFFER,bytes,data,dynamic?GL_DYNAMIC_DRAW:GL_STATIC_DRAW);glBindBuffer(GL_ARRAY_BUFFER,0);Handle h=next_++;map_[h]={id,GL_ARRAY_BUFFER,bytes,dynamic};return h;
 #else
   (void)data;(void)bytes;(void)dynamic;Handle h=next_++;map_[h]={h,0,bytes,dynamic};return h;
 #endif
 }
 Handle BufferPool::create_index(const void* data,size_t bytes,bool dynamic) noexcept {
 #if defined(__vita__)
-  GLuint id=0;glGenBuffers(1,&id);if(!id)return InvalidHandle;glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,id);glBufferData(GL_ELEMENT_ARRAY_BUFFER,bytes,data,dynamic?GL_DYNAMIC_DRAW:GL_STATIC_DRAW);Handle h=next_++;map_[h]={id,GL_ELEMENT_ARRAY_BUFFER,bytes,dynamic};return h;
+  GLuint id=0;glGenBuffers(1,&id);if(!id)return InvalidHandle;glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,id);glBufferData(GL_ELEMENT_ARRAY_BUFFER,bytes,data,dynamic?GL_DYNAMIC_DRAW:GL_STATIC_DRAW);glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,0);Handle h=next_++;map_[h]={id,GL_ELEMENT_ARRAY_BUFFER,bytes,dynamic};return h;
 #else
   (void)data;(void)bytes;(void)dynamic;Handle h=next_++;map_[h]={h,0,bytes,dynamic};return h;
 #endif

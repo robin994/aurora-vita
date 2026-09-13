@@ -2,6 +2,8 @@
 #include "vita_gl_util.hpp"
 #include <algorithm>
 #include <cstddef>
+#include <memory>
+#include <new>
 #if defined(__vita__)
 #include <vitaGL.h>
 #endif
@@ -133,7 +135,29 @@ Handle EfbManager::create(uint32_t w, uint32_t h, bool depth) noexcept {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  // Allocate real zeroed storage instead of passing nullptr. This is safe with both stock
+  // vitaGL and optimized upload paths that may dereference the source pointer.
+  if (static_cast<size_t>(w) > SIZE_MAX / (static_cast<size_t>(h) * 4u)) {
+    if (tex) glDeleteTextures(1, &tex);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, previousFbo);
+    return InvalidHandle;
+  }
+  const size_t pixelBytes = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
+  std::unique_ptr<uint8_t[]> initialPixels(new (std::nothrow) uint8_t[pixelBytes]());
+  if (!initialPixels) {
+    if (tex) glDeleteTextures(1, &tex);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, previousFbo);
+    return InvalidHandle;
+  }
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, initialPixels.get());
+  if (vglGetTexDataPointer(GL_TEXTURE_2D) == nullptr) {
+    if (tex) glDeleteTextures(1, &tex);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, previousFbo);
+    return InvalidHandle;
+  }
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
   if (depth) {
     glGenRenderbuffers(1, &rb);
@@ -265,11 +289,42 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
   if (!dst) return InvalidHandle;
 #if defined(__vita__)
   const GLuint sourceFbo = boundFbo_;
+
+  // The common passthrough GXCopyTex case stays entirely on the GPU. Disabling
+  // scissor while switching FBOs avoids vitaGL rebuilding scissor state against
+  // the transient destination target.
+  if (format == EfbCopyFormat::Passthrough) {
+    const auto dstIt = map_.find(dst);
+    if (dstIt == map_.end() || !dstIt->second.fbo) {
+      destroy(dst);
+      return InvalidHandle;
+    }
+    const GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
+    if (scissorWasEnabled) glDisable(GL_SCISSOR_TEST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstIt->second.fbo);
+    while (glGetError() != GL_NO_ERROR) {}
+    glBlitFramebuffer(srcX, srcY, srcX + static_cast<GLint>(srcWidth),
+                      srcY + static_cast<GLint>(srcHeight),
+                      0, 0, static_cast<GLint>(dstWidth), static_cast<GLint>(dstHeight),
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    const GLenum blitError = glGetError();
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sourceFbo);
+    boundFbo_ = sourceFbo;
+    if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST);
+    if (blitError != GL_NO_ERROR) {
+      destroy(dst);
+      return InvalidHandle;
+    }
+    return dst;
+  }
+
+  // GX formats that require channel/quantization conversion retain the shader
+  // path. This keeps the optimization from changing copy-format semantics.
   GLuint capture = 0;
   glGenTextures(1, &capture);
   if (!capture) { destroy(dst); return InvalidHandle; }
-  // Creating/reusing the destination is allowed to bind helper FBOs, but the copy must always
-  // read from the framebuffer that was active when GXCopyTex reached the ordering boundary.
   glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
   boundFbo_ = sourceFbo;
   glBindTexture(GL_TEXTURE_2D, capture);
@@ -278,13 +333,17 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, srcX, srcY, srcWidth, srcHeight, 0);
-  if (!bind(dst)) {
+  if (vglGetTexDataPointer(GL_TEXTURE_2D) == nullptr || !bind(dst)) {
     glDeleteTextures(1, &capture);
+    glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
+    boundFbo_ = sourceFbo;
     destroy(dst);
     return InvalidHandle;
   }
   const bool ok = draw_texture(capture, dstWidth, dstHeight, format);
   glDeleteTextures(1, &capture);
+  glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
+  boundFbo_ = sourceFbo;
   if (!ok) { destroy(dst); return InvalidHandle; }
 #else
   (void)srcX;
@@ -292,6 +351,63 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
   (void)format;
 #endif
   return dst;
+}
+
+Handle EfbManager::upload_rgba(Handle existing, uint32_t w, uint32_t h, const void* rgba) noexcept {
+  if (!w || !h || !rgba) return InvalidHandle;
+  if (w > 2048u || h > 2048u || static_cast<size_t>(w) > SIZE_MAX / (static_cast<size_t>(h) * 4u)) {
+    return InvalidHandle;
+  }
+
+  Handle handle = existing;
+  auto it = handle ? map_.find(handle) : map_.end();
+  if (it != map_.end() && (it->second.width != w || it->second.height != h || it->second.fbo != 0)) {
+    destroy(handle);
+    handle = InvalidHandle;
+    it = map_.end();
+  }
+
+#if defined(__vita__)
+  if (it != map_.end()) {
+    glBindTexture(GL_TEXTURE_2D, it->second.color);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    if (glGetError() != GL_NO_ERROR) return InvalidHandle;
+    return handle;
+  }
+
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  if (!tex) return InvalidHandle;
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  // vitaGL optimized upload path can fault while allocating an empty RGBA render texture through
+  // glTexImage2D(..., nullptr). Supplying the already-read pixels takes the normal,
+  // hardware-tested texture upload path and removes the extra FBO/capture allocation.
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+  if (vglGetTexDataPointer(GL_TEXTURE_2D) == nullptr || glGetError() != GL_NO_ERROR) {
+    glDeleteTextures(1, &tex);
+    return InvalidHandle;
+  }
+#else
+  if (it != map_.end()) return handle;
+  const unsigned tex = next_;
+#endif
+
+  Entry e{};
+  e.fbo = 0;
+  e.color = tex;
+  e.depth = 0;
+  e.width = w;
+  e.height = h;
+  e.bytes = static_cast<size_t>(w) * h * 4u;
+  handle = next_++;
+  map_[handle] = e;
+  bytes_ += e.bytes;
+  highWaterBytes_ = std::max(highWaterBytes_, bytes_);
+  return handle;
 }
 
 bool EfbManager::bind_texture(Handle h, unsigned unit, const SamplerDesc& s) noexcept {
@@ -338,7 +454,7 @@ void EfbManager::destroy(Handle h) noexcept {
   if (it == map_.end()) return;
 #if defined(__vita__)
   GLuint depth = it->second.depth, color = it->second.color, fbo = it->second.fbo;
-  if (boundFbo_ == fbo) {
+  if (fbo != 0 && boundFbo_ == fbo) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     boundFbo_ = 0;
   }

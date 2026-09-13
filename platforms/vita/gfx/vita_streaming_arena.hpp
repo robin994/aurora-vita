@@ -27,6 +27,10 @@ public:
   void begin_frame(uint64_t frame) noexcept;
   BufferSlice upload_vertices(const void* data, size_t bytes, size_t alignment = 0) noexcept;
   BufferSlice upload_indices(const void* data, size_t bytes, size_t alignment = 0) noexcept;
+  // Reserve writable space directly in the frame staging arena. The caller fills
+  // it in-place, avoiding an intermediate vector/copy before the frame flush.
+  BufferSlice reserve_vertices(size_t bytes, size_t alignment, void** writable) noexcept;
+  BufferSlice reserve_indices(size_t bytes, size_t alignment, void** writable) noexcept;
   // Writes U16 indices directly into the staging arena while adding a
   // frame-global vertex base. This avoids a temporary heap allocation per draw.
   BufferSlice upload_rebased_indices(const uint16_t* data, size_t count, uint32_t vertexBase) noexcept;
@@ -46,7 +50,10 @@ private:
   struct Slot {
     Handle vertex=InvalidHandle,index=InvalidHandle;
     size_t voff=0,ioff=0,vflushed=0,iflushed=0;
+    void* vmapped=nullptr;
+    void* imapped=nullptr;
   };
+  BufferSlice reserve(bool vertex, size_t bytes, size_t alignment, void** writable) noexcept;
   BufferSlice upload(bool vertex, const void* data, size_t bytes, size_t alignment) noexcept;
   static size_t align_up(size_t value,size_t alignment) noexcept;
   BufferPool& pool_;

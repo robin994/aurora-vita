@@ -2,6 +2,8 @@
 # can be built with AURORA_ENABLE_GX=OFF. Optional upstream-GX mode is a desktop
 # integration/syntax gate while Aurora's upstream GX target still owns Dawn.
 option(AURORA_VITA_WITH_UPSTREAM_GX "Compile the Vita bridge against Aurora's real GX structs (requires AURORA_ENABLE_GX)" OFF)
+option(AURORA_VITA_DIRECT_STREAM_WRITE "Write frame streaming data directly into mapped Vita GL buffers" OFF)
+option(AURORA_VITA_RUNTIME_MIPMAP_GENERATION "Generate missing texture mip chains at runtime on Vita" OFF)
 
 set(AURORA_VITA_BACKEND_SOURCES
     ${PROJECT_SOURCE_DIR}/platforms/vita/aurora_vita_backend.cpp
@@ -63,6 +65,12 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
         message(FATAL_ERROR "Do not enable AURORA_VITA_WITH_UPSTREAM_GX on Vita yet: upstream aurora::gx still links Dawn")
     endif ()
     target_compile_definitions(aurora_vita_backend PUBLIC __vita__=1)
+    if (AURORA_VITA_DIRECT_STREAM_WRITE)
+        target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_DIRECT_STREAM_WRITE=1)
+    endif ()
+    if (AURORA_VITA_RUNTIME_MIPMAP_GENERATION)
+        target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_RUNTIME_MIPMAP_GENERATION=1)
+    endif ()
     target_compile_options(aurora_vita_backend PRIVATE
         -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
         -mtune=cortex-a9 -mfpu=neon -ffast-math -fsigned-char
