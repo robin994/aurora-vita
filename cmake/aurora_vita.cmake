@@ -4,6 +4,7 @@
 option(AURORA_VITA_WITH_UPSTREAM_GX "Compile the Vita bridge against Aurora's real GX structs (requires AURORA_ENABLE_GX)" OFF)
 option(AURORA_VITA_DIRECT_STREAM_WRITE "Write frame streaming data directly into mapped Vita GL buffers" OFF)
 option(AURORA_VITA_RUNTIME_MIPMAP_GENERATION "Generate missing texture mip chains at runtime on Vita" OFF)
+option(AURORA_VITA_BUILD_SDL3_PROBE "Build SDL3 native-platform + vitaGL coexistence probe" OFF)
 
 set(AURORA_VITA_BACKEND_SOURCES
     ${PROJECT_SOURCE_DIR}/platforms/vita/aurora_vita_backend.cpp
@@ -83,3 +84,16 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
         mathneon pthread m
     )
 endif()
+
+if (VITA AND AURORA_VITA_SDL3_NATIVE AND AURORA_VITA_BUILD_SDL3_PROBE)
+    include("${VITASDK}/share/vita.cmake")
+    add_executable(aurora_vita_sdl3_probe
+        ${PROJECT_SOURCE_DIR}/platforms/vita/probe/sdl3_vitagl_probe.cpp
+    )
+    target_compile_features(aurora_vita_sdl3_probe PRIVATE cxx_std_20)
+    target_compile_definitions(aurora_vita_sdl3_probe PRIVATE AURORA_VITA_SDL3_NATIVE=1)
+    target_link_libraries(aurora_vita_sdl3_probe PRIVATE aurora::vita_backend ${AURORA_SDL3_TARGET})
+    vita_create_self(aurora_vita_sdl3_probe.self aurora_vita_sdl3_probe)
+    vita_create_vpk(aurora_vita_sdl3_probe.vpk AURVSDL01 aurora_vita_sdl3_probe.self
+        VERSION 01.00 NAME "Aurora SDL3 + vitaGL Probe")
+endif ()
