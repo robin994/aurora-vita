@@ -5,7 +5,13 @@ if (APPLE)
 endif()
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if (VITA)
+  # Vita SELF executables are statically linked and vita-elf-create does not support
+  # ARM PIC relocations such as R_ARM_BASE_PREL.
+  set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
+else ()
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif ()
 
 option(AURORA_ENABLE_GX "Enable GX implementation and WebGPU renderer" ON)
 option(AURORA_ENABLE_DVD "Enable DVD implementation backed by nod" OFF)  # TODO: need to fix tests
