@@ -313,11 +313,43 @@ GXRenderModeObj GXMpal480IntDf = {
 };
 
 void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor, u16 ver) {
-  *rmout = *rmin;
-  const auto renderSize = aurora::gfx::get_render_target_size();
-  rmout->fbWidth = static_cast<u16>(std::min<uint32_t>(renderSize.x, UINT16_MAX));
-  rmout->efbHeight = static_cast<u16>(std::min<uint32_t>(renderSize.y, UINT16_MAX));
-  rmout->xfbHeight = static_cast<u16>(std::min<uint32_t>(renderSize.y, UINT16_MAX));
+  if (rmin == nullptr || rmout == nullptr) return;
+
+  // Keep GameCube render-mode dimensions in GameCube space.  The Vita backend
+  // scales them later when mapping viewport/scissor and during GXCopyDisp.
+  // Replacing these values with 960x544 here destroys PAL/overscan semantics
+  // before the game has a chance to configure its 448-line EFB.
+  const GXRenderModeObj in = *rmin;
+  *rmout = in;
+
+  const u32 hor2 = static_cast<u32>(hor) * 2u;
+  const u32 ver2 = static_cast<u32>(ver) * 2u;
+  const u32 mode = static_cast<u32>(in.viTVmode) & 3u;
+
+  rmout->fbWidth = static_cast<u16>(in.fbWidth > hor2 ? in.fbWidth - hor2 : 0u);
+  if (in.xfbHeight != 0) {
+    const u32 verf = (ver2 * static_cast<u32>(in.efbHeight)) / static_cast<u32>(in.xfbHeight);
+    rmout->efbHeight = static_cast<u16>(in.efbHeight > verf ? in.efbHeight - verf : 0u);
+  }
+
+  const u32 xfbTrim = (in.xFBmode == VI_XFBMODE_SF && mode == 0u) ? ver2 / 2u : ver2;
+  rmout->xfbHeight = static_cast<u16>(in.xfbHeight > xfbTrim ? in.xfbHeight - xfbTrim : 0u);
+  rmout->viWidth = static_cast<u16>(in.viWidth > hor2 ? in.viWidth - hor2 : 0u);
+  const u32 viTrim = mode == 1u ? ver2 * 2u : ver2;
+  rmout->viHeight = static_cast<u16>(in.viHeight > viTrim ? in.viHeight - viTrim : 0u);
+  rmout->viXOrigin = static_cast<u16>(static_cast<u32>(in.viXOrigin) + hor);
+  rmout->viYOrigin = static_cast<u16>(static_cast<u32>(in.viYOrigin) + ver);
+
+#if defined(MKW_TARGET_VITA)
+  static unsigned logCount = 0;
+  if (logCount++ < 4) {
+    std::printf("[aurora-vita] overscan in=%ux%u xfb=%u vi=%ux%u trim=%u,%u -> "
+                "fb=%ux%u xfb=%u vi=%ux%u origin=%u,%u\n",
+                in.fbWidth, in.efbHeight, in.xfbHeight, in.viWidth, in.viHeight,
+                hor, ver, rmout->fbWidth, rmout->efbHeight, rmout->xfbHeight,
+                rmout->viWidth, rmout->viHeight, rmout->viXOrigin, rmout->viYOrigin);
+  }
+#endif
 }
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
