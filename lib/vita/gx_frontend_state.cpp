@@ -66,7 +66,13 @@ void invalidate_static_texture_cache() noexcept {
 }
 
 Vec2<uint32_t> logical_fb_size() noexcept {
-  return vi::configured_fb_size();
+  // The Vita target is the final display surface, not a 640x528 GameCube EFB
+  // scratch allocation.  PAL titles can deliberately configure a shorter EFB
+  // and rely on the VI/display copy to scale those visible lines to the output.
+  // Using configured_fb_size() here forces Aurora's historical
+  // 528-line minimum (needed by some desktop/offscreen effects), which inserts
+  // 80 logical rows and pushes/crops bottom-of-screen UI on Vita.
+  return vi::visible_fb_size();
 }
 
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept {
