@@ -1,5 +1,4 @@
 #include <dolphin/vi.h>
-#include <dolphin/dvd.h>
 
 #if defined(MKW_TARGET_VITA)
 #include "../../vita/gfx_frontend.hpp"
@@ -11,7 +10,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdio>
 #include <optional>
 
 namespace aurora::vi {
@@ -87,25 +85,11 @@ void VIConfigurePan(u16 xOrg, u16 yOrg, u16 width, u16 height) {
   (void)width;
   (void)height;
 }
-u32 VIGetTvFormat() {
-#if defined(MKW_TARGET_VITA)
-  // There is no physical VI on Vita, so derive the television standard from
-  // the emulated GameCube disc instead of hard-coding NTSC.  In the standard
-  // GameCube game ID the fourth character is the region code; 'P' is the PAL
-  // multi-language European release.  Falling back to NTSC preserves the old
-  // behaviour for E/J and for callers that query VI before a disc ID exists.
-  const DVDDiskID* id = DVDGetCurrentDiskID();
-  const u32 format = id != nullptr && id->gameName[3] == 'P' ? VI_PAL : VI_NTSC;
-  static bool logged = false;
-  if (!logged) {
-    std::printf("[aurora-vita] VI TV format=%s disc=%.4s\n",
-                format == VI_PAL ? "PAL" : "NTSC", id != nullptr ? id->gameName : "----");
-    logged = true;
-  }
-  return format;
-#endif
-  return VI_NTSC;
-}
+// The port historically exposes NTSC here.  Do not infer the active VI mode
+// from the disc region: Strikers uses VI_PAL as the signal to open its
+// PAL50/RGB60 selection scene, so a G4QP disc is not by itself proof that the
+// current console mode is PAL50.
+u32 VIGetTvFormat() { return VI_NTSC; }
 void VIFlush() {}
 
 void VISetWindowTitle(const char* title) { aurora::window::set_title(title); }
