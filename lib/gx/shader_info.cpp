@@ -542,24 +542,9 @@ static u32 line_texcoord_mask() noexcept {
   return mask;
 }
 
-namespace {
 // Largest possible staged prefix: scalar head (80) + line/point block (16) + projection matrix + every matrix the uncompacted layout can hold.
 constexpr size_t kStagedUniformBytes =
     96 + sizeof(Mat4x4<float>) + sizeof(Mat3x4<float>) * (MaxPostexMtx + MaxPnMtx);
-
-// The host viewport always receives the normalized GX depth window (render_pass_impl clamps to minDepth <= maxDepth).
-static Mat4x4<float> effective_projection() noexcept {
-  const auto& vp = g_gxState.renderViewport;
-  const bool flip = (vp.znear <= vp.zfar) == UseReversedZ;
-  Mat4x4<float> proj = g_gxState.proj;
-  if (flip) {
-    for (size_t i = 0; i < 4; ++i) {
-      proj.m2.m[i] = -(proj.m2.m[i] + proj.m3.m[i]);
-    }
-  }
-  return proj;
-}
-} // namespace
 
 UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
                             const FrameInterpolationDrawIdentity& drawIdentity, bool perspective,
@@ -609,7 +594,9 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
     }
   }
   const size_t projectionOffset = stagedSize;
-  const Mat4x4<float> effectiveProj = effective_projection();
+  const auto& viewport = g_gxState.renderViewport;
+  const Mat4x4<float> effectiveProj =
+      effective_projection_for_depth_range(g_gxState.proj, viewport.znear, viewport.zfar);
   stage(&effectiveProj, sizeof(effectiveProj));
 
   const size_t positionOffset = stagedSize;

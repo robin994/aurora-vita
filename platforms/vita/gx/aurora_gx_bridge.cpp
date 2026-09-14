@@ -346,9 +346,8 @@ void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms&
   for (unsigned i = 0; i < aurora::gx::MaxPTTexMtx; ++i) copy_matrix(state.postMatrices[i], g.ptTexMtxs[i]);
   state.currentPnMatrix = static_cast<uint8_t>(std::min<u32>(g.currentPnMtx, 9));
 
-  auto proj = g.proj;
-  if constexpr (aurora::gx::UseReversedZ) proj.m2 = proj.m2 * aurora::Vec4{-1.f, -1.f, -1.f, -1.f};
-  else proj.m2 = proj.m2 + proj.m3;
+  const auto proj = aurora::gx::effective_projection_for_depth_range(
+      g.proj, g.renderViewport.znear, g.renderViewport.zfar);
   // Aurora/WGSL uses row-vector * matrix. The Vita GLSL path uses matrix * column-vector,
   // so upload the transposed matrix to preserve identical clip-space results.
   const auto glProj = proj.transpose();

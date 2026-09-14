@@ -58,6 +58,21 @@ namespace aurora::gx {
 constexpr bool UsePerPixelLighting = false;
 constexpr bool UseReversedZ = true;
 
+// Host graphics APIs require a normalized viewport depth interval. Preserve the
+// guest's near/far direction in clip space so every backend can submit the same
+// ordered depth range while still using Aurora's reversed-Z convention.
+inline Mat4x4<float> effective_projection_for_depth_range(const Mat4x4<float>& projection,
+                                                          float znear, float zfar) noexcept {
+  Mat4x4<float> out = projection;
+  const bool flip = (znear <= zfar) == UseReversedZ;
+  if (flip) {
+    for (size_t i = 0; i < 4; ++i) {
+      out.m2.m[i] = -(out.m2.m[i] + out.m3.m[i]);
+    }
+  }
+  return out;
+}
+
 constexpr u32 MaxTextures = GX_MAX_TEXMAP;
 constexpr u32 MaxTluts = 20;
 constexpr u32 MaxTevStages = GX_MAX_TEVSTAGE;

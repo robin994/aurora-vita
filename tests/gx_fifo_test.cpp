@@ -3104,6 +3104,40 @@ TEST_F(GXFifoTest, ViewportRender_EncodesAuroraOverride) {
   EXPECT_FLOAT_EQ(g_gxState.renderViewport.height, 720.0f);
 }
 
+TEST(GXProjectionDepth, NormalDepthRangeUsesReversedZClipTransform) {
+  const aurora::Mat4x4<float> projection{
+      {1.0f, 2.0f, 3.0f, 4.0f},
+      {5.0f, 6.0f, 7.0f, 8.0f},
+      {9.0f, 10.0f, 11.0f, 12.0f},
+      {13.0f, 14.0f, 15.0f, 16.0f},
+  };
+
+  const auto effective =
+      aurora::gx::effective_projection_for_depth_range(projection, 0.0f, 1.0f);
+
+  EXPECT_EQ(effective.m0, projection.m0);
+  EXPECT_EQ(effective.m1, projection.m1);
+  EXPECT_EQ(effective.m3, projection.m3);
+  EXPECT_FLOAT_EQ(effective.m2.x(), -22.0f);
+  EXPECT_FLOAT_EQ(effective.m2.y(), -24.0f);
+  EXPECT_FLOAT_EQ(effective.m2.z(), -26.0f);
+  EXPECT_FLOAT_EQ(effective.m2.w(), -28.0f);
+}
+
+TEST(GXProjectionDepth, ReversedGuestDepthRangeKeepsProjection) {
+  const aurora::Mat4x4<float> projection{
+      {1.0f, 2.0f, 3.0f, 4.0f},
+      {5.0f, 6.0f, 7.0f, 8.0f},
+      {9.0f, 10.0f, 11.0f, 12.0f},
+      {13.0f, 14.0f, 15.0f, 16.0f},
+  };
+
+  const auto effective =
+      aurora::gx::effective_projection_for_depth_range(projection, 1.0f, 0.0f);
+
+  EXPECT_EQ(effective, projection);
+}
+
 TEST_F(GXFifoTest, ScissorRender_EncodesAuroraOverride) {
   GXSetScissorRender(100, 40, 800, 600);
   auto bytes = capture_fifo();
