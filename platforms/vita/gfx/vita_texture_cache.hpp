@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 namespace aurora::vita::gfx {
 class TextureCache {
 public:
@@ -34,5 +35,8 @@ private:
   // the texture can be retried normally after older cache entries become evictable.
   uint64_t failedFrame_=~uint64_t{0};
   std::unordered_set<uint64_t> failedKeys_{};
+  // Reused by the CMPR -> DXT1 fast path so streaming new textures does not
+  // allocate and free a temporary buffer for every cache miss.
+  std::vector<uint8_t> nativeCompressedScratch_{};
 };
 } // namespace aurora::vita::gfx

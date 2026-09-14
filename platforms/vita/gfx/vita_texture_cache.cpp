@@ -11,6 +11,9 @@
 #ifndef AURORA_VITA_RUNTIME_MIPMAP_GENERATION
 #define AURORA_VITA_RUNTIME_MIPMAP_GENERATION 0
 #endif
+#ifndef AURORA_VITA_NATIVE_CMPR
+#define AURORA_VITA_NATIVE_CMPR 0
+#endif
 namespace aurora::vita::gfx {
 namespace {
 void vgl_log_texture_alloc_fail(uint32_t w,uint32_t h,unsigned fmt,uint8_t mips,uint64_t sourceId,
@@ -41,6 +44,18 @@ size_t rgba_full_mip_bytes(uint32_t width,uint32_t height) noexcept {
 // temp buffers can all push real usage above width*height*4. Never underestimate
 // here or the pre-eviction below will let vitaGL run out of mapped memory.
 size_t estimate_gpu_bytes(const TextureDesc& d) noexcept {
+#if defined(__vita__) && AURORA_VITA_NATIVE_CMPR
+  if(d.format==TextureFormat::CMPR){
+    size_t total=0;
+    const unsigned levels=std::max<unsigned>(1u,d.mipCount);
+    for(unsigned l=0;l<levels;l++){
+      total+=dxt1_texture_size(std::max(1u,d.width>>l),std::max(1u,d.height>>l));
+    }
+    // Keep the same conservative allocator slack as the RGBA path. The payload
+    // itself is now BC1-sized, avoiding the 8x CMPR -> RGBA8 expansion.
+    return total+total/5u+65536u;
+  }
+#endif
   size_t total=0;
   const unsigned levels=std::max<unsigned>(1u,d.mipCount);
   for(unsigned l=0;l<levels;l++){
@@ -114,6 +129,19 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
   const auto* base=static_cast<const uint8_t*>(d.data);size_t encodedOffset=0;const unsigned levels=std::max<unsigned>(1,d.mipCount);unsigned uploadedLevels=0;
   for(unsigned level=0;level<levels;level++){
     TextureDesc ld=d;ld.width=std::max(1u,d.width>>level);ld.height=std::max(1u,d.height>>level);ld.data=base+encodedOffset;ld.mipCount=1;ld.generateMipmaps=false;const size_t encoded=encoded_texture_size(ld.width,ld.height,ld.format);if(d.dataSize&&encodedOffset+encoded>d.dataSize)break;ld.dataSize=encoded;
+#if defined(__vita__)
+#if AURORA_VITA_NATIVE_CMPR
+    if(ld.format==TextureFormat::CMPR){
+      if(!transcode_cmpr_to_dxt1(ld,nativeCompressedScratch_))break;
+      glCompressedTexImage2D(GL_TEXTURE_2D,static_cast<GLint>(level),GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                             static_cast<GLsizei>(ld.width),static_cast<GLsizei>(ld.height),0,
+                             static_cast<GLsizei>(nativeCompressedScratch_.size()),nativeCompressedScratch_.data());
+      ++uploadedLevels;
+      encodedOffset+=encoded;
+      continue;
+    }
+#endif
+#endif
     auto decoded=decode_texture_rgba8(ld);if(!decoded.ok)break;++uploadedLevels;
 #if defined(__vita__)
     glTexImage2D(GL_TEXTURE_2D,static_cast<GLint>(level),GL_RGBA,decoded.width,decoded.height,0,GL_RGBA,GL_UNSIGNED_BYTE,decoded.rgba.data());
@@ -166,7 +194,20 @@ void TextureCache::erase(Handle h) noexcept {auto hi=byHandle_.find(h);if(hi==by
 #endif
   byKey_.erase(it);byHandle_.erase(hi);}
 void TextureCache::clear() noexcept {std::vector<Handle> hs;hs.reserve(byHandle_.size());for(auto&[h,k]:byHandle_){(void)k;hs.push_back(h);}for(auto h:hs)erase(h);bytes_=0;failedKeys_.clear();failedFrame_=~uint64_t{0};}
-void TextureCache::trim(uint64_t frame) noexcept {(void)frame;while(bytes_>budget_&&!byKey_.empty()){auto victim=std::min_element(byKey_.begin(),byKey_.end(),[](auto&a,auto&b){return a.second.lastUse<b.second.lastUse;});if(victim==byKey_.end())break;++evictions_;erase(victim->second.handle);}}
+void TextureCache::trim(uint64_t frame) noexcept {
+  const size_t target=budget_>kEvictHeadroom?budget_-kEvictHeadroom:budget_;
+  while(bytes_>target&&!byKey_.empty()){
+    auto victim=byKey_.end();
+    for(auto it=byKey_.begin();it!=byKey_.end();++it){
+      // Draw commands from this frame can still reference the GL texture until
+      // the command stream is executed. Only retire entries from older frames.
+      if(it->second.lastUse>=frame)continue;
+      if(victim==byKey_.end()||it->second.lastUse<victim->second.lastUse)victim=it;
+    }
+    if(victim==byKey_.end())break;
+    ++evictions_;erase(victim->second.handle);
+  }
+}
 size_t TextureCache::invalidate_source_range(uint64_t start,size_t bytes) noexcept {
   if(bytes==0)return 0;
   const uint64_t end = bytes > UINT64_MAX - start ? UINT64_MAX : start + static_cast<uint64_t>(bytes);

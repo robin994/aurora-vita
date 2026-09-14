@@ -5,6 +5,7 @@ option(AURORA_VITA_WITH_UPSTREAM_GX "Compile the Vita bridge against Aurora's re
 option(AURORA_VITA_WITH_GX_FRONTEND "Build the Dawn-free Dolphin GX/VI frontend for native Vita ports" OFF)
 option(AURORA_VITA_DIRECT_STREAM_WRITE "Write frame streaming data directly into mapped Vita GL buffers" OFF)
 option(AURORA_VITA_RUNTIME_MIPMAP_GENERATION "Generate missing texture mip chains at runtime on Vita" OFF)
+option(AURORA_VITA_NATIVE_CMPR "Upload GameCube CMPR through vitaGL's native DXT1 path" ON)
 option(AURORA_VITA_BUILD_SDL3_PROBE "Build SDL3 native-platform + vitaGL coexistence probe" OFF)
 
 set(AURORA_VITA_BACKEND_SOURCES
@@ -107,6 +108,9 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
     endif ()
     if (AURORA_VITA_RUNTIME_MIPMAP_GENERATION)
         target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_RUNTIME_MIPMAP_GENERATION=1)
+    endif ()
+    if (AURORA_VITA_NATIVE_CMPR)
+        target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_NATIVE_CMPR=1)
     endif ()
     target_compile_options(aurora_vita_backend PRIVATE
         -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -fshort-wchar

@@ -32,6 +32,9 @@ void put(std::vector<uint8_t>& out, uint32_t w, uint32_t h, uint32_t x, uint32_t
   out[o]=c.r; out[o+1]=c.g; out[o+2]=c.b; out[o+3]=c.a;
 }
 size_t blocks(uint32_t n, uint32_t b) { return (n+b-1)/b; }
+uint8_t reverse_cmpr_selector_pairs(uint8_t v) noexcept {
+  return static_cast<uint8_t>(((v&0xc0u)>>6)|((v&0x30u)>>2)|((v&0x0cu)<<2)|((v&0x03u)<<6));
+}
 void cmpr_block(const uint8_t* src, std::vector<uint8_t>& out, uint32_t w, uint32_t h, uint32_t ox, uint32_t oy) {
   const uint16_t c0v=be16(src), c1v=be16(src+2);
   std::array<RGBA,4> c{}; c[0]=decode_rgb565(c0v); c[1]=decode_rgb565(c1v);
@@ -68,6 +71,43 @@ size_t encoded_mip_chain_size(uint32_t w,uint32_t h,TextureFormat f,uint8_t mipC
   size_t total=0;const unsigned levels=std::max<unsigned>(1,mipCount);
   for(unsigned level=0;level<levels;level++){total+=encoded_texture_size(std::max(1u,w>>level),std::max(1u,h>>level),f);}
   return total;
+}
+
+size_t dxt1_texture_size(uint32_t w,uint32_t h) noexcept {
+  if(!w||!h)return 0;
+  return blocks(w,4)*blocks(h,4)*8u;
+}
+
+bool transcode_cmpr_to_dxt1(const TextureDesc& d,std::vector<uint8_t>& out) noexcept {
+  out.clear();
+  if(d.format!=TextureFormat::CMPR||!d.data||!d.width||!d.height)return false;
+  const size_t need=encoded_texture_size(d.width,d.height,d.format);
+  if(d.dataSize&&d.dataSize<need)return false;
+
+  const uint32_t dstBlocksX=static_cast<uint32_t>(blocks(d.width,4));
+  const uint32_t dstBlocksY=static_cast<uint32_t>(blocks(d.height,4));
+  out.assign(static_cast<size_t>(dstBlocksX)*dstBlocksY*8u,0);
+  const auto* src=static_cast<const uint8_t*>(d.data);
+  size_t srcOffset=0;
+  for(uint32_t my=0;my<d.height;my+=8){
+    for(uint32_t mx=0;mx<d.width;mx+=8){
+      // GX CMPR stores four 4x4 BC1-like blocks inside each 8x8 macro tile
+      // (TL, TR, BL, BR). DXT1 expects a globally linear 4x4 block grid.
+      for(unsigned sub=0;sub<4;sub++){
+        const uint32_t bx=mx/4u+(sub&1u);
+        const uint32_t by=my/4u+(sub>>1u);
+        const auto* in=src+srcOffset+sub*8u;
+        if(bx>=dstBlocksX||by>=dstBlocksY)continue;
+        auto* dst=out.data()+(static_cast<size_t>(by)*dstBlocksX+bx)*8u;
+        // GX endpoints are big-endian; S3TC stores the two RGB565 endpoints LE.
+        dst[0]=in[1];dst[1]=in[0];dst[2]=in[3];dst[3]=in[2];
+        // GX consumes selector pairs MSB-first per row; DXT1 consumes them LSB-first.
+        for(unsigned y=0;y<4;y++)dst[4+y]=reverse_cmpr_selector_pairs(in[4+y]);
+      }
+      srcOffset+=32u;
+    }
+  }
+  return true;
 }
 
 DecodeResult decode_texture_rgba8(const TextureDesc& d) noexcept {
