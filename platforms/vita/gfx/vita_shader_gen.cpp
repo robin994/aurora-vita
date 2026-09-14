@@ -263,7 +263,15 @@ ShaderSources build_tev_glsl(const PipelineDesc& desc) noexcept {
         "attribute vec4 a_position;\nattribute vec4 a_color0;\nattribute vec4 a_color1;\n";
   for (unsigned i = 0; i < MaxTextures; i++) vs << "attribute vec3 a_tex" << i << ";\nvarying vec3 v_tex" << i << ";\n";
   vs << "varying vec4 v_color0;\nvarying vec4 v_color1;\nuniform mat4 u_mvp;\n"
-        "void main(){ gl_Position=" << (desc.positionIsClipSpace ? "a_position" : "u_mvp*a_position") << "; v_color0=a_color0; v_color1=a_color1;";
+        "void main(){ gl_Position=" << (desc.positionIsClipSpace ? "a_position" : "u_mvp*a_position") << ";";
+  // Aurora's GX shader first maps the guest clip Z into WebGPU's [0,w]
+  // convention. vitaGL/OpenGL instead consumes [-w,w], so reproduce the
+  // Aurora transform and then remap [0,w] -> [-w,w]. This keeps the final
+  // window-space depth identical to the reference WebGPU backend.
+  if (desc.reversedZ) vs << "gl_Position.z=-gl_Position.z;";
+  else vs << "gl_Position.z+=gl_Position.w;";
+  vs << "gl_Position.z=2.0*gl_Position.z-gl_Position.w;"
+        "v_color0=a_color0; v_color1=a_color1;";
   for (unsigned i = 0; i < MaxTextures; i++) vs << "v_tex" << i << "=a_tex" << i << ";";
   vs << "}\n";
   out.vertex = vs.str();
@@ -372,7 +380,9 @@ ShaderSources build_tev_glsl(const PipelineDesc& desc) noexcept {
   if (ac.comp0 != Compare::Always || ac.comp1 != Compare::Always) fs << " if(!" << pass << ") discard;\n";
   if (desc.dstAlpha >= 0) fs << " prev.a=" << (static_cast<float>(desc.dstAlpha) / 255.0f) << ";\n";
   if (desc.fogMode != FogMode::None) {
-    fs << " { float fd=" << (desc.reversedZ ? "(1.0-gl_FragCoord.z)" : "gl_FragCoord.z") << "; float fb=";
+    // gl_FragCoord.z now matches WebGPU fragment position.z after the vertex
+    // clip-space remap above, so use the same fog depth convention as Aurora.
+    fs << " { float fd=" << (desc.reversedZ ? "gl_FragCoord.z" : "(1.0-gl_FragCoord.z)") << "; float fb=";
     if (desc.fogOrthographic) fs << "u_fog_params.x*fd";
     else fs << "u_fog_params.x/max(u_fog_params.y-fd,0.000001)";
     if(desc.fogRangeEnabled){

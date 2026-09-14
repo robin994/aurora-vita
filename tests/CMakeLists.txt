@@ -43,6 +43,9 @@ if (AURORA_ENABLE_GX)
     ../lib/gx/command_processor.cpp
     ../lib/gx/shader_info.cpp
     ../lib/gx/frame_interpolation.cpp
+    ../platforms/vita/gfx/vita_pipeline_key.cpp
+    ../platforms/vita/gfx/vita_shader_gen.cpp
+    vita_shader_depth_test.cpp
   )
 
   target_include_directories(gx_fifo_tests PRIVATE

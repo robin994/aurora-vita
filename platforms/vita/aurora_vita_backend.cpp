@@ -154,7 +154,7 @@ bool initialize(const BackendConfig& c) noexcept {
   vglWaitVblankStart(g_config.wait_vblank?GL_TRUE:GL_FALSE);
   glViewport(0,0,g_config.width,g_config.height);
   glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
-  glEnable(GL_DEPTH_TEST); glDepthFunc(GL_GEQUAL); glClearDepth(0.0f);
+  glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glClearDepth(1.0f);
 #endif
   gfx::RendererConfig rc{}; rc.width=c.width; rc.height=c.height; rc.textureBudget=c.texture_cache_budget;
   g_renderer=std::make_unique<gfx::Renderer>(rc);
