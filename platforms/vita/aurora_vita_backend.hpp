@@ -39,6 +39,11 @@ struct BackendConfig {
   size_t stream_vertex_bytes=4*1024*1024;
   size_t stream_index_bytes=1024*1024;
   uint32_t stream_slots=3;
+  // The render thread remains the sole vitaGL owner. These workers only run
+  // CPU-side per-vertex decode/transform work, giving Vita three CPU lanes in
+  // total with the default two workers plus the caller.
+  uint32_t cpu_worker_threads=2;
+  uint32_t cpu_parallel_min_vertices=512;
   bool diagnostics=true;
   bool strict_unsupported=false;
   uint32_t diagnostics_period_frames=300;

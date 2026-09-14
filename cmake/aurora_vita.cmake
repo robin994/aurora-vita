@@ -20,6 +20,7 @@ set(AURORA_VITA_BACKEND_SOURCES
     ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_telemetry.cpp
     ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_memory_budget.cpp
     ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_gl_util.cpp
+    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_cpu_workers.cpp
     ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_texture_decode.cpp
     ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_vertex_decode.cpp
     ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_vertex_pipeline.cpp

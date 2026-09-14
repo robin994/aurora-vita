@@ -1,4 +1,5 @@
 #include "aurora_vita_backend.hpp"
+#include "gfx/vita_cpu_workers.hpp"
 #include "gfx/vita_renderer.hpp"
 #include "gx/aurora_vita_draw_sink.hpp"
 #include <cstdio>
@@ -163,6 +164,9 @@ bool initialize(const BackendConfig& c) noexcept {
     g_renderer.reset();
     return false;
   }
+  if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices)) {
+    std::fprintf(stderr, "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
+  }
   g_telemetry.reset(); g_coverage.reset(); g_trace=std::make_unique<integration::FrameTrace>(c.trace_capacity);
   gxbridge::DrawSinkConfig dc{};
   dc.streaming.vertexBytes=c.stream_vertex_bytes; dc.streaming.indexBytes=c.stream_index_bytes; dc.streaming.slots=c.stream_slots;
@@ -171,6 +175,7 @@ bool initialize(const BackendConfig& c) noexcept {
   if(!g_drawSink->initialize(*g_renderer,dc)){
     g_initFailure=InitFailure::DrawSinkInitFailed;
     std::snprintf(g_initFailureDetail,sizeof(g_initFailureDetail),"DrawSink::initialize failed");
+    gfx::shutdown_cpu_workers();
     g_renderer->shutdown(); g_renderer.reset(); g_drawSink.reset();
     return false;
   }
@@ -241,6 +246,7 @@ void shutdown() noexcept {
   if (g_config.diagnostics && g_config.coverage_log_path) g_coverage.write_report(g_config.coverage_log_path);
   if (g_config.diagnostics && g_config.trace_log_path && g_trace) g_trace->write_report(g_config.trace_log_path, 2048);
   if(g_drawSink){g_drawSink->shutdown();g_drawSink.reset();}
+  gfx::shutdown_cpu_workers();
   if(g_renderer){g_renderer->shutdown();g_renderer.reset();}
   g_trace.reset();
   g_initialized=false;

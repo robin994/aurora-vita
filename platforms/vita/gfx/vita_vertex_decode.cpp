@@ -1,8 +1,11 @@
 #include "vita_vertex_decode.hpp"
+#include "vita_cpu_workers.hpp"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace aurora::vita::gfx {
 namespace {
@@ -57,6 +60,84 @@ bool resolve(const uint8_t* stream, size_t streamSize, size_t base, const Vertex
   le = a.array.littleEndian;
   return true;
 }
+
+bool decode_vertex(const uint8_t* stream, size_t streamSize, uint32_t vi,
+                   const VertexDecodeLayout& layout, CanonicalVertex& v) noexcept {
+  const size_t base = size_t(vi) * layout.streamStride;
+  for (unsigned ai = 0; ai < layout.count; ++ai) {
+    const auto& a = layout.attributes[ai];
+    if (a.source == VertexSource::None) continue;
+    const uint8_t* p = nullptr;
+    size_t avail = 0;
+    bool le = false;
+    if (!resolve(stream, streamSize, base, a, layout.streamLittleEndian, p, avail, le)) return false;
+    if (a.semantic == VertexSemantic::Color0 || a.semantic == VertexSemantic::Color1) {
+      uint8_t* c = a.semantic == VertexSemantic::Color0 ? v.color0 : v.color1;
+      if (!color(p, avail, a.component, le, c)) return false;
+      continue;
+    }
+    float tmp[4]{};
+    if (!numeric(p, avail, a, le, tmp)) return false;
+    switch (a.semantic) {
+    case VertexSemantic::PnMatrixIndex:
+      v.pnMatrixIndex = static_cast<uint8_t>(tmp[0] / 3.f);
+      break;
+    case VertexSemantic::TexMatrixIndex0: case VertexSemantic::TexMatrixIndex1:
+    case VertexSemantic::TexMatrixIndex2: case VertexSemantic::TexMatrixIndex3:
+    case VertexSemantic::TexMatrixIndex4: case VertexSemantic::TexMatrixIndex5:
+    case VertexSemantic::TexMatrixIndex6: case VertexSemantic::TexMatrixIndex7: {
+      const unsigned mi = static_cast<unsigned>(a.semantic) - static_cast<unsigned>(VertexSemantic::TexMatrixIndex0);
+      v.texMatrixIndex[mi] = static_cast<uint8_t>(tmp[0]);
+      break;
+    }
+    case VertexSemantic::Position:
+      for (unsigned j = 0; j < std::min<unsigned>(3, a.components); ++j) v.position[j] = tmp[j];
+      break;
+    case VertexSemantic::Normal:
+      for (unsigned j = 0; j < std::min<unsigned>(3, a.components); ++j) v.normal[j] = tmp[j];
+      break;
+    case VertexSemantic::Binormal:
+      for (unsigned j = 0; j < std::min<unsigned>(3, a.components); ++j) v.binormal[j] = tmp[j];
+      break;
+    case VertexSemantic::Tangent:
+      for (unsigned j = 0; j < std::min<unsigned>(3, a.components); ++j) v.tangent[j] = tmp[j];
+      break;
+    case VertexSemantic::Tex0: case VertexSemantic::Tex1: case VertexSemantic::Tex2: case VertexSemantic::Tex3:
+    case VertexSemantic::Tex4: case VertexSemantic::Tex5: case VertexSemantic::Tex6: case VertexSemantic::Tex7: {
+      const unsigned ti = static_cast<unsigned>(a.semantic) - static_cast<unsigned>(VertexSemantic::Tex0);
+      for (unsigned j = 0; j < std::min<unsigned>(3, a.components); ++j) v.texcoord[ti][j] = tmp[j];
+      if (a.components < 3) v.texcoord[ti][2] = 1.f;
+      break;
+    }
+    default:
+      break;
+    }
+  }
+  return true;
+}
+
+struct DecodeContext {
+  const uint8_t* stream = nullptr;
+  size_t streamSize = 0;
+  const VertexDecodeLayout* layout = nullptr;
+  CanonicalVertex* vertices = nullptr;
+  std::array<size_t, 3> badVertex{{
+      std::numeric_limits<size_t>::max(),
+      std::numeric_limits<size_t>::max(),
+      std::numeric_limits<size_t>::max()}};
+};
+
+bool decode_range(void* opaque, size_t begin, size_t end, uint32_t lane) noexcept {
+  auto& ctx = *static_cast<DecodeContext*>(opaque);
+  if (lane >= ctx.badVertex.size()) return false;
+  for (size_t vi = begin; vi < end; ++vi) {
+    if (!decode_vertex(ctx.stream, ctx.streamSize, static_cast<uint32_t>(vi), *ctx.layout, ctx.vertices[vi])) {
+      ctx.badVertex[lane] = vi;
+      return false;
+    }
+  }
+  return true;
+}
 }
 VertexLayout canonical_vertex_layout() noexcept {
   VertexLayout l{};l.count=11;
@@ -66,12 +147,21 @@ VertexLayout canonical_vertex_layout() noexcept {
   for(unsigned i=0;i<8;i++)l.attributes[3+i]={static_cast<uint8_t>(3+i),3,VertexScalar::F32,false,sizeof(CanonicalVertex),static_cast<uint16_t>(offsetof(CanonicalVertex,texcoord)+sizeof(float)*3*i)};
   return l;
 }
-VertexDecodeResult decode_vertices(const uint8_t*stream,size_t streamSize,uint32_t vertexCount,const VertexDecodeLayout&layout) noexcept {VertexDecodeResult r{};if(!stream||!layout.streamStride||layout.count>layout.attributes.size())return r;if(size_t(vertexCount)*layout.streamStride>streamSize)return r;r.vertices.resize(vertexCount);for(uint32_t vi=0;vi<vertexCount;vi++){size_t base=size_t(vi)*layout.streamStride;auto&v=r.vertices[vi];for(unsigned ai=0;ai<layout.count;ai++){const auto&a=layout.attributes[ai];if(a.source==VertexSource::None)continue;const uint8_t*p=nullptr;size_t avail=0;bool le=false;if(!resolve(stream,streamSize,base,a,layout.streamLittleEndian,p,avail,le)){r.badVertex=vi;return r;}if(a.semantic==VertexSemantic::Color0||a.semantic==VertexSemantic::Color1){uint8_t*c=a.semantic==VertexSemantic::Color0?v.color0:v.color1;if(!color(p,avail,a.component,le,c)){r.badVertex=vi;return r;}continue;}float tmp[4]{};if(!numeric(p,avail,a,le,tmp)){r.badVertex=vi;return r;}switch(a.semantic){
-case VertexSemantic::PnMatrixIndex:v.pnMatrixIndex=static_cast<uint8_t>(tmp[0]/3.f);break;
-case VertexSemantic::TexMatrixIndex0:case VertexSemantic::TexMatrixIndex1:case VertexSemantic::TexMatrixIndex2:case VertexSemantic::TexMatrixIndex3:case VertexSemantic::TexMatrixIndex4:case VertexSemantic::TexMatrixIndex5:case VertexSemantic::TexMatrixIndex6:case VertexSemantic::TexMatrixIndex7:{unsigned mi=static_cast<unsigned>(a.semantic)-static_cast<unsigned>(VertexSemantic::TexMatrixIndex0);v.texMatrixIndex[mi]=static_cast<uint8_t>(tmp[0]);break;}
-case VertexSemantic::Position:for(unsigned j=0;j<std::min<unsigned>(3,a.components);j++)v.position[j]=tmp[j];break;
-case VertexSemantic::Normal:for(unsigned j=0;j<std::min<unsigned>(3,a.components);j++)v.normal[j]=tmp[j];break;
-case VertexSemantic::Binormal:for(unsigned j=0;j<std::min<unsigned>(3,a.components);j++)v.binormal[j]=tmp[j];break;
-case VertexSemantic::Tangent:for(unsigned j=0;j<std::min<unsigned>(3,a.components);j++)v.tangent[j]=tmp[j];break;
-case VertexSemantic::Tex0:case VertexSemantic::Tex1:case VertexSemantic::Tex2:case VertexSemantic::Tex3:case VertexSemantic::Tex4:case VertexSemantic::Tex5:case VertexSemantic::Tex6:case VertexSemantic::Tex7:{unsigned ti=static_cast<unsigned>(a.semantic)-static_cast<unsigned>(VertexSemantic::Tex0);for(unsigned j=0;j<std::min<unsigned>(3,a.components);j++)v.texcoord[ti][j]=tmp[j];if(a.components<3)v.texcoord[ti][2]=1.f;break;}default:break;}}}r.ok=true;return r;}
+VertexDecodeResult decode_vertices(const uint8_t* stream, size_t streamSize, uint32_t vertexCount,
+                                   const VertexDecodeLayout& layout) noexcept {
+  VertexDecodeResult r{};
+  if (!stream || !layout.streamStride || layout.count > layout.attributes.size()) return r;
+  if (size_t(vertexCount) * layout.streamStride > streamSize) return r;
+
+  r.vertices.resize(vertexCount);
+  DecodeContext ctx{stream, streamSize, &layout, r.vertices.data()};
+  if (!cpu_parallel_for(vertexCount, decode_range, &ctx)) {
+    size_t bad = std::numeric_limits<size_t>::max();
+    for (const size_t candidate : ctx.badVertex) bad = std::min(bad, candidate);
+    r.badVertex = bad == std::numeric_limits<size_t>::max() ? 0 : bad;
+    return r;
+  }
+  r.ok = true;
+  return r;
+}
 } // namespace aurora::vita::gfx

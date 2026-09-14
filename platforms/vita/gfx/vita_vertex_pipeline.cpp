@@ -1,4 +1,5 @@
 #include "vita_vertex_pipeline.hpp"
+#include "vita_cpu_workers.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -72,38 +73,57 @@ bool is_bump(TexGenType t) noexcept{return t>=TexGenType::Bump0&&t<=TexGenType::
 unsigned bump_light(TexGenType t) noexcept{return static_cast<unsigned>(t)-static_cast<unsigned>(TexGenType::Bump0);}
 V3 normalize3(V3 v) noexcept{return norm(v);}
 
+bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
+                      const VertexTransformState& state) noexcept {
+  const CanonicalVertex in=v;
+  const unsigned pn=in.pnMatrixIndex==0xff?state.currentPnMatrix:in.pnMatrixIndex;
+  if(pn>=10)return false;
+  const V3 mvPos=transform(state.postexMatrices[pn],{in.position[0],in.position[1],in.position[2],1.f});
+  V3 mvNrm=transform_dir(state.normalMatrices[pn],make3(in.normal));if(len(mvNrm)>1e-10f)mvNrm=norm(mvNrm);
+  V3 mvBin=transform_dir(state.normalMatrices[pn],make3(in.binormal));if(len(mvBin)>1e-10f)mvBin=norm(mvBin);
+  V3 mvTan=transform_dir(state.normalMatrices[pn],make3(in.tangent));if(len(mvTan)>1e-10f)mvTan=norm(mvTan);
+  v.position[0]=mvPos.x;v.position[1]=mvPos.y;v.position[2]=mvPos.z;v.normal[0]=mvNrm.x;v.normal[1]=mvNrm.y;v.normal[2]=mvNrm.z;v.binormal[0]=mvBin.x;v.binormal[1]=mvBin.y;v.binormal[2]=mvBin.z;v.tangent[0]=mvTan.x;v.tangent[1]=mvTan.y;v.tangent[2]=mvTan.z;
+  for(unsigned base=0;base<2;base++){
+    const V4 rgb=light_channel(in,pipeline.colorChannels[base],base,state,mvPos,mvNrm);const V4 alpha=light_channel(in,pipeline.colorChannels[base+2],base+2,state,mvPos,mvNrm);uint8_t*out=base?v.color1:v.color0;out[0]=byte(rgb.x);out[1]=byte(rgb.y);out[2]=byte(rgb.z);out[3]=byte(alpha.w);
+  }
+  for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;i++){
+    const auto&t=pipeline.texgens[i];
+    if(is_bump(t.type)){
+      const unsigned src=std::min<unsigned>(t.embossSource,MaxTextures-1),li=std::min<unsigned>(bump_light(t.type),MaxLights-1);V3 ldir=norm(sub(light_vec3(state.lights[li].position),mvPos));v.texcoord[i][0]=v.texcoord[src][0]+dot(ldir,mvTan);v.texcoord[i][1]=v.texcoord[src][1]+dot(ldir,mvBin);v.texcoord[i][2]=1.f;continue;
+    }
+    V4 src=tex_source(in,t.source);V3 tmp{};
+    if(t.type==TexGenType::SRTG){tmp={src.x,src.y,1.f};}
+    else if(t.matrixFromVertex&&in.texMatrixIndex[i]!=0xff){const unsigned mi=in.texMatrixIndex[i]/3;if(mi>=state.postexMatrices.size())return false;tmp=transform(state.postexMatrices[mi],src);}
+    else if(t.matrix<0){tmp={src.x,src.y,src.z};}
+    else {const unsigned mi=10u+static_cast<unsigned>(t.matrix);if(mi>=state.postexMatrices.size())return false;tmp=transform(state.postexMatrices[mi],src);}
+    if(t.type==TexGenType::Matrix2x4) tmp.z=1.f;
+    if(t.normalize) tmp=normalize3(tmp);
+    if(t.postMatrix>=0){const unsigned pi=static_cast<unsigned>(t.postMatrix);if(pi>=state.postMatrices.size())return false;tmp=transform(state.postMatrices[pi],{tmp.x,tmp.y,tmp.z,1.f});}
+    v.texcoord[i][0]=tmp.x;v.texcoord[i][1]=tmp.y;v.texcoord[i][2]=t.type==TexGenType::Matrix3x4?tmp.z:1.f;
+  }
+  return true;
+}
+
+struct TransformContext {
+  CanonicalVertex* vertices = nullptr;
+  const PipelineDesc* pipeline = nullptr;
+  const VertexTransformState* state = nullptr;
+};
+
+bool transform_range(void* opaque, size_t begin, size_t end, uint32_t) noexcept {
+  auto& ctx = *static_cast<TransformContext*>(opaque);
+  for (size_t i = begin; i < end; ++i) {
+    if (!transform_vertex(ctx.vertices[i], *ctx.pipeline, *ctx.state)) return false;
+  }
+  return true;
+}
+
 } // namespace
 
 bool run_vertex_pipeline(std::vector<CanonicalVertex>& vertices,const PipelineDesc& pipeline,const VertexTransformState& state,DrawUniforms* uniforms) noexcept {
   if(uniforms)uniforms->mvp=state.projection;
-  for(auto&v:vertices){
-    const CanonicalVertex in=v;
-    const unsigned pn=in.pnMatrixIndex==0xff?state.currentPnMatrix:in.pnMatrixIndex;if(pn>=10)return false;
-    const V3 mvPos=transform(state.postexMatrices[pn],{in.position[0],in.position[1],in.position[2],1.f});
-    V3 mvNrm=transform_dir(state.normalMatrices[pn],make3(in.normal));if(len(mvNrm)>1e-10f)mvNrm=norm(mvNrm);
-    V3 mvBin=transform_dir(state.normalMatrices[pn],make3(in.binormal));if(len(mvBin)>1e-10f)mvBin=norm(mvBin);
-    V3 mvTan=transform_dir(state.normalMatrices[pn],make3(in.tangent));if(len(mvTan)>1e-10f)mvTan=norm(mvTan);
-    v.position[0]=mvPos.x;v.position[1]=mvPos.y;v.position[2]=mvPos.z;v.normal[0]=mvNrm.x;v.normal[1]=mvNrm.y;v.normal[2]=mvNrm.z;v.binormal[0]=mvBin.x;v.binormal[1]=mvBin.y;v.binormal[2]=mvBin.z;v.tangent[0]=mvTan.x;v.tangent[1]=mvTan.y;v.tangent[2]=mvTan.z;
-    for(unsigned base=0;base<2;base++){
-      const V4 rgb=light_channel(in,pipeline.colorChannels[base],base,state,mvPos,mvNrm);const V4 alpha=light_channel(in,pipeline.colorChannels[base+2],base+2,state,mvPos,mvNrm);uint8_t*out=base?v.color1:v.color0;out[0]=byte(rgb.x);out[1]=byte(rgb.y);out[2]=byte(rgb.z);out[3]=byte(alpha.w);
-    }
-    for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;i++){
-      const auto&t=pipeline.texgens[i];
-      if(is_bump(t.type)){
-        const unsigned src=std::min<unsigned>(t.embossSource,MaxTextures-1),li=std::min<unsigned>(bump_light(t.type),MaxLights-1);V3 ldir=norm(sub(light_vec3(state.lights[li].position),mvPos));v.texcoord[i][0]=v.texcoord[src][0]+dot(ldir,mvTan);v.texcoord[i][1]=v.texcoord[src][1]+dot(ldir,mvBin);v.texcoord[i][2]=1.f;continue;
-      }
-      V4 src=tex_source(in,t.source);V3 tmp{};
-      if(t.type==TexGenType::SRTG){tmp={src.x,src.y,1.f};}
-      else if(t.matrixFromVertex&&in.texMatrixIndex[i]!=0xff){const unsigned mi=in.texMatrixIndex[i]/3;if(mi>=state.postexMatrices.size())return false;tmp=transform(state.postexMatrices[mi],src);}
-      else if(t.matrix<0){tmp={src.x,src.y,src.z};}
-      else {const unsigned mi=10u+static_cast<unsigned>(t.matrix);if(mi>=state.postexMatrices.size())return false;tmp=transform(state.postexMatrices[mi],src);}
-      if(t.type==TexGenType::Matrix2x4) tmp.z=1.f;
-      if(t.normalize) tmp=normalize3(tmp);
-      if(t.postMatrix>=0){const unsigned pi=static_cast<unsigned>(t.postMatrix);if(pi>=state.postMatrices.size())return false;tmp=transform(state.postMatrices[pi],{tmp.x,tmp.y,tmp.z,1.f});}
-      v.texcoord[i][0]=tmp.x;v.texcoord[i][1]=tmp.y;v.texcoord[i][2]=t.type==TexGenType::Matrix3x4?tmp.z:1.f;
-    }
-  }
-  return true;
+  TransformContext ctx{vertices.data(), &pipeline, &state};
+  return cpu_parallel_for(vertices.size(), transform_range, &ctx);
 }
 
 } // namespace aurora::vita::gfx
