@@ -81,6 +81,16 @@ void TextureCache::pre_evict(size_t requiredBytes,uint64_t frame,uint64_t protec
 }
 Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStats* st) noexcept {
   uint64_t key=texture_key(d);if(!d.cacheable)key^=(frame+0x9e3779b97f4a7c15ull)+(key<<6)+(key>>2);auto it=byKey_.find(key);if(d.cacheable&&it!=byKey_.end()){it->second.lastUse=frame;if(st)st->textureHits++;return it->second.handle;}if(st)st->textureMisses++;
+  if(failedFrame_!=frame){failedFrame_=frame;failedKeys_.clear();}
+  if(failedKeys_.find(key)!=failedKeys_.end()){
+    ++retrySuppressTotal_;
+    if(retrySuppressTotal_==1||(retrySuppressTotal_&(retrySuppressTotal_-1))==0){
+      std::fprintf(stderr,"[aurora-vita] texture_retry_suppressed total=%llu frame=%llu source=0x%llX\n",
+        static_cast<unsigned long long>(retrySuppressTotal_),static_cast<unsigned long long>(frame),
+        static_cast<unsigned long long>(d.sourceId));
+    }
+    return InvalidHandle;
+  }
   if(!d.data||!d.width||!d.height)return InvalidHandle;
   // Reserve GPU memory before touching vitaGL. Optimized allocators can be less
   // forgiving under memory pressure, so reject uploads that cannot fit first.
@@ -89,6 +99,7 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
   pre_evict(estBytes,frame,key);
   if(estBytes>budget_||bytes_+estBytes>budget_){
     ++allocFailTotal_;
+    failedKeys_.insert(key);
     if(allocFailTotal_==1||(allocFailTotal_&(allocFailTotal_-1))==0){
       vgl_log_texture_alloc_fail(d.width,d.height,static_cast<unsigned>(d.format),d.mipCount,d.sourceId,estBytes,bytes_,budget_);
     }
@@ -96,7 +107,7 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
   }
   Entry e{};e.handle=next_++;e.key=key;e.lastUse=frame;e.hasMipmaps=false;e.sourceId=d.sourceId;e.paletteSourceId=d.paletteSourceId;e.sourceBytes=d.dataSize;e.paletteBytes=d.paletteSize;
 #if defined(__vita__)
-  GLuint id=0;glGenTextures(1,&id);if(!id){++allocFailTotal_;return InvalidHandle;}e.gl=id;glBindTexture(GL_TEXTURE_2D,id);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+  GLuint id=0;glGenTextures(1,&id);if(!id){++allocFailTotal_;failedKeys_.insert(key);return InvalidHandle;}e.gl=id;glBindTexture(GL_TEXTURE_2D,id);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
 #else
   e.gl=e.handle;
 #endif
@@ -121,6 +132,7 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
   if(vglGetTexDataPointer(GL_TEXTURE_2D)==nullptr){
     GLuint id=e.gl;glDeleteTextures(1,&id);
     ++allocFailTotal_;
+    failedKeys_.insert(key);
     if(allocFailTotal_==1||(allocFailTotal_&(allocFailTotal_-1))==0){
       vgl_log_texture_alloc_fail(d.width,d.height,static_cast<unsigned>(d.format),d.mipCount,d.sourceId,estBytes,bytes_,budget_);
     }
@@ -153,7 +165,7 @@ void TextureCache::erase(Handle h) noexcept {auto hi=byHandle_.find(h);if(hi==by
   GLuint id=it->second.gl;glDeleteTextures(1,&id);
 #endif
   byKey_.erase(it);byHandle_.erase(hi);}
-void TextureCache::clear() noexcept {std::vector<Handle> hs;hs.reserve(byHandle_.size());for(auto&[h,k]:byHandle_){(void)k;hs.push_back(h);}for(auto h:hs)erase(h);bytes_=0;}
+void TextureCache::clear() noexcept {std::vector<Handle> hs;hs.reserve(byHandle_.size());for(auto&[h,k]:byHandle_){(void)k;hs.push_back(h);}for(auto h:hs)erase(h);bytes_=0;failedKeys_.clear();failedFrame_=~uint64_t{0};}
 void TextureCache::trim(uint64_t frame) noexcept {(void)frame;while(bytes_>budget_&&!byKey_.empty()){auto victim=std::min_element(byKey_.begin(),byKey_.end(),[](auto&a,auto&b){return a.second.lastUse<b.second.lastUse;});if(victim==byKey_.end())break;++evictions_;erase(victim->second.handle);}}
 size_t TextureCache::invalidate_source_range(uint64_t start,size_t bytes) noexcept {
   if(bytes==0)return 0;

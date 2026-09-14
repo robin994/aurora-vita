@@ -12,6 +12,8 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <limits>
 
 namespace aurora::vita::gxbridge {
 
@@ -130,6 +132,80 @@ uint8_t sampled_texture_mask(const gfx::PipelineDesc& p) noexcept {
   }
   return mask;
 }
+
+#if defined(__vita__)
+struct ClipPoint { float x=0.f,y=0.f,z=0.f,w=1.f; };
+
+ClipPoint project_for_diag(const std::array<float,16>& m,const gfx::CanonicalVertex& v,bool alreadyClip) noexcept {
+  if(alreadyClip)return {v.position[0],v.position[1],v.position[2],v.position[3]};
+  const float x=v.position[0],y=v.position[1],z=v.position[2],w=v.position[3];
+  return {m[0]*x+m[4]*y+m[8]*z+m[12]*w,
+          m[1]*x+m[5]*y+m[9]*z+m[13]*w,
+          m[2]*x+m[6]*y+m[10]*z+m[14]*w,
+          m[3]*x+m[7]*y+m[11]*z+m[15]*w};
+}
+
+void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::VertexTransformState& state,
+                             const gfx::PipelineDesc& pipeline,uint32_t inputVertices) noexcept {
+  // Runtime.log is intentionally sampled: enough to diagnose the first stadium /
+  // character meshes without turning logging itself into the new performance issue.
+  static uint32_t logged=0;
+  if(inputVertices<512||logged>=16||prepared.vertices.empty())return;
+  ++logged;
+
+  constexpr float inf=std::numeric_limits<float>::infinity();
+  float pmin[4]{inf,inf,inf,inf},pmax[4]{-inf,-inf,-inf,-inf};
+  float cmin[4]{inf,inf,inf,inf},cmax[4]{-inf,-inf,-inf,-inf};
+  uint32_t finite=0,wPositive=0,insideXY=0,insideGL=0,insideZ01=0;
+  for(const auto& v:prepared.vertices){
+    const auto c=project_for_diag(state.projection,v,prepared.positionIsClipSpace);
+    const float pv[4]{v.position[0],v.position[1],v.position[2],v.position[3]};
+    const float cv[4]{c.x,c.y,c.z,c.w};
+    bool allFinite=true;
+    for(unsigned i=0;i<4;i++){
+      allFinite=allFinite&&std::isfinite(pv[i])&&std::isfinite(cv[i]);
+      if(std::isfinite(pv[i])){pmin[i]=std::min(pmin[i],pv[i]);pmax[i]=std::max(pmax[i],pv[i]);}
+      if(std::isfinite(cv[i])){cmin[i]=std::min(cmin[i],cv[i]);cmax[i]=std::max(cmax[i],cv[i]);}
+    }
+    if(!allFinite)continue;
+    ++finite;
+    if(c.w>0.f){
+      ++wPositive;
+      const bool xy=c.x>=-c.w&&c.x<=c.w&&c.y>=-c.w&&c.y<=c.w;
+      if(xy)++insideXY;
+      if(xy&&c.z>=-c.w&&c.z<=c.w)++insideGL;
+      if(xy&&c.z>=0.f&&c.z<=c.w)++insideZ01;
+    }
+  }
+  std::fprintf(stderr,
+    "[aurora-vita][3d-geom] in=%u out=%u idx=%u clip=%u finite=%u wpos=%u xy=%u glz=%u z01=%u "
+    "pos=[%g,%g,%g,%g..%g,%g,%g,%g] clipbox=[%g,%g,%g,%g..%g,%g,%g,%g] "
+    "depth=%u/%u cull=%u revz=%u warn_zbefore=%u\n",
+    inputVertices,static_cast<unsigned>(prepared.vertices.size()),static_cast<unsigned>(prepared.indices.size()),
+    prepared.positionIsClipSpace?1u:0u,finite,wPositive,insideXY,insideGL,insideZ01,
+    pmin[0],pmin[1],pmin[2],pmin[3],pmax[0],pmax[1],pmax[2],pmax[3],
+    cmin[0],cmin[1],cmin[2],cmin[3],cmax[0],cmax[1],cmax[2],cmax[3],
+    pipeline.depthTest?1u:0u,static_cast<unsigned>(pipeline.depthFunc),static_cast<unsigned>(pipeline.cull),
+    pipeline.reversedZ?1u:0u,aurora::gx::g_gxState.zCompLocBeforeTex?1u:0u);
+
+  std::fprintf(stderr,"[aurora-vita][3d-proj] %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
+    state.projection[0],state.projection[1],state.projection[2],state.projection[3],
+    state.projection[4],state.projection[5],state.projection[6],state.projection[7],
+    state.projection[8],state.projection[9],state.projection[10],state.projection[11],
+    state.projection[12],state.projection[13],state.projection[14],state.projection[15]);
+
+  const unsigned samples=std::min<unsigned>(3,static_cast<unsigned>(prepared.vertices.size()));
+  for(unsigned i=0;i<samples;i++){
+    const auto& v=prepared.vertices[i];const auto c=project_for_diag(state.projection,v,prepared.positionIsClipSpace);
+    std::fprintf(stderr,"[aurora-vita][3d-v] n=%u p=%g,%g,%g,%g c=%g,%g,%g,%g pn=%u\n",
+      i,v.position[0],v.position[1],v.position[2],v.position[3],c.x,c.y,c.z,c.w,static_cast<unsigned>(v.pnMatrixIndex));
+  }
+  std::fprintf(stderr,"[aurora-vita][3d-i] %u %u %u %u %u %u\n",
+    prepared.indices.size()>0?prepared.indices[0]:0u,prepared.indices.size()>1?prepared.indices[1]:0u,
+    prepared.indices.size()>2?prepared.indices[2]:0u,prepared.indices.size()>3?prepared.indices[3]:0u,
+    prepared.indices.size()>4?prepared.indices[4]:0u,prepared.indices.size()>5?prepared.indices[5]:0u);
+}
+#endif
 }
 
 bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
@@ -288,6 +364,10 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (strictUnsupported_) strictFailed_ = true;
     return result;
   }
+
+#if defined(__vita__)
+  log_large_draw_geometry(prepared,vertexState,pipeline,vertexCount);
+#endif
 
   std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
   const uint8_t textureMask = sampled_texture_mask(pipeline);

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 namespace aurora::vita::gfx {
 class TextureCache {
 public:
@@ -26,6 +27,12 @@ private:
   // under budget_ with headroom. Runs BEFORE any vitaGL allocation.
   void pre_evict(size_t requiredBytes,uint64_t frame,uint64_t protectKey) noexcept;
   std::unordered_map<uint64_t,Entry> byKey_;std::unordered_map<Handle,uint64_t> byHandle_;Handle next_=1;size_t budget_=0,bytes_=0,highWaterBytes_=0;uint64_t evictions_=0;
-  uint64_t allocFailTotal_=0,preEvictions_=0,preEvictedBytes_=0,lastRequestedBytes_=0;
+  uint64_t allocFailTotal_=0,preEvictions_=0,preEvictedBytes_=0,lastRequestedBytes_=0,retrySuppressTotal_=0;
+  // A failed GPU allocation used to be retried by every draw that referenced the
+  // same GX texture. Under pressure this can turn one OOM into hundreds of decode /
+  // glTexImage attempts in a single frame. Remember only this frame's failures so
+  // the texture can be retried normally after older cache entries become evictable.
+  uint64_t failedFrame_=~uint64_t{0};
+  std::unordered_set<uint64_t> failedKeys_{};
 };
 } // namespace aurora::vita::gfx
