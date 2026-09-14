@@ -8,7 +8,11 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <mutex>
+#include <span>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -74,6 +78,17 @@ constexpr T bswap(T val) noexcept {
   static_assert(false, "bswap 64bit not implemented on this target");
 #endif
   return v.t;
+}
+
+template <typename T>
+  requires(std::is_integral_v<T> && !std::is_same_v<T, bool>)
+inline T read_bits(const void* ptr) noexcept {
+  T value{};
+  std::memcpy(&value, ptr, sizeof(T));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  if constexpr (sizeof(T) > 1) value = bswap(value);
+#endif
+  return value;
 }
 
 template <typename T>
@@ -193,5 +208,79 @@ public:
 private:
   const T* ptr = nullptr;
   size_t length = 0;
+};
+class ByteReader {
+public:
+  explicit ByteReader(std::span<const uint8_t> data) noexcept : ByteReader{data.data(), data.size()} {}
+  ByteReader(const uint8_t* data, size_t size) noexcept : mData{data}, mSize{size} {}
+
+  static ByteReader unbounded(const void* data) noexcept {
+    return {static_cast<const uint8_t*>(data), std::numeric_limits<size_t>::max()};
+  }
+
+  [[nodiscard]] bool empty() const noexcept { return mPosition == mSize; }
+  [[nodiscard]] size_t offset() const noexcept { return mPosition; }
+  [[nodiscard]] size_t size() const noexcept { return mSize; }
+  [[nodiscard]] size_t remaining() const noexcept { return mSize - mPosition; }
+  [[nodiscard]] const uint8_t* data() const noexcept { return mData; }
+
+  template <typename T>
+    requires(std::is_arithmetic_v<T>)
+  T read() noexcept {
+    const auto bytes = take(sizeof(T));
+    return decode<T>(bytes.data());
+  }
+
+  template <typename T>
+    requires(std::is_arithmetic_v<T>)
+  bool try_read(T& value) noexcept {
+    std::span<const uint8_t> bytes;
+    if (!try_take(sizeof(T), bytes)) return false;
+    value = decode<T>(bytes.data());
+    return true;
+  }
+
+  std::span<const uint8_t> take(size_t count) noexcept {
+    assert(can_read(count));
+    const std::span bytes{mData + mPosition, count};
+    mPosition += count;
+    return bytes;
+  }
+
+  bool try_take(size_t count, std::span<const uint8_t>& bytes) noexcept {
+    if (!can_read(count)) return false;
+    bytes = {mData + mPosition, count};
+    mPosition += count;
+    return true;
+  }
+
+  void skip(size_t count) noexcept {
+    assert(can_read(count));
+    mPosition += count;
+  }
+
+  std::string read_string() noexcept {
+    const auto length = read<uint16_t>();
+    const auto bytes = take(length);
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+  }
+
+private:
+  template <typename T>
+    requires(std::is_arithmetic_v<T>)
+  static T decode(const uint8_t* data) noexcept {
+    T value{};
+    std::memcpy(&value, data, sizeof(T));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if constexpr (sizeof(T) > 1) value = bswap(value);
+#endif
+    return value;
+  }
+
+  [[nodiscard]] bool can_read(size_t count) const noexcept { return mPosition <= mSize && count <= mSize - mPosition; }
+
+  const uint8_t* mData;
+  size_t mSize;
+  size_t mPosition = 0;
 };
 } // namespace aurora
