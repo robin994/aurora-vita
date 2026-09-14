@@ -33,6 +33,8 @@ struct PendingDisplayClear {
   bool clearRgb=false,clearAlpha=false,clearDepth=false;
 };
 PendingDisplayClear g_pendingDisplayClear{};
+bool g_displayClearValid=false;
+bool g_discardPresent=false;
 
 uint64_t now_us() noexcept {
 #if defined(__vita__)
@@ -184,6 +186,7 @@ const char* last_init_failure_detail() noexcept{return g_initFailureDetail;}
 
 bool begin_frame() noexcept {
   if(!g_initialized) return false;
+  g_discardPresent=false;
   g_start=now_us();
   if (g_config.diagnostics) g_telemetry.begin_frame(g_frame);
   g_renderer->begin_frame();
@@ -199,6 +202,7 @@ bool begin_frame() noexcept {
 
 void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept {
   g_pendingDisplayClear.pending=true;
+  g_displayClearValid=true;
   g_pendingDisplayClear.color={r,g,b,a};
   g_pendingDisplayClear.depth=depth;
   g_pendingDisplayClear.clearRgb=clearRgb;
@@ -206,12 +210,21 @@ void schedule_display_clear(float r,float g,float b,float a,float depth,bool cle
   g_pendingDisplayClear.clearDepth=clearDepth;
 }
 
+void discard_present() noexcept {
+  if(!g_initialized) return;
+  g_discardPresent=true;
+  // begin_frame() may already have consumed the clear that belongs to this
+  // backbuffer.  Because a discarded frame does not rotate buffers, re-arm it
+  // so the same draw buffer is clean before the next real frame is built.
+  if(g_displayClearValid) g_pendingDisplayClear.pending=true;
+}
+
 void end_frame() noexcept {
   if(!g_initialized) return;
   g_drawSink->flush(); g_renderer->end_frame();
   const uint64_t presentStart = now_us();
 #if defined(__vita__)
-  vglSwapBuffers(GL_FALSE);
+  if(!g_discardPresent) vglSwapBuffers(GL_FALSE);
 #endif
   const uint64_t end = now_us();
   g_last=end-g_start;
