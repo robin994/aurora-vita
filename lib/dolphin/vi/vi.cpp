@@ -1,6 +1,10 @@
 #include <dolphin/vi.h>
 
+#if defined(MKW_TARGET_VITA)
+#include "../../vita/gfx_frontend.hpp"
+#else
 #include "../../window.hpp"
+#endif
 #include "aurora/math.hpp"
 #include "vi_internal.hpp"
 
@@ -81,7 +85,11 @@ void VIConfigurePan(u16 xOrg, u16 yOrg, u16 width, u16 height) {
   (void)width;
   (void)height;
 }
-u32 VIGetTvFormat() { return 0; }
+// The port historically exposes NTSC here.  Do not infer the active VI mode
+// from the disc region: Strikers uses VI_PAL as the signal to open its
+// PAL50/RGB60 selection scene, so a G4QP disc is not by itself proof that the
+// current console mode is PAL50.
+u32 VIGetTvFormat() { return VI_NTSC; }
 void VIFlush() {}
 
 void VISetWindowTitle(const char* title) { aurora::window::set_title(title); }

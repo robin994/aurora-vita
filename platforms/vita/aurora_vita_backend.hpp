@@ -21,7 +21,19 @@ struct BackendConfig {
   // Aurora never uses vitaGL immediate mode, so reserving a large legacy pool
   // only steals memory from textures, EFBs and the Wii guest runtime.
   uint32_t vgl_legacy_pool_size=0;
+  // If any explicit pool size is non-zero, Aurora uses
+  // vglInitWithCustomSizes instead of letting vglInitExtended consume every
+  // currently-free CDRAM/PHYCONT page. This is important for ports that have
+  // their own long-lived console-memory arenas beside vitaGL.
+  uint32_t vgl_ram_pool_size=0;
+  uint32_t vgl_cdram_pool_size=0;
+  uint32_t vgl_phycont_pool_size=0;
+  uint32_t vgl_cdlg_pool_size=0;
   uint32_t vgl_ram_threshold=16*1024*1024;
+  uint32_t vgl_circular_pool_size=32*1024*1024;
+  uint32_t vgl_display_buffer_count=3;
+  bool vgl_scratch_dynamic=true;
+  bool vgl_scratch_stream=true;
   size_t texture_cache_budget=24*1024*1024;
   bool wait_vblank=true;
   size_t stream_vertex_bytes=4*1024*1024;
@@ -39,6 +51,7 @@ bool initialize(const BackendConfig& config={}) noexcept;
 InitFailure last_init_failure() noexcept;
 const char* last_init_failure_detail() noexcept;
 bool begin_frame() noexcept;void end_frame() noexcept;void shutdown() noexcept;
+void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
 uint64_t frame_index() noexcept;uint64_t last_frame_time_us() noexcept;uint32_t width() noexcept;uint32_t height() noexcept;
 gfx::Renderer& renderer() noexcept;
 gxbridge::DrawSink& draw_sink() noexcept;

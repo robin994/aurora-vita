@@ -2,6 +2,9 @@
 #include "__gx.h"
 
 #include "../../gx/fifo.hpp"
+#if defined(MKW_TARGET_VITA)
+#include "../../gx/gx.hpp"
+#endif
 
 #include <cstring>
 
@@ -22,6 +25,9 @@ GXFifoObj* GXInit(void* base, u32 size) {
   u32 i;
 
   std::memset(&sGXData, 0, sizeof(sGXData));
+#if defined(MKW_TARGET_VITA)
+  aurora::gx::initialize();
+#endif
   __gx = &sGXData;
   __gx->inDispList = 0;
   __gx->dlSaveContext = 1;

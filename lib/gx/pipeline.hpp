@@ -1,6 +1,10 @@
 #pragma once
 
+#if defined(MKW_TARGET_VITA)
+#include "../vita/gfx_frontend.hpp"
+#else
 #include "../gfx/common.hpp"
+#endif
 #include "shader_info.hpp"
 
 namespace aurora::gx {
@@ -41,7 +45,9 @@ struct PipelineConfig {
   uint32_t dstAlpha;
   bool depthCompare, depthUpdate, alphaUpdate, colorUpdate;
 };
+#if !defined(MKW_TARGET_VITA)
 static_assert(std::has_unique_object_representations_v<PipelineConfig>);
+#endif
 
 inline bool valid_pipeline_config(const PipelineConfig& config) noexcept {
   const auto in_range = [](auto value, auto maximum) {
@@ -60,6 +66,7 @@ inline bool valid_pipeline_config(const PipelineConfig& config) noexcept {
          in_range(config.blendOp, GX_LO_SET) && in_range(config.pixelFmt, GX_PF_YUV420);
 }
 
+#if !defined(MKW_TARGET_VITA)
 wgpu::RenderPipeline create_pipeline([[maybe_unused]] const PipelineConfig& config);
 void clear_shader_module_cache();
 
@@ -74,6 +81,7 @@ struct DrawEncodeState {
 
 void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, DrawEncodeState& state,
             bool requireReadyPipeline, const gfx::Range* uniformRangeOverride = nullptr);
+#endif
 
 void queue_surface(const u8* dlStart, uint32_t dlSize, bool bigEndian) noexcept;
 } // namespace aurora::gx

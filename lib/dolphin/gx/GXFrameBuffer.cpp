@@ -3,6 +3,8 @@
 
 #if defined(MKW_TARGET_VITA)
 #include "../../vita/gfx_frontend.hpp"
+#include "../../../platforms/vita/aurora_vita_backend.hpp"
+#include "../../../platforms/vita/gx/aurora_vita_draw_sink.hpp"
 #else
 #include "../../gfx/tex_copy_conv.hpp"
 #include "../../gfx/efb_ram_copy.hpp"
@@ -311,11 +313,43 @@ GXRenderModeObj GXMpal480IntDf = {
 };
 
 void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor, u16 ver) {
-  *rmout = *rmin;
-  const auto renderSize = aurora::gfx::get_render_target_size();
-  rmout->fbWidth = static_cast<u16>(std::min<uint32_t>(renderSize.x, UINT16_MAX));
-  rmout->efbHeight = static_cast<u16>(std::min<uint32_t>(renderSize.y, UINT16_MAX));
-  rmout->xfbHeight = static_cast<u16>(std::min<uint32_t>(renderSize.y, UINT16_MAX));
+  if (rmin == nullptr || rmout == nullptr) return;
+
+  // Keep GameCube render-mode dimensions in GameCube space.  The Vita backend
+  // scales them later when mapping viewport/scissor and during GXCopyDisp.
+  // Replacing these values with 960x544 here destroys PAL/overscan semantics
+  // before the game has a chance to configure its 448-line EFB.
+  const GXRenderModeObj in = *rmin;
+  *rmout = in;
+
+  const u32 hor2 = static_cast<u32>(hor) * 2u;
+  const u32 ver2 = static_cast<u32>(ver) * 2u;
+  const u32 mode = static_cast<u32>(in.viTVmode) & 3u;
+
+  rmout->fbWidth = static_cast<u16>(in.fbWidth > hor2 ? in.fbWidth - hor2 : 0u);
+  if (in.xfbHeight != 0) {
+    const u32 verf = (ver2 * static_cast<u32>(in.efbHeight)) / static_cast<u32>(in.xfbHeight);
+    rmout->efbHeight = static_cast<u16>(in.efbHeight > verf ? in.efbHeight - verf : 0u);
+  }
+
+  const u32 xfbTrim = (in.xFBmode == VI_XFBMODE_SF && mode == 0u) ? ver2 / 2u : ver2;
+  rmout->xfbHeight = static_cast<u16>(in.xfbHeight > xfbTrim ? in.xfbHeight - xfbTrim : 0u);
+  rmout->viWidth = static_cast<u16>(in.viWidth > hor2 ? in.viWidth - hor2 : 0u);
+  const u32 viTrim = mode == 1u ? ver2 * 2u : ver2;
+  rmout->viHeight = static_cast<u16>(in.viHeight > viTrim ? in.viHeight - viTrim : 0u);
+  rmout->viXOrigin = static_cast<u16>(static_cast<u32>(in.viXOrigin) + hor);
+  rmout->viYOrigin = static_cast<u16>(static_cast<u32>(in.viYOrigin) + ver);
+
+#if defined(MKW_TARGET_VITA)
+  static unsigned logCount = 0;
+  if (logCount++ < 4) {
+    std::printf("[aurora-vita] overscan in=%ux%u xfb=%u vi=%ux%u trim=%u,%u -> "
+                "fb=%ux%u xfb=%u vi=%ux%u origin=%u,%u\n",
+                in.fbWidth, in.efbHeight, in.xfbHeight, in.viWidth, in.viHeight,
+                hor, ver, rmout->fbWidth, rmout->efbHeight, rmout->xfbHeight,
+                rmout->viWidth, rmout->viHeight, rmout->viXOrigin, rmout->viYOrigin);
+  }
+#endif
 }
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
@@ -427,6 +461,46 @@ void GXCopyDisp(void* dest, GXBool clear) {
   if (aurora::gx::fifo::get_buffer_size() != 0) {
     aurora::gx::fifo::drain();
   }
+#if defined(MKW_TARGET_VITA)
+  aurora::vita::draw_sink().flush();
+
+  // GameCube presents only dispCopySrc, scaled into the XFB. Presenting the
+  // raw 640x528 EFB on Vita exposes the unused rows below the game's visible
+  // image as a black band. Recreate the display copy on-GPU: crop the mapped
+  // source rectangle and scale it to the full Vita backbuffer before swap.
+  const auto vitaRect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
+  const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
+  static aurora::vita::gfx::Handle s_displayCopy = aurora::vita::gfx::InvalidHandle;
+  const aurora::vita::gfx::Scissor source{
+      vitaRect.x, vitaRect.y, vitaRect.width, vitaRect.height};
+  const auto copied = aurora::vita::renderer().capture_current(
+      s_displayCopy, source,
+      std::max<u32>(targetWidth, 1), std::max<u32>(targetHeight, 1),
+      aurora::vita::gfx::EfbCopyFormat::Passthrough);
+  if (copied != aurora::vita::gfx::InvalidHandle) {
+    s_displayCopy = copied;
+    aurora::vita::renderer().blit_efb(s_displayCopy);
+  } else {
+    static bool s_warnedDisplayCopy = false;
+    if (!s_warnedDisplayCopy) {
+      std::printf("[aurora-vita] display copy failed; presenting raw EFB\n");
+      s_warnedDisplayCopy = true;
+    }
+  }
+
+  if (clear) {
+    // GameCube copies the completed EFB to XFB first and clears the EFB only
+    // for the next frame. On Vita the presentable backbuffer is also our EFB;
+    // clearing it here erases the just-rendered frame before vglSwapBuffers().
+    // Defer the clear until begin_frame(), after the swap selected a new backbuffer.
+    aurora::vita::schedule_display_clear(
+        g_gxState.clearColor[0], g_gxState.clearColor[1],
+        g_gxState.clearColor[2], g_gxState.clearColor[3],
+        aurora::gx::clear_depth_value(),
+        g_gxState.colorUpdate, g_gxState.alphaUpdate, g_gxState.depthUpdate);
+  }
+  return;
+#endif
   const auto rect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
   const auto logicalDstWidth =
       std::max<u32>(g_gxState.dispCopyDstWidth != 0 ? g_gxState.dispCopyDstWidth : static_cast<u32>(g_gxState.dispCopySrc.width), 1);
@@ -460,6 +534,17 @@ void GXCopyTex(void* dest, GXBool clear) {
   if (aurora::gx::fifo::get_buffer_size() != 0) {
     aurora::gx::fifo::drain();
   }
+#if defined(MKW_TARGET_VITA)
+  if (aurora::vita::draw_sink().copy_tex(dest, clear != GX_FALSE)) {
+    auto& copy = g_gxState.copyTextures[dest];
+    ++copy.revision;
+    copy.width = std::max<u32>(g_gxState.texCopyDstWidth, 1);
+    copy.height = std::max<u32>(g_gxState.texCopyDstHeight, 1);
+    copy.format = g_gxState.texCopyFmt;
+    aurora::gx::notify_copy_texture_created();
+  }
+  return;
+#endif
   const auto sourceRect = map_texture_copy_source(g_gxState.texCopySrc, g_gxState.texCopySrcRenderSpace);
   const auto rect = sourceRect.clearRect;
   // Keep guest dimensions for cache identity while preserving scaled GPU detail.

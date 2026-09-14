@@ -159,7 +159,7 @@ struct GXTexObj_ {
   u32 mip_count() const noexcept {
     if (!has_mips()) return 1;
     const u32 requested = std::max<u32>(static_cast<u32>(max_lod()) + 1, 1u);
-    return std::min(requested, aurora::gfx::max_texture_mip_count(width(), height()));
+    return std::min<u32>(requested, aurora::gfx::max_texture_mip_count(width(), height()));
   }
   GXBool do_edge_lod() const noexcept { return get_bits(mode0, 1, 8) == 0 ? GX_TRUE : GX_FALSE; }
   float lod_bias() const noexcept { return static_cast<float>(static_cast<int8_t>(get_bits(mode0, 8, 9))) / 32.0f; }
@@ -203,6 +203,11 @@ inline Vec2<uint32_t> get_render_target_size() noexcept { return {960, 544}; }
 inline Vec2<uint32_t> get_frame_buffer_size() noexcept { return {960, 544}; }
 inline uint32_t current_frame() noexcept { return 0; }
 inline uint32_t get_sample_count() noexcept { return 1; }
+inline bool is_offscreen() noexcept { return false; }
+inline void set_viewport(const Viewport&) noexcept {}
+inline void set_scissor(const ClipRect&) noexcept {}
+inline void push_debug_group(std::string_view) noexcept {}
+inline void insert_debug_marker(std::string_view) noexcept {}
 inline void begin_offscreen(uint32_t, uint32_t) {}
 inline void end_offscreen() {}
 
@@ -276,6 +281,16 @@ inline void request_snapshot() noexcept {}
 namespace aurora::window {
 inline void set_frame_buffer_aspect_fit(bool) {}
 inline void set_present_surface_fill(bool) {}
+inline void request_frame_buffer_resize() noexcept {}
+inline void set_title(const char*) noexcept {}
+inline void set_fullscreen(bool) noexcept {}
+inline bool get_fullscreen() noexcept { return false; }
+inline void set_window_size(uint32_t, uint32_t) noexcept {}
+inline void set_window_position(uint32_t, uint32_t) noexcept {}
+inline void center_window() noexcept {}
+inline void set_frame_buffer_scale(float) noexcept {}
+inline void lock_present_aspect_ratio(int, int) noexcept {}
+inline void unlock_present_aspect_ratio() noexcept {}
 inline AuroraWindowSize get_window_size() {
   AuroraWindowSize size{};
   size.width = 960;

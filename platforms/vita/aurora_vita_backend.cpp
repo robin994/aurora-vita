@@ -26,6 +26,13 @@ integration::FeatureCoverage g_coverage;
 std::unique_ptr<integration::FrameTrace> g_trace;
 InitFailure g_initFailure=InitFailure::None;
 char g_initFailureDetail[384]{};
+struct PendingDisplayClear {
+  bool pending=false;
+  gfx::Color color{0.f,0.f,0.f,1.f};
+  float depth=0.f;
+  bool clearRgb=false,clearAlpha=false,clearDepth=false;
+};
+PendingDisplayClear g_pendingDisplayClear{};
 
 uint64_t now_us() noexcept {
 #if defined(__vita__)
@@ -97,20 +104,50 @@ bool initialize(const BackendConfig& c) noexcept {
       return false;
     }
   }
+  // Bound vitaGL's transient allocator before initialization. The upstream
+  // default circular pool is intentionally large (32 MiB total); console ports
+  // can lower it when they already own separate streaming arenas. Scratch
+  // routing is a no-op when vitaGL was built without USE_SCRATCH_MEMORY.
+  if(g_config.vgl_circular_pool_size)
+    vglSetCircularPoolSize(g_config.vgl_circular_pool_size);
+  if(g_config.vgl_display_buffer_count>=2 && g_config.vgl_display_buffer_count<=3)
+    vglSetDisplayBufferCount(static_cast<int>(g_config.vgl_display_buffer_count));
+  vglSetupScratchMemory(g_config.vgl_scratch_dynamic?GL_TRUE:GL_FALSE,
+                        g_config.vgl_scratch_stream?GL_TRUE:GL_FALSE);
+
   // vitaGL's current API does not return a success flag here. The value is
   // `res_fallback`: GL_TRUE means the requested framebuffer was clamped to
   // the maximum supported resolution, while the normal successful path for
   // 960x544 returns GL_FALSE after setting vgl_inited=GL_TRUE.
-  const GLboolean resolutionFallback =
-      vglInitExtended(static_cast<int>(g_config.vgl_legacy_pool_size),
-                      static_cast<int>(g_config.width),
-                      static_cast<int>(g_config.height),
-                      static_cast<int>(g_config.vgl_ram_threshold),
-                      SCE_GXM_MULTISAMPLE_NONE);
+  const bool explicitPools = g_config.vgl_ram_pool_size || g_config.vgl_cdram_pool_size ||
+                             g_config.vgl_phycont_pool_size || g_config.vgl_cdlg_pool_size;
+  const GLboolean resolutionFallback = explicitPools
+      ? vglInitWithCustomSizes(static_cast<int>(g_config.vgl_legacy_pool_size),
+                               static_cast<int>(g_config.width),
+                               static_cast<int>(g_config.height),
+                               static_cast<int>(g_config.vgl_ram_pool_size),
+                               static_cast<int>(g_config.vgl_cdram_pool_size),
+                               static_cast<int>(g_config.vgl_phycont_pool_size),
+                               static_cast<int>(g_config.vgl_cdlg_pool_size),
+                               SCE_GXM_MULTISAMPLE_NONE)
+      : vglInitExtended(static_cast<int>(g_config.vgl_legacy_pool_size),
+                        static_cast<int>(g_config.width),
+                        static_cast<int>(g_config.height),
+                        static_cast<int>(g_config.vgl_ram_threshold),
+                        SCE_GXM_MULTISAMPLE_NONE);
   if(resolutionFallback){
     std::printf("[aurora-vita] vitaGL framebuffer resolution fallback requested=%ux%u\n",
                 g_config.width,g_config.height);
   }
+  std::printf("[aurora-vita] vitaGL pools mode=%s ram=%llu/%llu cdram=%llu/%llu phycont=%llu/%llu circular=%u display_buffers=%u\n",
+              explicitPools?"fixed":"threshold",
+              static_cast<unsigned long long>(vglMemFree(VGL_MEM_RAM)),
+              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_RAM)),
+              static_cast<unsigned long long>(vglMemFree(VGL_MEM_VRAM)),
+              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_VRAM)),
+              static_cast<unsigned long long>(vglMemFree(VGL_MEM_SLOW)),
+              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_SLOW)),
+              g_config.vgl_circular_pool_size,g_config.vgl_display_buffer_count);
   vglWaitVblankStart(g_config.wait_vblank?GL_TRUE:GL_FALSE);
   glViewport(0,0,g_config.width,g_config.height);
   glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
@@ -149,8 +186,24 @@ bool begin_frame() noexcept {
   if(!g_initialized) return false;
   g_start=now_us();
   if (g_config.diagnostics) g_telemetry.begin_frame(g_frame);
-  g_renderer->begin_frame(); g_drawSink->begin_frame(g_frame);
+  g_renderer->begin_frame();
+  if (g_pendingDisplayClear.pending) {
+    g_renderer->clear_current(g_pendingDisplayClear.color,g_pendingDisplayClear.depth,
+                              g_pendingDisplayClear.clearRgb,g_pendingDisplayClear.clearAlpha,
+                              g_pendingDisplayClear.clearDepth);
+    g_pendingDisplayClear.pending=false;
+  }
+  g_drawSink->begin_frame(g_frame);
   return true;
+}
+
+void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept {
+  g_pendingDisplayClear.pending=true;
+  g_pendingDisplayClear.color={r,g,b,a};
+  g_pendingDisplayClear.depth=depth;
+  g_pendingDisplayClear.clearRgb=clearRgb;
+  g_pendingDisplayClear.clearAlpha=clearAlpha;
+  g_pendingDisplayClear.clearDepth=clearDepth;
 }
 
 void end_frame() noexcept {

@@ -1,17 +1,23 @@
 #include "command_processor.hpp"
 
-#include "../gfx/common.hpp"
 #include "../dolphin/gx/__gx.h"
-#include "../gfx/texture_replacement.hpp"
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
-#include "gx_fmt.hpp"
-#include "pipeline.hpp"
-#include "shader_info.hpp"
 #include "../internal.hpp"
 
-#include <absl/container/flat_hash_map.h>
+#if defined(MKW_TARGET_VITA)
+#include "../../platforms/vita/aurora_vita_backend.hpp"
+#include "../../platforms/vita/gx/aurora_vita_draw_sink.hpp"
+#define ZoneScoped ((void)0)
+#define ZoneScopedN(name) ((void)0)
+#else
+#include "gx_fmt.hpp"
+#include "../gfx/common.hpp"
+#include "../gfx/texture_replacement.hpp"
+#include "pipeline.hpp"
+#include "shader_info.hpp"
 #include <tracy/Tracy.hpp>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -468,8 +474,10 @@ static bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
 void process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
+#if !defined(MKW_TARGET_VITA)
   // Everything decoded here mutates renderer state (GX state, the recorded command lists and the mapped staging buffers), so take the renderer GPU mutex once for the whole drain rather than once per draw command.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
+#endif
   u32 pos = 0;
 
   while (pos < size) {
@@ -570,6 +578,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
       } else {
         static u32 unknownLogCount = 0;
         if (unknownLogCount < 16) {
+#if !defined(MKW_TARGET_VITA)
           // Hex dump surrounding bytes for debugging
           u32 dumpStart = (pos > 17) ? pos - 17 : 0;
           u32 dumpEnd = (pos + 16 < size) ? pos + 16 : size;
@@ -581,6 +590,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
               hex += fmt::format(" {:02x}", data[i]);
           }
           Log.warn("  hex dump (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
+#endif
           Log.warn("command_processor: unknown opcode 0x{:02X} at pos {}", cmd, pos - 1);
           ++unknownLogCount;
         }
@@ -1792,7 +1802,8 @@ static void handle_draw_overrun(u8 cmd, u16 vtxCount, u32 vtxSize, u32 totalVtxB
   }
   ++truncatedDrawLogCount;
 
-  // Hex dump around the draw command for debugging
+#if !defined(MKW_TARGET_VITA)
+  // Hex dump around the draw command for debugging.
   u32 cmdPos = pos - 2 - 1; // opcode byte position (before vtxCount and pos++)
   u32 dumpStart = (cmdPos > 16) ? cmdPos - 16 : 0;
   u32 dumpEnd = (cmdPos + 32 < size) ? cmdPos + 32 : size;
@@ -1804,6 +1815,7 @@ static void handle_draw_overrun(u8 cmd, u16 vtxCount, u32 vtxSize, u32 totalVtxB
       hex += fmt::format(" {:02x}", data[i]);
   }
   Log.warn("  hex dump around truncated draw cmd (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
+#endif
   const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
   Log.warn("  truncated draw cmd=0x{:02X} fmt={} vtxCount={} vtxSize={} desc pn={} pos={} nrm={} clr0={} clr1={} "
@@ -1852,6 +1864,44 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
   return vtxSize;
 }
 
+#if defined(MKW_TARGET_VITA)
+bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
+                     uint32_t vertexBytes) {
+  if (vertices == nullptr || vtxCount == 0 || vertexBytes == 0) return false;
+  if (__gx->dirtyState != 0) __GXSetDirtyState();
+  drain();
+
+  const u32 vtxSize = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calculate_last_vtx_size(fmt);
+  if (vtxSize == 0 || static_cast<u32>(vtxCount) * vtxSize != vertexBytes) return false;
+
+  const auto result = aurora::vita::draw_sink().submit(
+      static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), vertices, vertexBytes, vtxCount);
+  if (result.ok) g_gxState.stateDirty = false;
+  return result.ok;
+}
+
+static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
+  GXVtxFmt fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
+  GXPrimitive prim = primitive_from_draw_cmd(cmd);
+  if (pos + 2 > size) return false;
+
+  const u16 vtxCount = read_u16(data + pos, bigEndian);
+  pos += 2;
+  const u32 vtxSize = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calculate_last_vtx_size(fmt);
+  const u32 totalVtxBytes = static_cast<u32>(vtxCount) * vtxSize;
+  if (vtxSize == 0 || pos + totalVtxBytes > size) {
+    handle_draw_overrun(cmd, vtxCount, vtxSize, totalVtxBytes, data, pos, size);
+    return false;
+  }
+
+  const uint8_t* vertices = data + pos;
+  pos += totalVtxBytes;
+  const auto result = aurora::vita::draw_sink().submit(
+      static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), vertices, totalVtxBytes, vtxCount);
+  if (result.ok) g_gxState.stateDirty = false;
+  return result.ok;
+}
+#else
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
                                  gfx::Range vertRange, uint16_t usedPnMtxMask,
                                  HashType matrixTopologySignature,
@@ -2283,6 +2333,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
   });
   g_gxState.stateDirty = false;
 }
+#endif
 
 std::string read_string(const u8* data, u32& pos, u32 size, bool bigEndian) {
   CHECK(pos + 2 <= size, "Aurora string length read overrun");
@@ -2429,7 +2480,11 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     auto label = read_string(data, pos, size, bigEndian);
     gfx::push_debug_group(std::move(label));
   } else if (subCmd == GX_LOAD_AURORA_DEBUG_GROUP_POP) {
+#if defined(MKW_TARGET_VITA)
+    // Vita debug markers are intentionally no-ops; there is no Dawn debug-group stack.
+#else
     aurora_pop_debug_group();
+#endif
   } else if (subCmd == GX_LOAD_AURORA_DEBUG_MARKER_INSERT) {
     auto label = read_string(data, pos, size, bigEndian);
     gfx::insert_debug_marker(std::move(label));
