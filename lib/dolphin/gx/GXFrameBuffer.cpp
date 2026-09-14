@@ -632,6 +632,24 @@ void GXCopyTex(void* dest, GXBool clear) {
   aurora::gfx::efb_ram::schedule(dest, logicalDstWidth, logicalDstHeight, texCopyFmt, handle.handle);
 }
 
+#if defined(MKW_TARGET_VITA)
+void GXVitaClearEfb(void) {
+  // Preserve GX ordering but skip the texture capture. Strikers uses this for
+  // a scratch destination whose pixels are never sampled; only the clear side
+  // effect matters and the old path spent tens of milliseconds converting it.
+  if (aurora::gx::fifo::get_buffer_size() != 0) {
+    aurora::gx::fifo::drain();
+  }
+  aurora::vita::draw_sink().flush();
+  const aurora::vita::gfx::Color clearColor{
+      g_gxState.clearColor[0], g_gxState.clearColor[1],
+      g_gxState.clearColor[2], g_gxState.clearColor[3]};
+  aurora::vita::renderer().clear_current(
+      clearColor, aurora::gx::clear_depth_value(),
+      g_gxState.colorUpdate, g_gxState.alphaUpdate, g_gxState.depthUpdate);
+}
+#endif
+
 void GXClearBoundingBox() {
   g_gxState.boundingBox = {1023, 0, 1023, 0};
   GX_WRITE_RAS_REG(0x550003FFu);

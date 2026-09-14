@@ -1833,6 +1833,18 @@ static void handle_draw_overrun(u8 cmd, u16 vtxCount, u32 vtxSize, u32 totalVtxB
             static_cast<u32>(vtxFmt.attrs[GX_VA_TEX0].type), static_cast<u32>(vtxFmt.attrs[GX_VA_TEX1].cnt),
             static_cast<u32>(vtxFmt.attrs[GX_VA_TEX1].type));
   Log.warn("stopping FIFO decode at truncated draw: need {} bytes at pos {}, have {}", totalVtxBytes, pos, size);
+#if defined(MKW_TARGET_VITA)
+  std::fprintf(stderr,
+               "[aurora-vita][fifo] draw rejected cmd=0x%02x fmt=%u verts=%u stride=%u need=%u pos=%u size=%u "
+               "vcd(pos=%u nrm=%u clr0=%u tex0=%u tex1=%u)\n",
+               static_cast<unsigned>(cmd), static_cast<unsigned>(fmt), static_cast<unsigned>(vtxCount),
+               static_cast<unsigned>(vtxSize), static_cast<unsigned>(totalVtxBytes), static_cast<unsigned>(pos),
+               static_cast<unsigned>(size), static_cast<unsigned>(g_gxState.vtxDesc[GX_VA_POS]),
+               static_cast<unsigned>(g_gxState.vtxDesc[GX_VA_NRM]),
+               static_cast<unsigned>(g_gxState.vtxDesc[GX_VA_CLR0]),
+               static_cast<unsigned>(g_gxState.vtxDesc[GX_VA_TEX0]),
+               static_cast<unsigned>(g_gxState.vtxDesc[GX_VA_TEX1]));
+#endif
 }
 
 // Draw command handler - parses vertices inline and caches results
@@ -1898,6 +1910,19 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   pos += totalVtxBytes;
   const auto result = aurora::vita::draw_sink().submit(
       static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), vertices, totalVtxBytes, vtxCount);
+#if defined(MKW_TARGET_VITA)
+  if (vtxCount >= 128) {
+    static uint32_t largeDrawLogCount = 0;
+    if (largeDrawLogCount < 24) {
+      std::fprintf(stderr,
+                   "[aurora-vita][fifo] draw submit cmd=0x%02x fmt=%u verts=%u stride=%u bytes=%u ok=%u err=%u warn=0x%x\n",
+                   static_cast<unsigned>(cmd), static_cast<unsigned>(fmt), static_cast<unsigned>(vtxCount),
+                   static_cast<unsigned>(vtxSize), static_cast<unsigned>(totalVtxBytes), result.ok ? 1u : 0u,
+                   static_cast<unsigned>(result.drawError), static_cast<unsigned>(result.warnings));
+      ++largeDrawLogCount;
+    }
+  }
+#endif
   if (result.ok) g_gxState.stateDirty = false;
   return result.ok;
 }

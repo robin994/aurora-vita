@@ -48,6 +48,11 @@ void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt);
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht);
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap);
 void GXCopyTex(void* dest, GXBool clear);
+#if defined(AURORA_PLATFORM_VITA) || defined(PORT_VITA)
+// Vita-only fast path for GameCube code that uses GXCopyTex(..., true) solely
+// as an EFB clear and never samples the copied scratch image.
+void GXVitaClearEfb(void);
+#endif
 void GXClearBoundingBox(void);
 void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom);
 u16 GXGetNumXfbLines(u16 efbHeight, f32 yScale);
