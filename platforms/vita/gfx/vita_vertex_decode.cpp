@@ -145,6 +145,12 @@ bool decode_range(void* opaque, size_t begin, size_t end, uint32_t lane) noexcep
   }
   return true;
 }
+
+uint64_t hash_vertex_record(const uint8_t* data,size_t bytes) noexcept {
+  uint64_t h=1469598103934665603ull;
+  for(size_t i=0;i<bytes;++i){h^=data[i];h*=1099511628211ull;}
+  return h;
+}
 }
 VertexLayout canonical_vertex_layout() noexcept {
   VertexLayout l{};l.count=11;
@@ -169,6 +175,50 @@ VertexLayout gpu_vertex_layout(uint8_t texcoordMask,uint8_t colorMask) noexcept 
     offset+=12;
   }
   return l;
+}
+bool deduplicate_vertex_records(const uint8_t* stream,size_t streamSize,uint32_t vertexCount,uint16_t streamStride,
+                                std::vector<uint8_t>& compact,std::vector<uint16_t>& remap,
+                                std::vector<uint32_t>& table) noexcept {
+  compact.clear();remap.clear();table.clear();
+  if(!stream||!vertexCount||!streamStride)return false;
+  if(static_cast<size_t>(vertexCount)>streamSize/static_cast<size_t>(streamStride))return false;
+  if(static_cast<size_t>(vertexCount)>std::numeric_limits<size_t>::max()/2u)return false;
+
+  size_t tableSize=8;
+  const size_t target=static_cast<size_t>(vertexCount)*2u;
+  while(tableSize<target){
+    if(tableSize>std::numeric_limits<size_t>::max()/2u)return false;
+    tableSize*=2u;
+  }
+  table.assign(tableSize,0u);
+  remap.resize(vertexCount);
+  compact.reserve(static_cast<size_t>(vertexCount)*streamStride);
+  const size_t mask=tableSize-1u;
+
+  for(uint32_t vi=0;vi<vertexCount;++vi){
+    const uint8_t* record=stream+static_cast<size_t>(vi)*streamStride;
+    size_t slot=static_cast<size_t>(hash_vertex_record(record,streamStride))&mask;
+    for(;;){
+      const uint32_t entry=table[slot];
+      if(!entry){
+        const size_t unique=compact.size()/streamStride;
+        if(unique>std::numeric_limits<uint16_t>::max())return false;
+        const size_t old=compact.size();
+        compact.resize(old+streamStride);
+        std::memcpy(compact.data()+old,record,streamStride);
+        table[slot]=static_cast<uint32_t>(unique+1u);
+        remap[vi]=static_cast<uint16_t>(unique);
+        break;
+      }
+      const size_t unique=static_cast<size_t>(entry-1u);
+      if(std::memcmp(compact.data()+unique*streamStride,record,streamStride)==0){
+        remap[vi]=static_cast<uint16_t>(unique);
+        break;
+      }
+      slot=(slot+1u)&mask;
+    }
+  }
+  return true;
 }
 bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,
                         const VertexDecodeLayout& layout, CanonicalVertex& vertex,

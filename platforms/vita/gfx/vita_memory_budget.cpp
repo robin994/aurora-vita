@@ -11,7 +11,7 @@ MemoryBudgetSnapshot capture_memory_budget(const StreamingArena& arena, const Te
   s.textureBudget = textures.budget(); s.textureBytes = textures.bytes(); s.textureHighWater = textures.high_water_bytes(); s.textureEntries = textures.entries();
   s.pipelineBudget = pipelines.max_entries(); s.pipelineEntries = pipelines.size(); s.pipelineHighWater = pipelines.high_water_entries();
   if (efb) { s.efbBytes = efb->bytes(); s.efbHighWater = efb->high_water_bytes(); s.efbEntries = efb->entries(); }
-  s.vertexOverflows = arena.vertex_overflows(); s.indexOverflows = arena.index_overflows(); s.textureEvictions = textures.evictions(); s.pipelineCompileFailures = pipelines.compile_failures(); s.pipelineEvictions = pipelines.evictions();
+  s.vertexOverflows = arena.vertex_overflows(); s.indexOverflows = arena.index_overflows(); s.textureEvictions = textures.evictions(); s.pipelineCompileFailures = pipelines.compile_failures(); s.pipelineEvictions = pipelines.evictions(); s.streamRecycles=arena.recycles(); s.gpuSyncs=arena.gpu_syncs();
   return s;
 }
 
@@ -24,7 +24,8 @@ std::string MemoryBudgetSnapshot::format() const {
       << " efb=" << efbBytes << " high=" << efbHighWater << " entries=" << efbEntries
       << " pipe_evict=" << pipelineEvictions
       << " v_overflow=" << vertexOverflows << " i_overflow=" << indexOverflows
-      << " tex_evict=" << textureEvictions << " shader_fail=" << pipelineCompileFailures;
+      << " tex_evict=" << textureEvictions << " shader_fail=" << pipelineCompileFailures
+      << " stream_recycles=" << streamRecycles << " gpu_syncs=" << gpuSyncs;
   return out.str();
 }
 

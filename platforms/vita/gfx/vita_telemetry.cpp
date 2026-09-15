@@ -44,6 +44,10 @@ void Telemetry::add_draw(uint32_t vertices, uint32_t indices, uint32_t triangles
   frame_.counters.indices += indices; lifetime_.indices += indices;
   frame_.counters.triangles += triangles; lifetime_.triangles += triangles;
 }
+void Telemetry::vertex_dedup(uint32_t inputVertices,uint32_t uniqueVertices) noexcept {
+  frame_.counters.vertexDedupInput+=inputVertices;lifetime_.vertexDedupInput+=inputVertices;
+  frame_.counters.vertexDedupUnique+=uniqueVertices;lifetime_.vertexDedupUnique+=uniqueVertices;
+}
 void Telemetry::pipeline(bool hit) noexcept {
   if (hit) { ++frame_.counters.pipelineHits; ++lifetime_.pipelineHits; }
   else { ++frame_.counters.pipelineMisses; ++lifetime_.pipelineMisses; }
@@ -69,6 +73,8 @@ std::string Telemetry::format_frame() const {
       << " vertices=" << frame_.counters.vertices
       << " indices=" << frame_.counters.indices
       << " triangles=" << frame_.counters.triangles
+      << " dedup_in=" << frame_.counters.vertexDedupInput
+      << " dedup_unique=" << frame_.counters.vertexDedupUnique
       << " pipeline_hit=" << frame_.counters.pipelineHits
       << " pipeline_miss=" << frame_.counters.pipelineMisses
       << " texture_hit=" << frame_.counters.textureHits
@@ -90,6 +96,7 @@ std::string Telemetry::format_lifetime() const {
   out << "[AURORA-VITA][LIFETIME] frames=" << lifetime_.frames
       << " draws=" << lifetime_.draws << " vertices=" << lifetime_.vertices
       << " indices=" << lifetime_.indices << " triangles=" << lifetime_.triangles
+      << " dedup_in=" << lifetime_.vertexDedupInput << " dedup_unique=" << lifetime_.vertexDedupUnique
       << " pipeline_hit=" << lifetime_.pipelineHits << " pipeline_miss=" << lifetime_.pipelineMisses
       << " texture_hit=" << lifetime_.textureHits << " texture_miss=" << lifetime_.textureMisses
       << " texture_uploads=" << lifetime_.textureUploads << " upload_bytes=" << lifetime_.textureUploadBytes

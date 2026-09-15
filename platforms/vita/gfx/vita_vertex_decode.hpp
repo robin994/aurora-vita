@@ -82,6 +82,12 @@ VertexLayout canonical_vertex_layout() noexcept;
 // Compact post-transform layout. The defaults preserve the historical 120-byte
 // stream; normal Vita pipelines request only raster colors/texcoords they use.
 VertexLayout gpu_vertex_layout(uint8_t texcoordMask=0xff,uint8_t colorMask=0x03) noexcept;
+// Collapse byte-identical FIFO vertex records into one compact stream and emit
+// a u16 remap for the original order. Exact record equality preserves all GX
+// direct/indexed attribute selectors while avoiding duplicate decode work.
+bool deduplicate_vertex_records(const uint8_t* stream,size_t streamSize,uint32_t vertexCount,uint16_t streamStride,
+                                std::vector<uint8_t>& compact,std::vector<uint16_t>& remap,
+                                std::vector<uint32_t>& table) noexcept;
 // Decode one GX FIFO vertex into the canonical CPU representation. Exposed so
 // the Vita draw adapter can fuse decode + transform into a single worker pass.
 bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,

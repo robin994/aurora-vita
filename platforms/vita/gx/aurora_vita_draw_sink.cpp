@@ -399,6 +399,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
   const auto footprint = gfx::estimate_draw_footprint(source,vertexCount,indexCount,gpuStride);
+  const bool exactTriangleDedup=source==gfx::SourcePrimitive::Triangles&&rawIndices==nullptr&&indexCount==0;
   if(!footprint.valid){
     result.drawError=gfx::PrepareDrawError::TooManyVertices;
     if(telemetry_)telemetry_->unsupported();
@@ -409,23 +410,24 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // any decode/lighting/texture work for the next draw. Previously Strikers hit
   // the 2 MiB arena and then spent hundreds of milliseconds preparing hundreds
   // of draws that could only fail at enqueue time.
-  const auto arenaCanFit=[&]() noexcept {
-    if(!arena_->can_reserve(footprint.vertexBytes,gpuStride,footprint.indexBytes,alignof(uint16_t)))return false;
-    if(footprint.indexBytes){
+  const auto arenaCanFit=[&](const gfx::DrawFootprint& required) noexcept {
+    if(!arena_->can_reserve(required.vertexBytes,gpuStride,required.indexBytes,alignof(uint16_t)))return false;
+    if(required.indexBytes){
       const size_t used=arena_->vertex_used();
       const size_t rem=used%gpuStride;
       const size_t aligned=rem?used+(gpuStride-rem):used;
-      if(aligned/gpuStride+footprint.vertexCount>static_cast<size_t>(std::numeric_limits<uint16_t>::max())+1u)return false;
+      if(aligned/gpuStride+required.vertexCount>static_cast<size_t>(std::numeric_limits<uint16_t>::max())+1u)return false;
     }
     return true;
   };
-  if(!arenaCanFit()){
+  const auto ensureArena=[&](const gfx::DrawFootprint& required) noexcept {
+    if(arenaCanFit(required))return true;
     flush();
     if(!arena_->recycle_current()||
-       !arenaCanFit()){
+       !arenaCanFit(required)){
       result.drawError=gfx::PrepareDrawError::StreamingOverflow;
       if(telemetry_)telemetry_->arena_overflow();
-      return result;
+      return false;
     }
 #if defined(__vita__)
     if(telemetry_||coverage_||trace_){
@@ -434,15 +436,20 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(rolloverLogCount<8||(n&&(n&(n-1))==0)){
         std::fprintf(stderr,"[aurora-vita] stream_rollover total=%llu syncs=%llu slot=%u gpu_stride=%u next_vtx=%u next_idx=%u\n",
                      static_cast<unsigned long long>(n),static_cast<unsigned long long>(arena_->gpu_syncs()),arena_->slot(),
-                     static_cast<unsigned>(gpuStride),footprint.vertexCount,footprint.indexCount);
+                     static_cast<unsigned>(gpuStride),required.vertexCount,required.indexCount);
         ++rolloverLogCount;
       }
     }
 #endif
-  }
+    return true;
+  };
+  // Exact triangle-record deduplication can shrink the VBO substantially, so
+  // defer rollover until the real unique-vertex count is known. Other paths
+  // keep the early guard that avoids preparing a draw which cannot fit.
+  if(!exactTriangleDedup&&!ensureArena(footprint))return result;
   auto& prepared=preparedScratch_;
   (void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
-                              pipeline,vertexState,&uniforms,expansion,telemetry_);
+                              pipeline,vertexState,&uniforms,expansion,telemetry_,exactTriangleDedup);
   if (prepared.ok() && rawIndices && indexCount) {
     prepared.indices.assign(rawIndices, rawIndices + indexCount);
     for (const uint16_t index : prepared.indices) {
@@ -461,6 +468,16 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (telemetry_) telemetry_->unsupported();
     if (strictUnsupported_) strictFailed_ = true;
     return result;
+  }
+
+  if(exactTriangleDedup){
+    gfx::DrawFootprint compactFootprint{};
+    compactFootprint.vertexCount=static_cast<uint32_t>(prepared.vertices.size());
+    compactFootprint.indexCount=static_cast<uint32_t>(prepared.indices.size());
+    compactFootprint.vertexBytes=prepared.vertices.size()*gpuStride;
+    compactFootprint.indexBytes=prepared.indices.size()*sizeof(uint16_t);
+    compactFootprint.valid=true;
+    if(!ensureArena(compactFootprint))return result;
   }
 
 #if defined(__vita__)

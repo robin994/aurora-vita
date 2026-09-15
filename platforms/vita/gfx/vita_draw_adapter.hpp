@@ -34,6 +34,10 @@ struct PreparedDraw {
   // Reused decode storage for line/point expansion. Keeping it with the prepared
   // draw lets the Vita submit path retain allocations across thousands of draws.
   std::vector<CanonicalVertex> scratch{};
+  // Reused exact-record deduplication storage for ordinary indexed triangle
+  // meshes. This keeps the optimization allocation-free after warm-up.
+  std::vector<uint8_t> rawScratch{};
+  std::vector<uint32_t> dedupTable{};
   Primitive primitive = Primitive::Triangles;
   bool positionIsClipSpace = false;
   bool ok() const noexcept { return error == PrepareDrawError::None; }
@@ -71,7 +75,8 @@ PreparedDraw prepare_draw(const uint8_t* rawVertices,size_t rawBytes,uint32_t ve
 bool prepare_draw_into(PreparedDraw& out,const uint8_t* rawVertices,size_t rawBytes,uint32_t vertexCount,SourcePrimitive source,
                        const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
                        const VertexTransformState& state,DrawUniforms* uniforms=nullptr,
-                       const PrimitiveExpansionState& expansion={},Telemetry* telemetry=nullptr) noexcept;
+                       const PrimitiveExpansionState& expansion={},Telemetry* telemetry=nullptr,
+                       bool deduplicateTriangles=false) noexcept;
 
 // Direct streaming path for triangles/quads/fans/strips. Lines and points still
 // use PreparedDraw because their Vita representation expands the vertex count.

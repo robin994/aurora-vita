@@ -24,6 +24,8 @@ struct TelemetryCounters {
   uint64_t vertices = 0;
   uint64_t indices = 0;
   uint64_t triangles = 0;
+  uint64_t vertexDedupInput = 0;
+  uint64_t vertexDedupUnique = 0;
   uint64_t pipelineHits = 0;
   uint64_t pipelineMisses = 0;
   uint64_t textureHits = 0;
@@ -50,6 +52,7 @@ public:
   void end_frame(uint64_t totalUs) noexcept;
   void add_time(TelemetryPhase phase, uint64_t us) noexcept;
   void add_draw(uint32_t vertices, uint32_t indices, uint32_t triangles) noexcept;
+  void vertex_dedup(uint32_t inputVertices,uint32_t uniqueVertices) noexcept;
   void pipeline(bool hit) noexcept;
   void texture(bool hit, bool uploaded, uint64_t uploadBytes = 0) noexcept;
   void fallback_texture(uint32_t count = 1) noexcept;

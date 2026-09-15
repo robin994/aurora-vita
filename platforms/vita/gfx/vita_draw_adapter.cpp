@@ -249,22 +249,41 @@ DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint
   f.indexBytes=static_cast<size_t>(indices)*sizeof(uint16_t);
   f.valid=true;return f;
 }
-bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry) noexcept {
-  out.error=PrepareDrawError::None;out.vertices.clear();out.indices.clear();out.scratch.clear();out.primitive=Primitive::Triangles;out.positionIsClipSpace=false;
+bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry,bool deduplicateTriangles) noexcept {
+  out.error=PrepareDrawError::None;out.vertices.clear();out.indices.clear();out.scratch.clear();out.rawScratch.clear();out.dedupTable.clear();out.primitive=Primitive::Triangles;out.positionIsClipSpace=false;
   if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return false;}
   if(size_t(count)*layout.streamStride>bytes){out.error=PrepareDrawError::VertexDecodeFailed;return false;}
   if(uniforms)uniforms->mvp=state.projection;
   const bool expanded=source==SourcePrimitive::Points||source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip;
+  const uint8_t* decodeRaw=raw;
+  size_t decodeBytes=bytes;
+  uint32_t decodeCount=count;
+  bool exactTriangleDedup=false;
+  // GX triangle lists commonly repeat the same compact FIFO attribute-index
+  // record for every shared corner. Collapse only byte-identical records, so
+  // dynamic attribute arrays, matrix indices and lighting semantics stay exact.
+  if(deduplicateTriangles&&source==SourcePrimitive::Triangles&&count>=48u&&count%3u==0u&&layout.streamStride){
+    ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
+    if(deduplicate_vertex_records(raw,bytes,count,layout.streamStride,out.rawScratch,out.indices,out.dedupTable)){
+      const size_t unique=out.rawScratch.size()/layout.streamStride;
+      if(unique<count){
+        decodeRaw=out.rawScratch.data();decodeBytes=out.rawScratch.size();decodeCount=static_cast<uint32_t>(unique);exactTriangleDedup=true;
+      }else{
+        out.indices.clear();out.rawScratch.clear();
+      }
+    }
+    if(telemetry)telemetry->vertex_dedup(count,decodeCount);
+  }
   auto&transformed=expanded?out.scratch:out.vertices;
-  transformed.resize(count);
+  transformed.resize(decodeCount);
   const auto requirements=vertex_pipeline_requirements(pipeline);
-  FusedVertexContext fused{raw,bytes,&layout,&pipeline,&state,requirements,
+  FusedVertexContext fused{decodeRaw,decodeBytes,&layout,&pipeline,&state,requirements,
                            decode_semantics_for_pipeline(pipeline,requirements),transformed.data()};
   // Decode and GX vertex processing used to dispatch the worker pool twice and
   // walk the 168-byte canonical array twice. Fusing them keeps each vertex hot
   // in cache and makes medium-sized Strikers draws worth parallelizing.
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
-    if(!cpu_parallel_for(count,decode_transform_range,&fused)){
+    if(!cpu_parallel_for(decodeCount,decode_transform_range,&fused)){
       bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;
       out.error=transformFailed?PrepareDrawError::VertexTransformFailed:PrepareDrawError::VertexDecodeFailed;
       return false;
@@ -273,6 +292,7 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
     if(source==SourcePrimitive::Points){if(!expand_points(transformed,out.vertices,out.indices,state.projection,expansion)){out.error=PrepareDrawError::TooManyVertices;return false;}out.positionIsClipSpace=true;out.primitive=Primitive::Triangles;return true;}
     if(source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip){if(!expand_lines(transformed,source,out.vertices,out.indices,state.projection,expansion)){out.error=PrepareDrawError::TooManyVertices;return false;}out.positionIsClipSpace=true;out.primitive=Primitive::Triangles;return true;}
+    if(exactTriangleDedup){out.primitive=Primitive::Triangles;return true;}
     if(!build_indices(out.indices,source,count)){out.error=PrepareDrawError::TooManyVertices;return false;}out.primitive=Primitive::Triangles;
   }
   return true;
@@ -337,7 +357,7 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
 }
 PreparedDraw prepare_draw(const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry) noexcept {
   PreparedDraw out{};
-  (void)prepare_draw_into(out,raw,bytes,count,source,layout,pipeline,state,uniforms,expansion,telemetry);
+  (void)prepare_draw_into(out,raw,bytes,count,source,layout,pipeline,state,uniforms,expansion,telemetry,false);
   return out;
 }
 uint64_t resolve_draw_pipeline(Renderer&renderer,const PreparedDraw&prepared,const PipelineDesc&pipeline,Telemetry*telemetry) noexcept {

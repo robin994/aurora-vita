@@ -31,6 +31,8 @@ struct MemoryBudgetSnapshot {
   uint64_t textureEvictions = 0;
   uint64_t pipelineCompileFailures = 0;
   uint64_t pipelineEvictions = 0;
+  uint64_t streamRecycles = 0;
+  uint64_t gpuSyncs = 0;
 
   bool within_stream_budget() const noexcept { return vertexUsed <= vertexCapacity && indexUsed <= indexCapacity; }
   bool within_texture_budget() const noexcept { return textureBytes <= textureBudget; }

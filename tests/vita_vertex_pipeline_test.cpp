@@ -60,6 +60,25 @@ TEST(VitaVertexDecode, RequiredSemanticMaskSkipsUnusedInvalidAttribute) {
   EXPECT_FALSE(decode_vertex_into(stream.data(),stream.size(),0,layout,fullVertex));
 }
 
+TEST(VitaVertexDecode, ExactRecordDedupPreservesTriangleCornerOrder) {
+  constexpr uint16_t stride=3;
+  const std::array<uint8_t,18> stream{{
+      1,2,3, 4,5,6, 1,2,3,
+      7,8,9, 4,5,6, 1,2,3,
+  }};
+  std::vector<uint8_t> compact;
+  std::vector<uint16_t> remap;
+  std::vector<uint32_t> table;
+
+  ASSERT_TRUE(deduplicate_vertex_records(stream.data(),stream.size(),6,stride,compact,remap,table));
+  const std::array<uint8_t,9> expectedCompact{{1,2,3,4,5,6,7,8,9}};
+  const std::array<uint16_t,6> expectedRemap{{0,1,0,2,1,0}};
+  ASSERT_EQ(compact.size(),expectedCompact.size());
+  EXPECT_TRUE(std::equal(compact.begin(),compact.end(),expectedCompact.begin()));
+  ASSERT_EQ(remap.size(),expectedRemap.size());
+  EXPECT_TRUE(std::equal(remap.begin(),remap.end(),expectedRemap.begin()));
+}
+
 TEST(VitaVertexPipeline, FixedCurrentMatrixCanAddressTextureRegion) {
   CanonicalVertex vertex{};
   vertex.position[0]=1.f;
