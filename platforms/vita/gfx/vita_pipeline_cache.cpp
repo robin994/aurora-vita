@@ -93,12 +93,19 @@ void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSource
 
 GLenum compare(Compare c){switch(c){case Compare::Never:return GL_NEVER;case Compare::Less:return GL_LESS;case Compare::Equal:return GL_EQUAL;case Compare::LessEqual:return GL_LEQUAL;case Compare::Greater:return GL_GREATER;case Compare::NotEqual:return GL_NOTEQUAL;case Compare::GreaterEqual:return GL_GEQUAL;case Compare::Always:return GL_ALWAYS;}return GL_ALWAYS;}
 GLenum blend_factor(BlendFactor f){switch(f){case BlendFactor::Zero:return GL_ZERO;case BlendFactor::One:return GL_ONE;case BlendFactor::SrcColor:return GL_SRC_COLOR;case BlendFactor::OneMinusSrcColor:return GL_ONE_MINUS_SRC_COLOR;case BlendFactor::DstColor:return GL_DST_COLOR;case BlendFactor::OneMinusDstColor:return GL_ONE_MINUS_DST_COLOR;case BlendFactor::SrcAlpha:return GL_SRC_ALPHA;case BlendFactor::OneMinusSrcAlpha:return GL_ONE_MINUS_SRC_ALPHA;case BlendFactor::DstAlpha:return GL_DST_ALPHA;case BlendFactor::OneMinusDstAlpha:return GL_ONE_MINUS_DST_ALPHA;}return GL_ONE;}
-void fixed(const PipelineDesc&d){if(d.depthTest){glEnable(GL_DEPTH_TEST);/* The vertex shader already reproduces Aurora's effective depth. Keep the original GX compare, exactly like the WebGPU backend. */glDepthFunc(compare(d.depthFunc));}else glDisable(GL_DEPTH_TEST);glDepthMask(d.depthWrite?GL_TRUE:GL_FALSE);
-  if(d.cull==CullMode::None)glDisable(GL_CULL_FACE);else if(d.cull==CullMode::All){glEnable(GL_CULL_FACE);glCullFace(GL_FRONT_AND_BACK);}else{glEnable(GL_CULL_FACE);glFrontFace(GL_CW);glCullFace(d.cull==CullMode::Front?GL_FRONT:GL_BACK);}glColorMask(d.colorWrite?GL_TRUE:GL_FALSE,d.colorWrite?GL_TRUE:GL_FALSE,d.colorWrite?GL_TRUE:GL_FALSE,d.alphaWrite?GL_TRUE:GL_FALSE);
+FixedStateSnapshot snapshot_fixed(const PipelineDesc&d) noexcept {
+  return {d.depthFunc,d.cull,d.blendMode,d.srcFactor,d.dstFactor,d.logicOp,d.dstAlpha,
+          d.depthTest,d.depthWrite,d.colorWrite,d.alphaWrite,d.polygonOffset,
+          d.polygonOffsetFactor,d.polygonOffsetUnits};
+}
+void fixed(const PipelineDesc&d,const FixedStateSnapshot* old){
+  if(!old||d.depthTest!=old->depthTest||d.depthFunc!=old->depthFunc||d.depthWrite!=old->depthWrite){if(d.depthTest){glEnable(GL_DEPTH_TEST);/* The vertex shader already reproduces Aurora's effective depth. Keep the original GX compare, exactly like the WebGPU backend. */glDepthFunc(compare(d.depthFunc));}else glDisable(GL_DEPTH_TEST);glDepthMask(d.depthWrite?GL_TRUE:GL_FALSE);}
+  if(!old||d.cull!=old->cull){if(d.cull==CullMode::None)glDisable(GL_CULL_FACE);else if(d.cull==CullMode::All){glEnable(GL_CULL_FACE);glCullFace(GL_FRONT_AND_BACK);}else{glEnable(GL_CULL_FACE);glFrontFace(GL_CW);glCullFace(d.cull==CullMode::Front?GL_FRONT:GL_BACK);}}
+  if(!old||d.colorWrite!=old->colorWrite||d.alphaWrite!=old->alphaWrite)glColorMask(d.colorWrite?GL_TRUE:GL_FALSE,d.colorWrite?GL_TRUE:GL_FALSE,d.colorWrite?GL_TRUE:GL_FALSE,d.alphaWrite?GL_TRUE:GL_FALSE);
   // GX destination alpha replaces the alpha value written to the EFB even when RGB is blended.
   // Preserve the RGB equation/factors, but force alpha to src*1 + dst*0 when dstAlpha is enabled.
   const bool forceDstAlpha=d.dstAlpha>=0&&d.alphaWrite;
-  if(d.blendMode==BlendMode::None){glDisable(GL_BLEND);}else{glEnable(GL_BLEND);if(d.blendMode==BlendMode::Subtract){
+  if(!old||d.blendMode!=old->blendMode||d.srcFactor!=old->srcFactor||d.dstFactor!=old->dstFactor||d.logicOp!=old->logicOp||d.dstAlpha!=old->dstAlpha||d.alphaWrite!=old->alphaWrite){if(d.blendMode==BlendMode::None){glDisable(GL_BLEND);}else{glEnable(GL_BLEND);if(d.blendMode==BlendMode::Subtract){
       glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT,forceDstAlpha?GL_FUNC_ADD:GL_FUNC_REVERSE_SUBTRACT);
       glBlendFuncSeparate(GL_ONE,GL_ONE,forceDstAlpha?GL_ONE:GL_ONE,forceDstAlpha?GL_ZERO:GL_ONE);
     }else if(d.blendMode==BlendMode::Logic){
@@ -107,8 +114,8 @@ void fixed(const PipelineDesc&d){if(d.depthTest){glEnable(GL_DEPTH_TEST);/* The 
     }else{
       glBlendEquationSeparate(GL_FUNC_ADD,GL_FUNC_ADD);const GLenum sr=blend_factor(d.srcFactor),dr=blend_factor(d.dstFactor);
       glBlendFuncSeparate(sr,dr,forceDstAlpha?GL_ONE:sr,forceDstAlpha?GL_ZERO:dr);
-    }}
-  if(d.polygonOffset){glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(d.polygonOffsetFactor,d.polygonOffsetUnits);}else glDisable(GL_POLYGON_OFFSET_FILL);
+    }}}
+  if(!old||d.polygonOffset!=old->polygonOffset||d.polygonOffsetFactor!=old->polygonOffsetFactor||d.polygonOffsetUnits!=old->polygonOffsetUnits){if(d.polygonOffset){glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(d.polygonOffsetFactor,d.polygonOffsetUnits);}else glDisable(GL_POLYGON_OFFSET_FILL);}
 }
 #endif
 }
@@ -141,6 +148,7 @@ bool PipelineCache::evict_one() noexcept {
     glUseProgram(0);
 #endif
     bound_=0;
+    boundPipeline_=nullptr;
   }
   destroy_pipeline(victim->second);
   map_.erase(victim);
@@ -168,6 +176,7 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& d,Frame
     return &it->second;
   }
   if(st)st->pipelineMisses++;
+  if(failedKeys_.contains(k))return nullptr;
   if(maxEntries_!=0 && map_.size()>=maxEntries_) (void)evict_one();
   CompiledPipeline p{};
   p.key=k;
@@ -178,7 +187,7 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& d,Frame
   auto src=build_tev_glsl(d);
   std::string shaderDiagnostics;
   p.program=link_program(src.vertex.c_str(),src.fragment.c_str(),&shaderDiagnostics);
-  if(!p.program){++compileFailures_;std::printf("[aurora-vita] pipeline compile failed key=%llx\n",(unsigned long long)k);dump_pipeline_failure(k,d,src,shaderDiagnostics);return nullptr;}
+  if(!p.program){++compileFailures_;failedKeys_.insert(k);std::printf("[aurora-vita] pipeline compile failed key=%llx\n",(unsigned long long)k);dump_pipeline_failure(k,d,src,shaderDiagnostics);return nullptr;}
   p.uMvp=glGetUniformLocation(p.program,"u_mvp");
   p.uKColor=glGetUniformLocation(p.program,"u_kcolor");
   p.uTevReg=glGetUniformLocation(p.program,"u_tevreg");
@@ -195,6 +204,10 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& d,Frame
     p.uTex[i]=glGetUniformLocation(p.program,n);
     if(p.uTex[i]>=0)glUniform1i(p.uTex[i],i);
   }
+  // Uniform sampler initialization changes the process-global GL program. Do not
+  // leave the cache believing an older pipeline is still bound after a compile.
+  bound_=0;
+  boundPipeline_=nullptr;
 #else
   p.program=static_cast<unsigned>(useSequence_);
 #endif
@@ -204,33 +217,36 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& d,Frame
 }
 
 const CompiledPipeline* PipelineCache::find(uint64_t key) noexcept {
+  if(key==bound_&&boundPipeline_){boundPipeline_->lastUsed=++useSequence_;return boundPipeline_;}
   auto it=map_.find(key);
   if(it==map_.end()) return nullptr;
   it->second.lastUsed=++useSequence_;
   return &it->second;
 }
 
-void PipelineCache::bind(const CompiledPipeline&p,const DrawUniforms&u,FrameStats*st) noexcept {
+void PipelineCache::bind(const CompiledPipeline&p,const GpuDrawUniforms&u,FrameStats*st) noexcept {
 #if defined(__vita__)
-  if(bound_!=p.key){glUseProgram(p.program);fixed(p.desc);bound_=p.key;if(st)st->stateChanges++;}
+  if(bound_!=p.key){glUseProgram(p.program);fixed(p.desc,fixedStateValid_?&fixedState_:nullptr);fixedState_=snapshot_fixed(p.desc);fixedStateValid_=true;bound_=p.key;boundPipeline_=const_cast<CompiledPipeline*>(&p);if(st)st->stateChanges++;}
   auto changed=[&](uint16_t bit,const void* a,const void* b,size_t n) noexcept {
     return (p.uniformValidMask&bit)==0 || std::memcmp(a,b,n)!=0;
   };
-  if(p.uMvp>=0 && changed(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp)))glUniformMatrix4fv(p.uMvp,1,GL_FALSE,u.mvp.data());
-  if(p.uKColor>=0 && changed(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor)))glUniform4fv(p.uKColor,4,u.kcolor[0].data());
-  if(p.uTevReg>=0 && changed(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg)))glUniform4fv(p.uTevReg,4,u.tevreg[0].data());
-  if(p.uFogColor>=0 && changed(1u<<3,u.fogColor.data(),p.cachedUniforms.fogColor.data(),sizeof(u.fogColor)))glUniform4fv(p.uFogColor,1,u.fogColor.data());
-  if(p.uFogParams>=0 && changed(1u<<4,u.fogParams.data(),p.cachedUniforms.fogParams.data(),sizeof(u.fogParams)))glUniform4fv(p.uFogParams,1,u.fogParams.data());
-  if(p.uFogRangeK>=0 && changed(1u<<5,u.fogRangeK.data(),p.cachedUniforms.fogRangeK.data(),sizeof(u.fogRangeK)))glUniform1fv(p.uFogRangeK,10,u.fogRangeK.data());
-  if(p.uRenderViewportWidth>=0 && changed(1u<<6,&u.renderViewportWidth,&p.cachedUniforms.renderViewportWidth,sizeof(u.renderViewportWidth)))glUniform1f(p.uRenderViewportWidth,u.renderViewportWidth);
-  if(p.uIndMtx>=0 && changed(1u<<7,u.indirectMatrices.data(),p.cachedUniforms.indirectMatrices.data(),sizeof(u.indirectMatrices)))glUniform4fv(p.uIndMtx,MaxIndMatrices*2,u.indirectMatrices[0].data());
-  if(p.uTexcoordScale>=0 && changed(1u<<8,u.texcoordScale.data(),p.cachedUniforms.texcoordScale.data(),sizeof(u.texcoordScale)))glUniform4fv(p.uTexcoordScale,MaxTextures,u.texcoordScale[0].data());
-  if(p.uTextureSizeBias>=0 && changed(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias)))glUniform4fv(p.uTextureSizeBias,MaxTextures,u.textureSizeBias[0].data());
-  p.cachedUniforms=u;
-  p.uniformValidMask=0x03ffu;
+  auto uploaded=[&](uint16_t bit,const void* src,void* dst,size_t n) noexcept {
+    std::memcpy(dst,src,n);
+    p.uniformValidMask|=bit;
+  };
+  if(p.uMvp>=0 && changed(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp))){glUniformMatrix4fv(p.uMvp,1,GL_FALSE,u.mvp.data());uploaded(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp));}
+  if(p.uKColor>=0 && changed(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor))){glUniform4fv(p.uKColor,4,u.kcolor[0].data());uploaded(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor));}
+  if(p.uTevReg>=0 && changed(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg))){glUniform4fv(p.uTevReg,4,u.tevreg[0].data());uploaded(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg));}
+  if(p.uFogColor>=0 && changed(1u<<3,u.fogColor.data(),p.cachedUniforms.fogColor.data(),sizeof(u.fogColor))){glUniform4fv(p.uFogColor,1,u.fogColor.data());uploaded(1u<<3,u.fogColor.data(),p.cachedUniforms.fogColor.data(),sizeof(u.fogColor));}
+  if(p.uFogParams>=0 && changed(1u<<4,u.fogParams.data(),p.cachedUniforms.fogParams.data(),sizeof(u.fogParams))){glUniform4fv(p.uFogParams,1,u.fogParams.data());uploaded(1u<<4,u.fogParams.data(),p.cachedUniforms.fogParams.data(),sizeof(u.fogParams));}
+  if(p.uFogRangeK>=0 && changed(1u<<5,u.fogRangeK.data(),p.cachedUniforms.fogRangeK.data(),sizeof(u.fogRangeK))){glUniform1fv(p.uFogRangeK,10,u.fogRangeK.data());uploaded(1u<<5,u.fogRangeK.data(),p.cachedUniforms.fogRangeK.data(),sizeof(u.fogRangeK));}
+  if(p.uRenderViewportWidth>=0 && changed(1u<<6,&u.renderViewportWidth,&p.cachedUniforms.renderViewportWidth,sizeof(u.renderViewportWidth))){glUniform1f(p.uRenderViewportWidth,u.renderViewportWidth);uploaded(1u<<6,&u.renderViewportWidth,&p.cachedUniforms.renderViewportWidth,sizeof(u.renderViewportWidth));}
+  if(p.uIndMtx>=0 && changed(1u<<7,u.indirectMatrices.data(),p.cachedUniforms.indirectMatrices.data(),sizeof(u.indirectMatrices))){glUniform4fv(p.uIndMtx,MaxIndMatrices*2,u.indirectMatrices[0].data());uploaded(1u<<7,u.indirectMatrices.data(),p.cachedUniforms.indirectMatrices.data(),sizeof(u.indirectMatrices));}
+  if(p.uTexcoordScale>=0 && changed(1u<<8,u.texcoordScale.data(),p.cachedUniforms.texcoordScale.data(),sizeof(u.texcoordScale))){glUniform4fv(p.uTexcoordScale,MaxTextures,u.texcoordScale[0].data());uploaded(1u<<8,u.texcoordScale.data(),p.cachedUniforms.texcoordScale.data(),sizeof(u.texcoordScale));}
+  if(p.uTextureSizeBias>=0 && changed(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias))){glUniform4fv(p.uTextureSizeBias,MaxTextures,u.textureSizeBias[0].data());uploaded(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias));}
 #else
   (void)u;
-  if(bound_!=p.key){bound_=p.key;if(st)st->stateChanges++;}
+  if(bound_!=p.key){bound_=p.key;boundPipeline_=const_cast<CompiledPipeline*>(&p);if(st)st->stateChanges++;}
 #endif
 }
 
@@ -238,6 +254,9 @@ void PipelineCache::clear() noexcept {
   for(auto&[k,p]:map_){(void)k;destroy_pipeline(p);}
   map_.clear();
   pinned_.clear();
+  failedKeys_.clear();
   bound_=0;
+  boundPipeline_=nullptr;
+  fixedStateValid_=false;
 }
 } // namespace aurora::vita::gfx

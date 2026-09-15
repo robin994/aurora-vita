@@ -221,6 +221,8 @@ bool EfbManager::ensure_blitter(EfbCopyFormat format) noexcept {
     blitPrograms_[idx] = link_program(BlitVs, fs);
     if (!blitPrograms_[idx]) return false;
     blitTex_[idx] = glGetUniformLocation(blitPrograms_[idx], "u_tex0");
+    glUseProgram(blitPrograms_[idx]);
+    if (blitTex_[idx] >= 0) glUniform1i(blitTex_[idx], 0);
   }
   if (!blitVbo_) {
     const float q[] = {-1,-1,0,0, 1,-1,1,0, -1,1,0,1, 1,1,1,1};
@@ -251,15 +253,12 @@ bool EfbManager::draw_texture(unsigned texture, uint32_t width, uint32_t height,
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  if (blitTex_[idx] >= 0) glUniform1i(blitTex_[idx], 0);
   glBindBuffer(GL_ARRAY_BUFFER, blitVbo_);
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(3);
   glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void*)0);
   glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void*)(2 * sizeof(float)));
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-  glDisableVertexAttribArray(0);
-  glDisableVertexAttribArray(3);
 #else
   (void)texture;
   (void)width;
@@ -272,12 +271,16 @@ bool EfbManager::blit_to_default(Handle h, uint32_t w, uint32_t he) noexcept {
   const auto it = map_.find(h);
   if (it == map_.end()) return false;
   bind_default(w, he);
-  return draw_texture(it->second.color, w, he, EfbCopyFormat::Passthrough);
+  const bool ok=draw_texture(it->second.color, w, he, EfbCopyFormat::Passthrough);
+  // draw_texture enforces its own linear/clamp sampling state on the raw GL id.
+  // Force the next GX sampling bind to refresh this entry's requested sampler.
+  if(ok) it->second.samplerValid=false;
+  return ok;
 }
 
 Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t srcY, uint32_t srcWidth,
                                       uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight,
-                                      EfbCopyFormat format) noexcept {
+                                      EfbCopyFormat format, bool scissorEnabled) noexcept {
   if (!srcWidth || !srcHeight || !dstWidth || !dstHeight || is_depth_copy_format(format)) return InvalidHandle;
   Handle dst = existing;
   uint32_t ew = 0, eh = 0;
@@ -299,8 +302,10 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
       destroy(dst);
       return InvalidHandle;
     }
-    const GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
-    if (scissorWasEnabled) glDisable(GL_SCISSOR_TEST);
+    // Renderer tracks this state, so avoid glIsEnabled() here. On vitaGL a GL state
+    // query in the middle of repeated GXCopyTex traffic is materially more expensive
+    // than the two deterministic toggles below.
+    if (scissorEnabled) glDisable(GL_SCISSOR_TEST);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstIt->second.fbo);
     while (glGetError() != GL_NO_ERROR) {}
@@ -312,7 +317,7 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
     glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sourceFbo);
     boundFbo_ = sourceFbo;
-    if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST);
+    if (scissorEnabled) glEnable(GL_SCISSOR_TEST);
     if (blitError != GL_NO_ERROR) {
       destroy(dst);
       return InvalidHandle;
@@ -349,6 +354,7 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
   (void)srcX;
   (void)srcY;
   (void)format;
+  (void)scissorEnabled;
 #endif
   return dst;
 }
@@ -411,16 +417,19 @@ Handle EfbManager::upload_rgba(Handle existing, uint32_t w, uint32_t h, const vo
 }
 
 bool EfbManager::bind_texture(Handle h, unsigned unit, const SamplerDesc& s) noexcept {
-  const auto it = map_.find(h);
+  auto it = map_.find(h);
   if (it == map_.end()) return false;
 #if defined(__vita__)
   glActiveTexture(GL_TEXTURE0 + unit);
   glBindTexture(GL_TEXTURE_2D, it->second.color);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(s.wrapS));
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode(s.wrapT));
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter_mode(s.minFilter));
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter_mode(s.magFilter));
-  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, s.lodBias);
+  const auto& old=it->second.sampler;
+  if(!it->second.samplerValid||old.wrapS!=s.wrapS)glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(s.wrapS));
+  if(!it->second.samplerValid||old.wrapT!=s.wrapT)glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode(s.wrapT));
+  if(!it->second.samplerValid||old.minFilter!=s.minFilter)glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter_mode(s.minFilter));
+  if(!it->second.samplerValid||old.magFilter!=s.magFilter)glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter_mode(s.magFilter));
+  if(!it->second.samplerValid||old.lodBias!=s.lodBias)glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, s.lodBias);
+  it->second.sampler=s;
+  it->second.samplerValid=true;
 #else
   (void)unit;
   (void)s;

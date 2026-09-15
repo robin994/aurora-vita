@@ -44,7 +44,9 @@ struct BackendConfig {
   // total with the default two workers plus the caller.
   uint32_t cpu_worker_threads=2;
   uint32_t cpu_parallel_min_vertices=512;
-  bool diagnostics=true;
+  // Expensive per-draw coverage/trace instrumentation is opt-in for shipping
+  // ports. Supplying any diagnostic output path still enables it automatically.
+  bool diagnostics=false;
   bool strict_unsupported=false;
   uint32_t diagnostics_period_frames=300;
   const char* telemetry_log_path=nullptr;

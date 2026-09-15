@@ -53,7 +53,11 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
 void DrawSink::shutdown() noexcept {
   if (!initialized_ && !arena_) return;
   stream_.reset();
+  preparedScratch_=gfx::PreparedDraw{};
+  translatedVertexStateValid_=false;
 #if defined(AURORA_VITA_UPSTREAM)
+  translatedStateValid_=false;
+  resolvedTextureBindingsValid_=false;
   clear_copy_textures();
 #endif
   if (arena_) {
@@ -80,6 +84,9 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
   if (!initialized_ || !arena_) return;
   stream_.reset();
   reset_pipeline_run_cache();
+#if defined(AURORA_VITA_UPSTREAM)
+  resolvedTextureBindingsValid_=false;
+#endif
   arena_->begin_frame(frame);
   if (trace_) trace_->begin_frame(frame);
 }
@@ -93,6 +100,10 @@ void DrawSink::flush() noexcept {
     reset_pipeline_run_cache();
     return;
   }
+  // Mapping/uploading the streaming VBO/IBO and resolving textures happens
+  // outside Renderer::draw and changes raw GL bindings. Invalidate only resource
+  // bindings once per chunk; pipeline/fixed/viewport state stays hot across flushes.
+  renderer_->invalidate_resource_bindings();
   { gfx::ScopedTelemetryPhase phase(telemetry_, gfx::TelemetryPhase::Submit); renderer_->execute(stream_); }
   arena_->mark_current_submitted();
   stream_.reset();
@@ -113,27 +124,6 @@ gfx::Handle DrawSink::white_texture() noexcept {
 
 #if defined(AURORA_VITA_UPSTREAM)
 namespace {
-bool color_uses_texture(gfx::TevColorArg a) noexcept { return a == gfx::TevColorArg::TexColor || a == gfx::TevColorArg::TexAlpha; }
-bool alpha_uses_texture(gfx::TevAlphaArg a) noexcept { return a == gfx::TevAlphaArg::TexAlpha; }
-bool stage_uses_texture(const gfx::TevStage& s) noexcept {
-  return color_uses_texture(s.color.a) || color_uses_texture(s.color.b) || color_uses_texture(s.color.c) ||
-         color_uses_texture(s.color.d) || alpha_uses_texture(s.alpha.a) || alpha_uses_texture(s.alpha.b) ||
-         alpha_uses_texture(s.alpha.c) || alpha_uses_texture(s.alpha.d);
-}
-
-uint8_t sampled_texture_mask(const gfx::PipelineDesc& p) noexcept {
-  uint8_t mask = 0;
-  for (unsigned i = 0; i < p.tev.stageCount && i < p.tev.stages.size(); ++i) {
-    const auto& s = p.tev.stages[i];
-    if (stage_uses_texture(s) && s.texture < gfx::MaxTextures) mask |= static_cast<uint8_t>(1u << s.texture);
-    if (s.indirectEnabled && s.indirectStage < p.tev.indirectStageCount) {
-      const auto t = p.tev.indirectStages[s.indirectStage].texture;
-      if (t < gfx::MaxTextures) mask |= static_cast<uint8_t>(1u << t);
-    }
-  }
-  return mask;
-}
-
 #if defined(__vita__)
 struct ClipPoint { float x=0.f,y=0.f,z=0.f,w=1.f; };
 
@@ -211,6 +201,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
 
 bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   if (!initialized_ || !renderer_ || !dest) return false;
+  resolvedTextureBindingsValid_=false;
   gfx::ScopedTelemetryPhase timer(telemetry_, gfx::TelemetryPhase::EfbCopy);
   if (coverage_) coverage_->observe(integration::FeatureClass::EfbCopy, reinterpret_cast<uintptr_t>(dest), "GXCopyTex");
   // GXCopyTex is an ordering boundary: all draws before it must hit the source EFB.
@@ -266,6 +257,7 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   }
   if (telemetry_) telemetry_->efb_copy();
   copyTextures_[copyKey] = CopyTextureEntry{h, dstW, dstH, oldRevision + 1};
+  resolvedTextureBindingsValid_=false;
   if (clear) {
 #if defined(AURORA_VITA_UPSTREAM_STUB)
     renderer_->clear_current({0,0,0,0}, 0.f, g.colorUpdate, g.alphaUpdate, g.depthUpdate);
@@ -283,11 +275,13 @@ void DrawSink::evict_copy_tex(const void* dest) noexcept {
   if(it==copyTextures_.end())return;
   if(it->second.handle)renderer_->efb().destroy(it->second.handle);
   copyTextures_.erase(it);
+  resolvedTextureBindingsValid_=false;
 }
 
 void DrawSink::clear_copy_textures() noexcept {
   if(renderer_)for(auto& [_,e]:copyTextures_)if(e.handle)renderer_->efb().destroy(e.handle);
   copyTextures_.clear();
+  resolvedTextureBindingsValid_=false;
 }
 
 SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* rawVertices,
@@ -303,7 +297,31 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     coverage_->observe(integration::FeatureClass::Primitive, primitive, "GX primitive");
     coverage_->observe(integration::FeatureClass::VertexFormat, fmt, "GX vertex format");
   }
-  auto pipeline = translate_current_pipeline(primitive, fmt);
+  const uint32_t stateGeneration = aurora::gx::g_gxState.pipelineStateGeneration;
+  const bool translatedCacheHit = translatedStateValid_ && translatedStateGeneration_ == stateGeneration &&
+                                  translatedPrimitive_ == primitive && translatedFmt_ == fmt;
+  if (!translatedCacheHit) {
+    translatedPipeline_ = translate_current_pipeline(primitive, fmt);
+    translatedLayout_ = translate_current_vertex_layout(fmt);
+    translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
+    translatedTextureMask_=gfx::pipeline_sampled_texture_mask(translatedPipeline_);
+    translatedUsesOrigLod_=false;
+    translatedHasIndirect_=translatedPipeline_.tev.indirectStageCount!=0;
+    translatedLit_=false;
+    for(unsigned i=0;i<translatedPipeline_.tev.stageCount&&i<translatedPipeline_.tev.stages.size();++i){
+      const auto&s=translatedPipeline_.tev.stages[i];
+      translatedUsesOrigLod_=translatedUsesOrigLod_||s.indirectUseOrigLod;
+      translatedHasIndirect_=translatedHasIndirect_||s.indirectEnabled;
+    }
+    for(const auto&c:translatedPipeline_.colorChannels)translatedLit_=translatedLit_||c.lightingEnabled;
+    translatedStateGeneration_ = stateGeneration;
+    translatedPrimitive_ = primitive;
+    translatedFmt_ = fmt;
+    translatedStateValid_ = true;
+  }
+  const auto& pipeline = translatedPipeline_;
+  const auto& layout = translatedLayout_;
+  const uint64_t translatedPipelineKey = translatedPipelineKey_;
   if (pipeline.blendMode == gfx::BlendMode::Logic && pipeline.logicOp != gfx::LogicOp::Clear &&
       pipeline.logicOp != gfx::LogicOp::Copy && pipeline.logicOp != gfx::LogicOp::Noop) {
     result.warnings |= SubmitWarning::LogicOpFallback;
@@ -311,11 +329,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (telemetry_) telemetry_->unsupported();
     if (strictUnsupported_) strictFailed_ = true;
   }
-  const uint64_t translatedPipelineKey = gfx::pipeline_key(pipeline);
-  bool usesOrigLod = false;
-  for (unsigned i=0;i<pipeline.tev.stageCount && i<pipeline.tev.stages.size();++i)
-    usesOrigLod = usesOrigLod || pipeline.tev.stages[i].indirectUseOrigLod;
-  if (usesOrigLod) {
+  if (translatedUsesOrigLod_) {
     result.warnings |= SubmitWarning::OrigLodApproximation;
     if (coverage_) coverage_->fallback(translatedPipelineKey ^ 0x4f5249474c4f44ull, "indTexUseOrigLOD approximated by vitaGL sampler derivatives");
     if (telemetry_) telemetry_->unsupported();
@@ -329,21 +343,26 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
   if (coverage_) {
     coverage_->observe(integration::FeatureClass::TevProgram, translatedPipelineKey, "translated GX pipeline/TEV");
-    bool hasIndirect = pipeline.tev.indirectStageCount != 0;
-    for (unsigned i = 0; i < pipeline.tev.stageCount && i < pipeline.tev.stages.size(); ++i) hasIndirect = hasIndirect || pipeline.tev.stages[i].indirectEnabled;
-    if (hasIndirect) coverage_->observe(integration::FeatureClass::IndirectTev, translatedPipelineKey, "indirect TEV");
+    if (translatedHasIndirect_) coverage_->observe(integration::FeatureClass::IndirectTev, translatedPipelineKey, "indirect TEV");
     if (pipeline.fogMode != gfx::FogMode::None) coverage_->observe(integration::FeatureClass::Fog, static_cast<uint64_t>(pipeline.fogMode), "GX fog mode");
     if (pipeline.texgenCount) coverage_->observe(integration::FeatureClass::TexGen, translatedPipelineKey ^ pipeline.texgenCount, "GX texgen program");
-    bool lit = false; for (const auto& c : pipeline.colorChannels) lit = lit || c.lightingEnabled;
-    if (lit) coverage_->observe(integration::FeatureClass::Lighting, translatedPipelineKey, "GX lighting");
+    if (translatedLit_) coverage_->observe(integration::FeatureClass::Lighting, translatedPipelineKey, "GX lighting");
   }
-  const auto layout = translate_current_vertex_layout(fmt);
-  gfx::VertexTransformState vertexState{};
-  gfx::DrawUniforms uniforms{};
-  translate_vertex_state(vertexState, uniforms);
+  // Matrix palettes, lighting and the large CPU-side transform state frequently
+  // stay identical across long runs of GX draws. command_processor marks
+  // g_gxState.stateDirty on every relevant write and clears it after a successful
+  // submission, so this is a reliable zero-hash reuse gate.
+  if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty){
+    translate_vertex_state(translatedVertexState_,translatedUniforms_);
+    translatedVertexStateValid_=true;
+  }
+  const auto& vertexState=translatedVertexState_;
+  auto& uniforms=translatedUniforms_;
   const auto source = translate_source_primitive(primitive);
   const auto expansion = translate_primitive_expansion(translate_line_mode(primitive));
-  const auto footprint = gfx::estimate_draw_footprint(source,vertexCount,indexCount);
+  const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
+  const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
+  const auto footprint = gfx::estimate_draw_footprint(source,vertexCount,indexCount,gpuStride);
   if(!footprint.valid){
     result.drawError=gfx::PrepareDrawError::TooManyVertices;
     if(telemetry_)telemetry_->unsupported();
@@ -354,30 +373,40 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // any decode/lighting/texture work for the next draw. Previously Strikers hit
   // the 2 MiB arena and then spent hundreds of milliseconds preparing hundreds
   // of draws that could only fail at enqueue time.
-  if(!arena_->can_reserve(footprint.vertexBytes,alignof(gfx::GpuVertex),
-                          footprint.indexBytes,alignof(uint16_t))){
+  const auto arenaCanFit=[&]() noexcept {
+    if(!arena_->can_reserve(footprint.vertexBytes,gpuStride,footprint.indexBytes,alignof(uint16_t)))return false;
+    if(footprint.indexBytes){
+      const size_t used=arena_->vertex_used();
+      const size_t rem=used%gpuStride;
+      const size_t aligned=rem?used+(gpuStride-rem):used;
+      if(aligned/gpuStride+footprint.vertexCount>static_cast<size_t>(std::numeric_limits<uint16_t>::max())+1u)return false;
+    }
+    return true;
+  };
+  if(!arenaCanFit()){
     flush();
     if(!arena_->recycle_current()||
-       !arena_->can_reserve(footprint.vertexBytes,alignof(gfx::GpuVertex),
-                            footprint.indexBytes,alignof(uint16_t))){
+       !arenaCanFit()){
       result.drawError=gfx::PrepareDrawError::StreamingOverflow;
       if(telemetry_)telemetry_->arena_overflow();
       return result;
     }
 #if defined(__vita__)
-    static uint64_t rolloverLogCount=0;
-    const auto n=arena_->recycles();
-    if(rolloverLogCount<8||(n&&(n&(n-1))==0)){
-      std::fprintf(stderr,"[aurora-vita] stream_rollover total=%llu syncs=%llu slot=%u gpu_stride=%u next_vtx=%u next_idx=%u\n",
-                   static_cast<unsigned long long>(n),static_cast<unsigned long long>(arena_->gpu_syncs()),arena_->slot(),
-                   static_cast<unsigned>(sizeof(gfx::GpuVertex)),
-                   footprint.vertexCount,footprint.indexCount);
-      ++rolloverLogCount;
+    if(telemetry_||coverage_||trace_){
+      static uint64_t rolloverLogCount=0;
+      const auto n=arena_->recycles();
+      if(rolloverLogCount<8||(n&&(n&(n-1))==0)){
+        std::fprintf(stderr,"[aurora-vita] stream_rollover total=%llu syncs=%llu slot=%u gpu_stride=%u next_vtx=%u next_idx=%u\n",
+                     static_cast<unsigned long long>(n),static_cast<unsigned long long>(arena_->gpu_syncs()),arena_->slot(),
+                     static_cast<unsigned>(gpuStride),footprint.vertexCount,footprint.indexCount);
+        ++rolloverLogCount;
+      }
     }
 #endif
   }
-  auto prepared = gfx::prepare_draw(rawVertices, rawBytes, vertexCount, source, layout,
-                                    pipeline, vertexState, &uniforms, expansion, telemetry_);
+  (void)gfx::prepare_draw_into(preparedScratch_,rawVertices,rawBytes,vertexCount,source,layout,
+                              pipeline,vertexState,&uniforms,expansion,telemetry_);
+  auto& prepared=preparedScratch_;
   if (prepared.ok() && rawIndices && indexCount) {
     prepared.indices.assign(rawIndices, rawIndices + indexCount);
     for (const uint16_t index : prepared.indices) {
@@ -400,13 +429,22 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
 
 #if defined(__vita__)
-  log_large_draw_geometry(prepared,vertexState,pipeline,vertexCount);
+  if(telemetry_||coverage_||trace_)log_large_draw_geometry(prepared,vertexState,pipeline,vertexCount);
 #endif
 
   std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
-  const uint8_t textureMask = sampled_texture_mask(pipeline);
+  const uint8_t textureMask = translatedTextureMask_;
   const auto white = white_texture();
-  { gfx::ScopedTelemetryPhase textureTimer(telemetry_, gfx::TelemetryPhase::TextureResolve);
+  const bool textureResolveInstrumentation=telemetry_||coverage_||trace_;
+  const bool reuseResolvedTextures=!textureResolveInstrumentation&&resolvedTextureBindingsValid_&&
+                                   !aurora::gx::g_gxState.stateDirty&&resolvedTextureMask_==textureMask&&
+                                   resolvedVolatileTextureMask_==0;
+  if(reuseResolvedTextures){
+    bindings=resolvedTextureBindings_;
+    result.fallbackTextureMask=resolvedFallbackTextureMask_;
+    result.warnings|=resolvedTextureWarnings_;
+  }else{ gfx::ScopedTelemetryPhase textureTimer(telemetry_, gfx::TelemetryPhase::TextureResolve);
+  uint8_t volatileTextureMask=0;
   for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
     if ((textureMask & (1u << slot)) == 0) continue;
     const auto translated = translate_texture(slot);
@@ -423,6 +461,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       }
     }
     if (translated.valid) {
+      if(!translated.texture.cacheable)volatileTextureMask|=static_cast<uint8_t>(1u<<slot);
       const auto statsBeforeTexture = renderer_->stats();
       const auto handle = renderer_->create_texture(translated.texture);
       if (telemetry_) {
@@ -444,6 +483,15 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     result.fallbackTextureMask |= static_cast<uint8_t>(1u << slot);
     if (translated.dynamicCopy) result.warnings |= SubmitWarning::DynamicCopyFallback;
     else result.warnings |= SubmitWarning::MissingTextureFallback;
+  }
+  if(!textureResolveInstrumentation){
+    resolvedTextureBindings_=bindings;
+    resolvedTextureMask_=textureMask;
+    resolvedVolatileTextureMask_=volatileTextureMask;
+    resolvedFallbackTextureMask_=result.fallbackTextureMask;
+    resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
+      (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
+    resolvedTextureBindingsValid_=true;
   }}
   if (result.fallbackTextureMask != 0) {
     uint32_t fallbackCount = 0;

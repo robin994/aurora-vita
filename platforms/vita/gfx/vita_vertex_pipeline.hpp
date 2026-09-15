@@ -29,6 +29,8 @@ struct VertexTransformState {
 struct VertexPipelineRequirements {
   bool needNormal = false;
   bool needBumpBasis = false;
+  uint8_t colorMask = 0;
+  uint8_t texgenMask = 0;
 };
 
 VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipeline) noexcept;

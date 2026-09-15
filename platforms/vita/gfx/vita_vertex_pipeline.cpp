@@ -70,12 +70,13 @@ V4 tex_source(const CanonicalVertex&in,TexGenSource s) noexcept {
   return {0,0,1,1};
 }
 
-bool is_bump(TexGenType t) noexcept{return t>=TexGenType::Bump0&&t<=TexGenType::Bump7;}
+bool is_bump(TexGenType t) noexcept{return texgen_type_is_bump(t);}
 unsigned bump_light(TexGenType t) noexcept{return static_cast<unsigned>(t)-static_cast<unsigned>(TexGenType::Bump0);}
 V3 normalize3(V3 v) noexcept{return norm(v);}
 
 bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
-                      const VertexTransformState& state,bool needNormal,bool needBumpBasis) noexcept {
+                      const VertexTransformState& state,bool needNormal,bool needBumpBasis,uint8_t colorMask,
+                      uint8_t texgenMask) noexcept {
   const CanonicalVertex in=v;
   const unsigned pn=in.pnMatrixIndex==0xff?state.currentPnMatrix:in.pnMatrixIndex;
   if(pn>=10)return false;
@@ -91,9 +92,11 @@ bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
   // back when the generated shader will only consume position/colors/texcoords.
   v.position[0]=mvPos.x;v.position[1]=mvPos.y;v.position[2]=mvPos.z;
   for(unsigned base=0;base<2;base++){
+    if((colorMask&(1u<<base))==0)continue;
     const V4 rgb=light_channel(in,pipeline.colorChannels[base],base,state,mvPos,mvNrm);const V4 alpha=light_channel(in,pipeline.colorChannels[base+2],base+2,state,mvPos,mvNrm);uint8_t*out=base?v.color1:v.color0;out[0]=byte(rgb.x);out[1]=byte(rgb.y);out[2]=byte(rgb.z);out[3]=byte(alpha.w);
   }
   for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;i++){
+    if((texgenMask&(1u<<i))==0)continue;
     const auto&t=pipeline.texgens[i];
     if(is_bump(t.type)){
       const unsigned src=std::min<unsigned>(t.embossSource,MaxTextures-1),li=std::min<unsigned>(bump_light(t.type),MaxLights-1);V3 ldir=norm(sub(light_vec3(state.lights[li].position),mvPos));v.texcoord[i][0]=v.texcoord[src][0]+dot(ldir,mvTan);v.texcoord[i][1]=v.texcoord[src][1]+dot(ldir,mvBin);v.texcoord[i][2]=1.f;continue;
@@ -117,12 +120,15 @@ struct TransformContext {
   const VertexTransformState* state = nullptr;
   bool needNormal = false;
   bool needBumpBasis = false;
+  uint8_t colorMask = 0;
+  uint8_t texgenMask = 0;
 };
 
 bool transform_range(void* opaque, size_t begin, size_t end, uint32_t) noexcept {
   auto& ctx = *static_cast<TransformContext*>(opaque);
   for (size_t i = begin; i < end; ++i) {
-    if (!transform_vertex(ctx.vertices[i], *ctx.pipeline, *ctx.state,ctx.needNormal,ctx.needBumpBasis)) return false;
+    if (!transform_vertex(ctx.vertices[i], *ctx.pipeline, *ctx.state,ctx.needNormal,ctx.needBumpBasis,
+                          ctx.colorMask,ctx.texgenMask)) return false;
   }
   return true;
 }
@@ -131,8 +137,13 @@ bool transform_range(void* opaque, size_t begin, size_t end, uint32_t) noexcept 
 
 VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipeline) noexcept {
   VertexPipelineRequirements r{};
-  for(const auto& c:pipeline.colorChannels)r.needNormal=r.needNormal||c.lightingEnabled;
-  for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;++i)r.needBumpBasis=r.needBumpBasis||is_bump(pipeline.texgens[i].type);
+  r.colorMask=pipeline_raster_color_mask(pipeline);
+  for(unsigned base=0;base<2;base++)if(r.colorMask&(1u<<base)){
+    r.needNormal=r.needNormal||pipeline.colorChannels[base].lightingEnabled||pipeline.colorChannels[base+2].lightingEnabled;
+  }
+  const unsigned texgenCount=std::min<unsigned>(pipeline.texgenCount,MaxTextures);
+  r.texgenMask=pipeline_texgen_compute_mask(pipeline);
+  for(unsigned i=0;i<texgenCount;++i)if(r.texgenMask&(1u<<i))r.needBumpBasis=r.needBumpBasis||is_bump(pipeline.texgens[i].type);
   r.needNormal=r.needNormal||r.needBumpBasis;
   return r;
 }
@@ -140,13 +151,15 @@ VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipe
 bool transform_vertex_for_pipeline(CanonicalVertex& vertex,const PipelineDesc& pipeline,
                                    const VertexTransformState& state,
                                    VertexPipelineRequirements requirements) noexcept {
-  return transform_vertex(vertex,pipeline,state,requirements.needNormal,requirements.needBumpBasis);
+  return transform_vertex(vertex,pipeline,state,requirements.needNormal,requirements.needBumpBasis,
+                          requirements.colorMask,requirements.texgenMask);
 }
 
 bool run_vertex_pipeline(std::vector<CanonicalVertex>& vertices,const PipelineDesc& pipeline,const VertexTransformState& state,DrawUniforms* uniforms) noexcept {
   if(uniforms)uniforms->mvp=state.projection;
   const auto requirements=vertex_pipeline_requirements(pipeline);
-  TransformContext ctx{vertices.data(), &pipeline, &state,requirements.needNormal,requirements.needBumpBasis};
+  TransformContext ctx{vertices.data(), &pipeline, &state,requirements.needNormal,requirements.needBumpBasis,
+                       requirements.colorMask,requirements.texgenMask};
   return cpu_parallel_for(vertices.size(), transform_range, &ctx);
 }
 

@@ -70,7 +70,7 @@ bool expand_lines(const std::vector<CanonicalVertex>&src,SourcePrimitive source,
 
 bool same_sampler(const SamplerDesc&a,const SamplerDesc&b) noexcept {
   return a.wrapS==b.wrapS&&a.wrapT==b.wrapT&&a.minFilter==b.minFilter&&a.magFilter==b.magFilter&&
-         a.lodBias==b.lodBias&&a.minLod==b.minLod&&a.maxLod==b.maxLod;
+         a.lodBias==b.lodBias;
 }
 bool same_texture(const TextureBinding&a,const TextureBinding&b) noexcept {
   return a.texture==b.texture&&a.source==b.source&&same_sampler(a.sampler,b.sampler);
@@ -86,7 +86,10 @@ bool batch_compatible(const DrawPacket&a,const DrawPacket&b) noexcept {
   if(a.vertices.buffer!=b.vertices.buffer||a.indices.buffer!=b.indices.buffer)return false;
   if(a.indices.offset+a.indices.size!=b.indices.offset)return false;
   if(!same_viewport(a.viewport,b.viewport)||!same_scissor(a.scissor,b.scissor))return false;
-  if(std::memcmp(&a.uniforms,&b.uniforms,sizeof(DrawUniforms))!=0)return false;
+  // channel/light state is consumed by the CPU vertex pipeline before enqueue and
+  // never reaches the Vita shader. Comparing it here both burns memory bandwidth
+  // and prevents otherwise identical GPU draws from coalescing.
+  if(std::memcmp(&a.uniforms,&b.uniforms,sizeof(GpuDrawUniforms))!=0)return false;
   for(unsigned i=0;i<MaxTextures;i++)if(!same_texture(a.textures[i],b.textures[i]))return false;
   return true;
 }
@@ -117,7 +120,7 @@ bool decode_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) 
   return true;
 }
 }
-DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint32_t explicitIndexCount) noexcept {
+DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint32_t explicitIndexCount,size_t vertexStride) noexcept {
   DrawFootprint f{};
   if(!count)return f;
   uint64_t vertices=count,indices=0;
@@ -132,16 +135,19 @@ DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint
   if(explicitIndexCount)indices=explicitIndexCount;
   if(vertices>std::numeric_limits<uint16_t>::max()||indices>std::numeric_limits<uint32_t>::max())return f;
   f.vertexCount=static_cast<uint32_t>(vertices);f.indexCount=static_cast<uint32_t>(indices);
-  f.vertexBytes=static_cast<size_t>(vertices)*sizeof(GpuVertex);
+  if(vertexStride==0)return f;
+  f.vertexBytes=static_cast<size_t>(vertices)*vertexStride;
   f.indexBytes=static_cast<size_t>(indices)*sizeof(uint16_t);
   f.valid=true;return f;
 }
-PreparedDraw prepare_draw(const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry) noexcept {
-  PreparedDraw out{};
-  if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return out;}
-  if(size_t(count)*layout.streamStride>bytes){out.error=PrepareDrawError::VertexDecodeFailed;return out;}
+bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry) noexcept {
+  out.error=PrepareDrawError::None;out.vertices.clear();out.indices.clear();out.scratch.clear();out.primitive=Primitive::Triangles;out.positionIsClipSpace=false;
+  if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return false;}
+  if(size_t(count)*layout.streamStride>bytes){out.error=PrepareDrawError::VertexDecodeFailed;return false;}
   if(uniforms)uniforms->mvp=state.projection;
-  std::vector<CanonicalVertex> transformed(count);
+  const bool expanded=source==SourcePrimitive::Points||source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip;
+  auto&transformed=expanded?out.scratch:out.vertices;
+  transformed.resize(count);
   FusedVertexContext fused{raw,bytes,&layout,&pipeline,&state,vertex_pipeline_requirements(pipeline),transformed.data()};
   // Decode and GX vertex processing used to dispatch the worker pool twice and
   // walk the 168-byte canonical array twice. Fusing them keeps each vertex hot
@@ -150,20 +156,26 @@ PreparedDraw prepare_draw(const uint8_t*raw,size_t bytes,uint32_t count,SourcePr
     if(!cpu_parallel_for(count,decode_transform_range,&fused)){
       bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;
       out.error=transformFailed?PrepareDrawError::VertexTransformFailed:PrepareDrawError::VertexDecodeFailed;
-      return out;
+      return false;
     }
   }
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
-    if(source==SourcePrimitive::Points){if(!expand_points(transformed,out.vertices,out.indices,state.projection,expansion)){out.error=PrepareDrawError::TooManyVertices;return out;}out.positionIsClipSpace=true;out.primitive=Primitive::Triangles;return out;}
-    if(source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip){if(!expand_lines(transformed,source,out.vertices,out.indices,state.projection,expansion)){out.error=PrepareDrawError::TooManyVertices;return out;}out.positionIsClipSpace=true;out.primitive=Primitive::Triangles;return out;}
-    out.vertices=std::move(transformed);if(!build_indices(out.indices,source,count)){out.error=PrepareDrawError::TooManyVertices;return out;}out.primitive=Primitive::Triangles;
+    if(source==SourcePrimitive::Points){if(!expand_points(transformed,out.vertices,out.indices,state.projection,expansion)){out.error=PrepareDrawError::TooManyVertices;return false;}out.positionIsClipSpace=true;out.primitive=Primitive::Triangles;return true;}
+    if(source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip){if(!expand_lines(transformed,source,out.vertices,out.indices,state.projection,expansion)){out.error=PrepareDrawError::TooManyVertices;return false;}out.positionIsClipSpace=true;out.primitive=Primitive::Triangles;return true;}
+    if(!build_indices(out.indices,source,count)){out.error=PrepareDrawError::TooManyVertices;return false;}out.primitive=Primitive::Triangles;
   }
+  return true;
+}
+PreparedDraw prepare_draw(const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry) noexcept {
+  PreparedDraw out{};
+  (void)prepare_draw_into(out,raw,bytes,count,source,layout,pipeline,state,uniforms,expansion,telemetry);
   return out;
 }
 uint64_t resolve_draw_pipeline(Renderer&renderer,const PreparedDraw&prepared,const PipelineDesc&pipeline,Telemetry*telemetry) noexcept {
   auto desc=pipeline;
   desc.primitive=prepared.primitive;
   desc.positionIsClipSpace=prepared.positionIsClipSpace;
+  desc.layout=gpu_vertex_layout(pipeline_texcoord_mask(desc),pipeline_raster_color_mask(desc));
   ScopedTelemetryPhase phase(telemetry,TelemetryPhase::PipelineResolve);
   return renderer.create_pipeline(desc);
 }
@@ -174,19 +186,25 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
     // Only stream attributes consumed by the generated Vita shader. The CPU-only
     // normal/tangent/matrix fields in CanonicalVertex have already done their job.
+    const VertexLayout gpuLayout=gpu_vertex_layout(pipeline_texcoord_mask(pipeline),pipeline_raster_color_mask(pipeline));
+    if(gpuLayout.count<1||gpuLayout.attributes[0].stride==0)return fail(PrepareDrawError::InvalidInput);
+    const size_t gpuStride=gpuLayout.attributes[0].stride;
     void* vertexDst=nullptr;
-    vb=arena.reserve_vertices(prepared.vertices.size()*sizeof(GpuVertex),alignof(GpuVertex),&vertexDst);if(!vb.buffer||!vertexDst)return fail(PrepareDrawError::StreamingOverflow);
-    auto* gpu=static_cast<GpuVertex*>(vertexDst);
+    vb=arena.reserve_vertices(prepared.vertices.size()*gpuStride,gpuStride,&vertexDst);if(!vb.buffer||!vertexDst)return fail(PrepareDrawError::StreamingOverflow);
+    auto* gpu=static_cast<uint8_t*>(vertexDst);
     for(size_t i=0;i<prepared.vertices.size();++i){
-      const auto&src=prepared.vertices[i];auto&dst=gpu[i];
-      std::memcpy(dst.position,src.position,sizeof(dst.position));
-      std::memcpy(dst.color0,src.color0,sizeof(dst.color0));
-      std::memcpy(dst.color1,src.color1,sizeof(dst.color1));
-      std::memcpy(dst.texcoord,src.texcoord,sizeof(dst.texcoord));
+      const auto&src=prepared.vertices[i];uint8_t*dst=gpu+i*gpuStride;
+      for(unsigned ai=0;ai<gpuLayout.count;ai++){
+        const auto&a=gpuLayout.attributes[ai];
+        if(a.location==0)std::memcpy(dst+a.offset,src.position,sizeof(src.position));
+        else if(a.location==1)std::memcpy(dst+a.offset,src.color0,sizeof(src.color0));
+        else if(a.location==2)std::memcpy(dst+a.offset,src.color1,sizeof(src.color1));
+        else if(a.location>=3&&a.location<3+MaxTextures)std::memcpy(dst+a.offset,src.texcoord[a.location-3],sizeof(src.texcoord[0]));
+      }
     }
     if(!prepared.indices.empty()){
-      if(vb.offset%sizeof(GpuVertex)!=0)return fail(PrepareDrawError::StreamingOverflow);
-      const uint32_t base=vb.offset/sizeof(GpuVertex);
+      if(vb.offset%gpuStride!=0)return fail(PrepareDrawError::StreamingOverflow);
+      const uint32_t base=vb.offset/static_cast<uint32_t>(gpuStride);
       if(base>std::numeric_limits<uint16_t>::max())return fail(PrepareDrawError::TooManyVertices);
       for(const uint16_t idx:prepared.indices)if(base+idx>std::numeric_limits<uint16_t>::max())return fail(PrepareDrawError::TooManyVertices);
       ib=arena.upload_rebased_indices(prepared.indices.data(),prepared.indices.size(),base);if(!ib.buffer)return fail(PrepareDrawError::StreamingOverflow);

@@ -20,11 +20,11 @@ class CommandStream {
 public:
   void reset() noexcept { commands_.clear(); }
   void reserve(size_t n){commands_.reserve(n);}
-  void clear(const ClearCommand& c){Command x{};x.type=CommandType::Clear;x.clear=c;commands_.push_back(x);}
-  void draw(const DrawPacket& d){Command x{};x.type=CommandType::Draw;x.draw=d;commands_.push_back(x);}
-  void set_render_target(Handle h){Command x{};x.type=CommandType::SetRenderTarget;x.target.target=h;commands_.push_back(x);}
-  void copy_efb(const CopyEfbCommand& c){Command x{};x.type=CommandType::CopyEfb;x.copy=c;commands_.push_back(x);}
-  void barrier(){Command x{};x.type=CommandType::Barrier;commands_.push_back(x);}
+  void clear(const ClearCommand& c){commands_.emplace_back();auto&x=commands_.back();x.type=CommandType::Clear;x.clear=c;}
+  void draw(const DrawPacket& d){commands_.emplace_back();auto&x=commands_.back();x.type=CommandType::Draw;x.draw=d;}
+  void set_render_target(Handle h){commands_.emplace_back();auto&x=commands_.back();x.type=CommandType::SetRenderTarget;x.target.target=h;}
+  void copy_efb(const CopyEfbCommand& c){commands_.emplace_back();auto&x=commands_.back();x.type=CommandType::CopyEfb;x.copy=c;}
+  void barrier(){commands_.emplace_back();commands_.back().type=CommandType::Barrier;}
   DrawPacket* tail_draw() noexcept {
     return !commands_.empty()&&commands_.back().type==CommandType::Draw?&commands_.back().draw:nullptr;
   }

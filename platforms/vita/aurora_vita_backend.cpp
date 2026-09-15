@@ -26,6 +26,7 @@ namespace aurora::vita {
 namespace {
 BackendConfig g_config{};
 bool g_initialized=false;
+bool g_diagnosticsEnabled=false;
 uint64_t g_frame=0,g_start=0,g_last=0;
 std::unique_ptr<gfx::Renderer> g_renderer;
 std::unique_ptr<gxbridge::DrawSink> g_drawSink;
@@ -69,7 +70,7 @@ void ensure_parent_dir(const char*) noexcept {}
 #endif
 
 void emit_periodic_diagnostics() noexcept {
-  if (!g_config.diagnostics || !g_drawSink) return;
+  if (!g_diagnosticsEnabled || !g_drawSink) return;
   const uint32_t period = g_config.diagnostics_period_frames;
   if (period == 0 || (g_frame % period) != 0) return;
   const auto frameLine = g_telemetry.format_frame();
@@ -87,6 +88,7 @@ void emit_periodic_diagnostics() noexcept {
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
+  g_diagnosticsEnabled=c.diagnostics||c.strict_unsupported||c.telemetry_log_path||c.coverage_log_path||c.trace_log_path;
   g_initFailure=InitFailure::None;
   g_initFailureDetail[0]='\0';
 #if defined(__vita__)
@@ -184,7 +186,7 @@ bool initialize(const BackendConfig& c) noexcept {
   g_telemetry.reset(); g_coverage.reset(); g_trace=std::make_unique<integration::FrameTrace>(c.trace_capacity);
   gxbridge::DrawSinkConfig dc{};
   dc.streaming.vertexBytes=c.stream_vertex_bytes; dc.streaming.indexBytes=c.stream_index_bytes; dc.streaming.slots=c.stream_slots;
-  dc.telemetry=c.diagnostics ? &g_telemetry : nullptr; dc.coverage=c.diagnostics ? &g_coverage : nullptr; dc.trace=c.diagnostics ? g_trace.get() : nullptr; dc.strictUnsupported=c.strict_unsupported;
+  dc.telemetry=g_diagnosticsEnabled ? &g_telemetry : nullptr; dc.coverage=g_diagnosticsEnabled ? &g_coverage : nullptr; dc.trace=g_diagnosticsEnabled ? g_trace.get() : nullptr; dc.strictUnsupported=c.strict_unsupported;
   g_drawSink=std::make_unique<gxbridge::DrawSink>();
   if(!g_drawSink->initialize(*g_renderer,dc)){
     g_initFailure=InitFailure::DrawSinkInitFailed;
@@ -207,7 +209,7 @@ bool begin_frame() noexcept {
   if(!g_initialized) return false;
   g_discardPresent=false;
   g_start=now_us();
-  if (g_config.diagnostics) g_telemetry.begin_frame(g_frame);
+  if (g_diagnosticsEnabled) g_telemetry.begin_frame(g_frame);
   g_renderer->begin_frame();
   if (g_pendingDisplayClear.pending) {
     g_renderer->clear_current(g_pendingDisplayClear.color,g_pendingDisplayClear.depth,
@@ -247,7 +249,7 @@ void end_frame() noexcept {
 #endif
   const uint64_t end = now_us();
   g_last=end-g_start;
-  if (g_config.diagnostics) {
+  if (g_diagnosticsEnabled) {
     g_telemetry.add_time(gfx::TelemetryPhase::Present,end-presentStart);
     g_telemetry.end_frame(g_last);
   }
@@ -257,12 +259,13 @@ void end_frame() noexcept {
 
 void shutdown() noexcept {
   if(!g_initialized) return;
-  if (g_config.diagnostics && g_config.coverage_log_path) g_coverage.write_report(g_config.coverage_log_path);
-  if (g_config.diagnostics && g_config.trace_log_path && g_trace) g_trace->write_report(g_config.trace_log_path, 2048);
+  if (g_diagnosticsEnabled && g_config.coverage_log_path) g_coverage.write_report(g_config.coverage_log_path);
+  if (g_diagnosticsEnabled && g_config.trace_log_path && g_trace) g_trace->write_report(g_config.trace_log_path, 2048);
   if(g_drawSink){g_drawSink->shutdown();g_drawSink.reset();}
   gfx::shutdown_cpu_workers();
   if(g_renderer){g_renderer->shutdown();g_renderer.reset();}
   g_trace.reset();
+  g_diagnosticsEnabled=false;
   g_initialized=false;
 }
 
@@ -276,6 +279,11 @@ gfx::Telemetry& telemetry() noexcept{return g_telemetry;}
 integration::FeatureCoverage& feature_coverage() noexcept{return g_coverage;}
 integration::FrameTrace& frame_trace() noexcept{return *g_trace;}
 gfx::MemoryBudgetSnapshot memory_budget() noexcept{return g_drawSink ? g_drawSink->memory_budget() : gfx::MemoryBudgetSnapshot{};}
-size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept{return g_renderer ? g_renderer->invalidate_texture_source_range(start,bytes) : 0;}
+size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept{
+  if(!g_renderer)return 0;
+  const size_t invalidated=g_renderer->invalidate_texture_source_range(start,bytes);
+  if(invalidated&&g_drawSink)g_drawSink->invalidate_texture_resolve_cache();
+  return invalidated;
+}
 
 } // namespace aurora::vita

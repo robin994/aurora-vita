@@ -257,30 +257,39 @@ std::string raster_base(RasterSource source) {
 ShaderSources build_tev_glsl(const PipelineDesc& desc) noexcept {
   ShaderSources out;
   out.key = pipeline_key(desc);
+  const uint8_t texcoordMask=pipeline_texcoord_mask(desc);
+  const uint8_t rasterColorMask=pipeline_raster_color_mask(desc);
+  const uint8_t sampledTextureMask=pipeline_sampled_texture_mask(desc);
 
   std::ostringstream vs;
-  vs << "precision highp float;\n"
-        "attribute vec4 a_position;\nattribute vec4 a_color0;\nattribute vec4 a_color1;\n";
-  for (unsigned i = 0; i < MaxTextures; i++) vs << "attribute vec3 a_tex" << i << ";\nvarying vec3 v_tex" << i << ";\n";
-  vs << "varying vec4 v_color0;\nvarying vec4 v_color1;\nuniform mat4 u_mvp;\n"
-        "void main(){ gl_Position=" << (desc.positionIsClipSpace ? "a_position" : "u_mvp*a_position") << ";";
+  vs << "precision highp float;\nattribute vec4 a_position;\n";
+  if(rasterColorMask&1u)vs << "attribute vec4 a_color0;\nvarying vec4 v_color0;\n";
+  if(rasterColorMask&2u)vs << "attribute vec4 a_color1;\nvarying vec4 v_color1;\n";
+  for (unsigned i = 0; i < MaxTextures; i++) if(texcoordMask&(1u<<i))vs << "attribute vec3 a_tex" << i << ";\nvarying vec3 v_tex" << i << ";\n";
+  vs << "uniform mat4 u_mvp;\nvoid main(){ gl_Position=" << (desc.positionIsClipSpace ? "a_position" : "u_mvp*a_position") << ";";
   // Aurora's GX shader first maps the guest clip Z into WebGPU's [0,w]
   // convention. vitaGL/OpenGL instead consumes [-w,w], so reproduce the
   // Aurora transform and then remap [0,w] -> [-w,w]. This keeps the final
   // window-space depth identical to the reference WebGPU backend.
   if (desc.reversedZ) vs << "gl_Position.z=-gl_Position.z;";
   else vs << "gl_Position.z+=gl_Position.w;";
-  vs << "gl_Position.z=2.0*gl_Position.z-gl_Position.w;"
-        "v_color0=a_color0; v_color1=a_color1;";
-  for (unsigned i = 0; i < MaxTextures; i++) vs << "v_tex" << i << "=a_tex" << i << ";";
+  vs << "gl_Position.z=2.0*gl_Position.z-gl_Position.w;";
+  if(rasterColorMask&1u)vs << "v_color0=a_color0;";
+  if(rasterColorMask&2u)vs << "v_color1=a_color1;";
+  for (unsigned i = 0; i < MaxTextures; i++) if(texcoordMask&(1u<<i))vs << "v_tex" << i << "=a_tex" << i << ";";
   vs << "}\n";
   out.vertex = vs.str();
 
   std::ostringstream fs;
   fs << "precision highp float;\n";
-  for (unsigned i = 0; i < MaxTextures; i++) fs << "uniform sampler2D u_tex" << i << "; varying vec3 v_tex" << i << ";\n";
-  fs << "varying vec4 v_color0; varying vec4 v_color1;\n"
-        "uniform vec4 u_kcolor[4]; uniform vec4 u_tevreg[4];\n"
+  for (unsigned i = 0; i < MaxTextures; i++) {
+    if(sampledTextureMask&(1u<<i))fs << "uniform sampler2D u_tex" << i << ";";
+    if(texcoordMask&(1u<<i))fs << " varying vec3 v_tex" << i << ";";
+    fs << "\n";
+  }
+  if(rasterColorMask&1u)fs << "varying vec4 v_color0;\n";
+  if(rasterColorMask&2u)fs << "varying vec4 v_color1;\n";
+  fs << "uniform vec4 u_kcolor[4]; uniform vec4 u_tevreg[4];\n"
         "uniform vec4 u_fog_color; uniform vec4 u_fog_params;\n"
         "uniform float u_fog_range_k[10]; uniform float u_render_viewport_width;\n"
         "float fog_range_k(float i){if(i<0.5)return u_fog_range_k[0];if(i<1.5)return u_fog_range_k[1];if(i<2.5)return u_fog_range_k[2];if(i<3.5)return u_fog_range_k[3];if(i<4.5)return u_fog_range_k[4];if(i<5.5)return u_fog_range_k[5];if(i<6.5)return u_fog_range_k[6];if(i<7.5)return u_fog_range_k[7];if(i<8.5)return u_fog_range_k[8];return u_fog_range_k[9];}\n"
@@ -352,12 +361,13 @@ ShaderSources build_tev_glsl(const PipelineDesc& desc) noexcept {
     }
 
     fs << "  vec4 raw_tex=";
-    if (s.texture < MaxTextures) fs << "texture2D(u_tex" << unsigned(s.texture) << ",tev_uv)";
+    if (tev_stage_uses_texture(s) && s.texture < MaxTextures) fs << "texture2D(u_tex" << unsigned(s.texture) << ",tev_uv)";
     else fs << "vec4(1.0)";
     const auto& ts = desc.tev.swapTable[std::min<unsigned>(s.texSwap, 3)];
     const auto& rs = desc.tev.swapTable[std::min<unsigned>(s.rasSwap, 3)];
     fs << "; vec4 texc=" << swapped("raw_tex", ts) << ";\n";
-    fs << "  vec4 raw_ras=" << raster_base(s.rasterSource) << "; vec4 rasc=" << swapped("raw_ras", rs) << ";\n";
+    if(tev_stage_uses_raster(s))fs << "  vec4 raw_ras=" << raster_base(s.rasterSource) << "; vec4 rasc=" << swapped("raw_ras", rs) << ";\n";
+    else fs << "  vec4 rasc=vec4(0.0);\n";
     fs << "  vec3 c=" << color_calc(s,colorNormalized,alphaNormalized) << "; float a=" << alpha_calc(s,alphaNormalized) << ";\n"
           "  " << color_reg(s.colorOut) << ".rgb=c; " << color_reg(s.alphaOut) << ".a=a;\n }\n";
     colorNormalized[static_cast<unsigned>(s.colorOut)]=s.colorClamp;

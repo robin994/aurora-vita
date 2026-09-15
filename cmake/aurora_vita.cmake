@@ -6,6 +6,7 @@ option(AURORA_VITA_WITH_GX_FRONTEND "Build the Dawn-free Dolphin GX/VI frontend 
 option(AURORA_VITA_DIRECT_STREAM_WRITE "Write frame streaming data directly into mapped Vita GL buffers" OFF)
 option(AURORA_VITA_RUNTIME_MIPMAP_GENERATION "Generate missing texture mip chains at runtime on Vita" OFF)
 option(AURORA_VITA_NATIVE_CMPR "Upload GameCube CMPR through vitaGL's native DXT1 path" ON)
+option(AURORA_VITA_NATIVE_GX_TEXTURES "Upload exact GX I/I+A/RGB565 formats through native vitaGL texture formats" ON)
 option(AURORA_VITA_BUILD_SDL3_PROBE "Build SDL3 native-platform + vitaGL coexistence probe" OFF)
 
 set(AURORA_VITA_BACKEND_SOURCES
@@ -79,6 +80,8 @@ add_library(aurora::vita_backend ALIAS aurora_vita_backend)
 set_target_properties(aurora_vita_backend PROPERTIES FOLDER "aurora")
 target_compile_features(aurora_vita_backend PUBLIC cxx_std_20)
 target_include_directories(aurora_vita_backend PUBLIC
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/lib
     ${PROJECT_SOURCE_DIR}/platforms/vita
     ${PROJECT_SOURCE_DIR}/platforms/vita/gfx
     ${PROJECT_SOURCE_DIR}/platforms/vita/integration
@@ -111,6 +114,9 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
     endif ()
     if (AURORA_VITA_NATIVE_CMPR)
         target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_NATIVE_CMPR=1)
+    endif ()
+    if (AURORA_VITA_NATIVE_GX_TEXTURES)
+        target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_NATIVE_GX_TEXTURES=1)
     endif ()
     target_compile_options(aurora_vita_backend PRIVATE
         -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -fshort-wchar

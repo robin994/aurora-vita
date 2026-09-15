@@ -14,8 +14,21 @@ struct CompiledPipeline {
   unsigned program=0;
   int uMvp=-1,uKColor=-1,uTevReg=-1,uFogColor=-1,uFogParams=-1,uFogRangeK=-1,uRenderViewportWidth=-1,uIndMtx=-1,uTexcoordScale=-1,uTextureSizeBias=-1;
   std::array<int,MaxTextures> uTex{};
-  mutable DrawUniforms cachedUniforms{};
+  mutable GpuDrawUniforms cachedUniforms{};
   mutable uint16_t uniformValidMask=0;
+};
+
+// Only the subset that maps to vitaGL fixed-function state. Keeping this small
+// avoids copying the 840-byte PipelineDesc every time a TEV program changes.
+struct FixedStateSnapshot {
+  Compare depthFunc=Compare::Always;
+  CullMode cull=CullMode::None;
+  BlendMode blendMode=BlendMode::None;
+  BlendFactor srcFactor=BlendFactor::One,dstFactor=BlendFactor::Zero;
+  LogicOp logicOp=LogicOp::Copy;
+  int16_t dstAlpha=-1;
+  bool depthTest=false,depthWrite=false,colorWrite=true,alphaWrite=true,polygonOffset=false;
+  float polygonOffsetFactor=0.f,polygonOffsetUnits=0.f;
 };
 
 class PipelineCache {
@@ -24,9 +37,9 @@ public:
   ~PipelineCache();
   const CompiledPipeline* get_or_create(const PipelineDesc& desc,FrameStats* stats=nullptr) noexcept;
   const CompiledPipeline* find(uint64_t key) noexcept;
-  void bind(const CompiledPipeline& p,const DrawUniforms& u,FrameStats* stats=nullptr) noexcept;
+  void bind(const CompiledPipeline& p,const GpuDrawUniforms& u,FrameStats* stats=nullptr) noexcept;
   void clear() noexcept;
-  void invalidate_bound() noexcept{bound_=0;}
+  void invalidate_bound() noexcept{bound_=0;boundPipeline_=nullptr;fixedStateValid_=false;}
   void set_max_entries(size_t maxEntries) noexcept;
   void pin(uint64_t key) noexcept { if(key) pinned_.insert(key); }
   void clear_pins() noexcept { pinned_.clear(); }
@@ -42,7 +55,14 @@ private:
   void destroy_pipeline(CompiledPipeline& pipeline) noexcept;
   std::unordered_map<uint64_t,CompiledPipeline> map_;
   std::unordered_set<uint64_t> pinned_{};
+  // Shader failures are deterministic for a pipeline description. Retrying the
+  // same broken TEV program every draw causes severe stalls and repeated compiler
+  // pressure on Vita, so suppress it until the cache is explicitly cleared.
+  std::unordered_set<uint64_t> failedKeys_{};
   uint64_t bound_=0;
+  CompiledPipeline* boundPipeline_=nullptr;
+  FixedStateSnapshot fixedState_{};
+  bool fixedStateValid_=false;
   uint64_t useSequence_=0;
   size_t maxEntries_=512;
   size_t highWaterEntries_=0;

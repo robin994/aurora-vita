@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -214,6 +215,97 @@ struct PipelineDesc {
   TevProgramDesc tev{};
 };
 
+inline constexpr bool tev_color_arg_uses_texture(TevColorArg a) noexcept {
+  return a==TevColorArg::TexColor||a==TevColorArg::TexAlpha;
+}
+
+inline constexpr bool tev_alpha_arg_uses_texture(TevAlphaArg a) noexcept {
+  return a==TevAlphaArg::TexAlpha;
+}
+
+inline constexpr bool tev_stage_uses_texture(const TevStage& s) noexcept {
+  return tev_color_arg_uses_texture(s.color.a)||tev_color_arg_uses_texture(s.color.b)||
+         tev_color_arg_uses_texture(s.color.c)||tev_color_arg_uses_texture(s.color.d)||
+         tev_alpha_arg_uses_texture(s.alpha.a)||tev_alpha_arg_uses_texture(s.alpha.b)||
+         tev_alpha_arg_uses_texture(s.alpha.c)||tev_alpha_arg_uses_texture(s.alpha.d);
+}
+
+inline uint8_t pipeline_sampled_texture_mask(const PipelineDesc& d) noexcept {
+  uint8_t mask=0;
+  const unsigned stages=std::min<unsigned>(d.tev.stageCount,MaxTevStages);
+  for(unsigned i=0;i<stages;i++){
+    const auto&s=d.tev.stages[i];
+    if(tev_stage_uses_texture(s)&&s.texture<MaxTextures)
+      mask|=static_cast<uint8_t>(1u<<s.texture);
+    if(s.indirectEnabled&&s.indirectStage<d.tev.indirectStageCount&&s.indirectStage<MaxIndStages){
+      const auto&ind=d.tev.indirectStages[s.indirectStage];
+      if(ind.texture<MaxTextures)mask|=static_cast<uint8_t>(1u<<ind.texture);
+    }
+  }
+  return mask;
+}
+
+inline uint8_t pipeline_texcoord_mask(const PipelineDesc& d) noexcept {
+  uint8_t mask=0;
+  const unsigned stages=std::min<unsigned>(d.tev.stageCount,MaxTevStages);
+  for(unsigned i=0;i<stages;i++){
+    const auto&s=d.tev.stages[i];
+    // The stage coordinate affects the result only when sampling a direct texture
+    // or when indirect TEV consumes/propagates the base coordinate.
+    const bool directSample=tev_stage_uses_texture(s)&&s.texture<MaxTextures;
+    if((directSample||s.indirectEnabled)&&s.texCoord<MaxTextures)
+      mask|=static_cast<uint8_t>(1u<<s.texCoord);
+    if(s.indirectEnabled&&s.indirectStage<d.tev.indirectStageCount&&s.indirectStage<MaxIndStages){
+      const auto&ind=d.tev.indirectStages[s.indirectStage];
+      if(ind.texCoord<MaxTextures)mask|=static_cast<uint8_t>(1u<<ind.texCoord);
+    }
+  }
+  return mask;
+}
+
+inline constexpr bool texgen_type_is_bump(TexGenType t) noexcept {
+  return t>=TexGenType::Bump0&&t<=TexGenType::Bump7;
+}
+
+inline uint8_t pipeline_texgen_compute_mask(const PipelineDesc& d) noexcept {
+  const unsigned count=std::min<unsigned>(d.texgenCount,MaxTextures);
+  uint8_t mask=pipeline_texcoord_mask(d);
+  if(count<MaxTextures)mask&=static_cast<uint8_t>((1u<<count)-1u);
+  bool changed=true;
+  while(changed){
+    changed=false;
+    for(unsigned i=0;i<count;i++)if(mask&(1u<<i)){
+      const auto&t=d.texgens[i];
+      if(texgen_type_is_bump(t.type)&&t.embossSource<count){
+        const uint8_t bit=static_cast<uint8_t>(1u<<t.embossSource);
+        if((mask&bit)==0){mask|=bit;changed=true;}
+      }
+    }
+  }
+  return mask;
+}
+
+inline bool tev_stage_uses_raster(const TevStage& s) noexcept {
+  const auto colorUses=[](TevColorArg a) noexcept {
+    return a==TevColorArg::RasColor||a==TevColorArg::RasAlpha;
+  };
+  const auto alphaUses=[](TevAlphaArg a) noexcept { return a==TevAlphaArg::RasAlpha; };
+  return colorUses(s.color.a)||colorUses(s.color.b)||colorUses(s.color.c)||colorUses(s.color.d)||
+         alphaUses(s.alpha.a)||alphaUses(s.alpha.b)||alphaUses(s.alpha.c)||alphaUses(s.alpha.d);
+}
+
+inline uint8_t pipeline_raster_color_mask(const PipelineDesc& d) noexcept {
+  uint8_t mask=0;
+  const unsigned stages=std::min<unsigned>(d.tev.stageCount,MaxTevStages);
+  for(unsigned i=0;i<stages;i++){
+    const auto&s=d.tev.stages[i];
+    if(!tev_stage_uses_raster(s))continue;
+    if(s.rasterSource==RasterSource::Color0)mask|=1u;
+    else if(s.rasterSource==RasterSource::Color1)mask|=2u;
+  }
+  return mask;
+}
+
 struct TextureDesc {
   uint32_t width = 0;
   uint32_t height = 0;
@@ -314,6 +406,29 @@ struct DrawUniforms {
   std::array<std::array<float,MaxLights>,4> lightEnabled{};
   std::array<LightUniform,MaxLights> lights{};
 };
+// Compact GPU-facing subset of DrawUniforms. Lighting/material state above is
+// consumed while the CPU transforms GX vertices and never reaches vitaGL. Keeping
+// it out of every queued DrawPacket saves almost 0.9 KiB per draw on Vita.
+struct GpuDrawUniforms {
+  std::array<float, 16> mvp{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+  std::array<std::array<float,4>,4> kcolor{{{{1,1,1,1}},{{1,1,1,1}},{{1,1,1,1}},{{1,1,1,1}}}};
+  std::array<std::array<float,4>,4> tevreg{{{{1,1,1,1}},{{0,0,0,0}},{{0,0,0,0}},{{0,0,0,0}}}};
+  std::array<float,4> fogColor{{0,0,0,0}};
+  std::array<float,4> fogParams{{0,0.5f,0,0}};
+  std::array<float,10> fogRangeK{};
+  float renderViewportWidth = 960.f;
+  std::array<std::array<float,4>, MaxIndMatrices * 2> indirectMatrices{};
+  std::array<std::array<float,4>, MaxTextures> texcoordScale{};
+  std::array<std::array<float,4>, MaxTextures> textureSizeBias{};
+
+  GpuDrawUniforms() = default;
+  GpuDrawUniforms(const DrawUniforms& src) noexcept { *this = src; }
+  GpuDrawUniforms& operator=(const DrawUniforms& src) noexcept {
+    std::memcpy(this, &src, sizeof(*this));
+    return *this;
+  }
+};
+static_assert(sizeof(GpuDrawUniforms) == offsetof(DrawUniforms, channelAmbient));
 struct DrawPacket {
   uint64_t pipelineKey = 0;
   BufferSlice vertices{};
@@ -327,7 +442,7 @@ struct DrawPacket {
   // concatenate index ranges into one physical draw without moving vertices.
   bool absoluteVertexIndices = false;
   std::array<TextureBinding, MaxTextures> textures{};
-  DrawUniforms uniforms{};
+  GpuDrawUniforms uniforms{};
   Viewport viewport{};
   Scissor scissor{};
 };

@@ -78,6 +78,53 @@ size_t dxt1_texture_size(uint32_t w,uint32_t h) noexcept {
   return blocks(w,4)*blocks(h,4)*8u;
 }
 
+uint8_t native_texture_bytes_per_pixel(TextureFormat f) noexcept {
+  switch(f){
+  case TextureFormat::I4:
+  case TextureFormat::I8:return 1;
+  case TextureFormat::IA4:
+  case TextureFormat::IA8:
+  case TextureFormat::RGB565:return 2;
+  default:return 0;
+  }
+}
+
+bool transcode_texture_native(const TextureDesc&d,NativeTextureFormat&format,std::vector<uint8_t>&out) noexcept {
+  format=NativeTextureFormat::None;out.clear();
+  if(!d.data||!d.width||!d.height)return false;
+  const uint8_t bpp=native_texture_bytes_per_pixel(d.format);if(!bpp)return false;
+  const size_t need=encoded_texture_size(d.width,d.height,d.format);
+  if(d.dataSize&&d.dataSize<need)return false;
+  out.assign(static_cast<size_t>(d.width)*d.height*bpp,0);
+  const auto*s=static_cast<const uint8_t*>(d.data);size_t off=0;
+  auto put8=[&](uint32_t x,uint32_t y,uint8_t v) noexcept {if(x<d.width&&y<d.height)out[static_cast<size_t>(y)*d.width+x]=v;};
+  auto put16=[&](uint32_t x,uint32_t y,uint8_t lo,uint8_t hi) noexcept {if(x<d.width&&y<d.height){const size_t p=(static_cast<size_t>(y)*d.width+x)*2u;out[p]=lo;out[p+1]=hi;}};
+  switch(d.format){
+  case TextureFormat::I4:
+    format=NativeTextureFormat::Intensity8;
+    for(uint32_t by=0;by<d.height;by+=8)for(uint32_t bx=0;bx<d.width;bx+=8){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){const uint8_t v=tile[p++];put8(bx+x,by+y,expand4(v>>4));put8(bx+x+1,by+y,expand4(v&15));}off+=32;}
+    return true;
+  case TextureFormat::I8:
+    format=NativeTextureFormat::Intensity8;
+    for(uint32_t by=0;by<d.height;by+=4)for(uint32_t bx=0;bx<d.width;bx+=8){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++)put8(bx+x,by+y,tile[p++]);off+=32;}
+    return true;
+  case TextureFormat::IA4:
+    format=NativeTextureFormat::LuminanceAlpha8;
+    for(uint32_t by=0;by<d.height;by+=4)for(uint32_t bx=0;bx<d.width;bx+=8){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){const uint8_t v=tile[p++];put16(bx+x,by+y,expand4(v&15),expand4(v>>4));}off+=32;}
+    return true;
+  case TextureFormat::IA8:
+    format=NativeTextureFormat::LuminanceAlpha8;
+    for(uint32_t by=0;by<d.height;by+=4)for(uint32_t bx=0;bx<d.width;bx+=4){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){const uint8_t a=tile[p++],i=tile[p++];put16(bx+x,by+y,i,a);}off+=32;}
+    return true;
+  case TextureFormat::RGB565:
+    format=NativeTextureFormat::Rgb565;
+    for(uint32_t by=0;by<d.height;by+=4)for(uint32_t bx=0;bx<d.width;bx+=4){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){const uint8_t hi=tile[p++],lo=tile[p++];put16(bx+x,by+y,lo,hi);}off+=32;}
+    return true;
+  default:break;
+  }
+  format=NativeTextureFormat::None;out.clear();return false;
+}
+
 bool transcode_cmpr_to_dxt1(const TextureDesc& d,std::vector<uint8_t>& out) noexcept {
   out.clear();
   if(d.format!=TextureFormat::CMPR||!d.data||!d.width||!d.height)return false;
@@ -110,31 +157,37 @@ bool transcode_cmpr_to_dxt1(const TextureDesc& d,std::vector<uint8_t>& out) noex
   return true;
 }
 
-DecodeResult decode_texture_rgba8(const TextureDesc& d) noexcept {
-  DecodeResult r; r.width=d.width; r.height=d.height;
-  if(!d.data || !d.width || !d.height) return r;
+bool decode_texture_rgba8(const TextureDesc& d,std::vector<uint8_t>& out) noexcept {
+  out.clear();
+  if(!d.data || !d.width || !d.height) return false;
   const size_t need=encoded_texture_size(d.width,d.height,d.format);
-  if(d.dataSize && d.dataSize<need) return r;
-  r.rgba.assign(static_cast<size_t>(d.width)*d.height*4,0);
+  if(d.dataSize && d.dataSize<need) return false;
+  out.assign(static_cast<size_t>(d.width)*d.height*4,0);
   const auto* s=static_cast<const uint8_t*>(d.data); size_t off=0;
-  if(d.format==TextureFormat::RGBA8888){ std::copy_n(s,need,r.rgba.data()); r.ok=true; return r; }
+  if(d.format==TextureFormat::RGBA8888){ std::copy_n(s,need,out.data()); return true; }
   auto tile=[&](uint32_t bw,uint32_t bh,auto fn){
     for(uint32_t by=0;by<d.height;by+=bh) for(uint32_t bx=0;bx<d.width;bx+=bw) fn(bx,by);
   };
   switch(d.format){
-  case TextureFormat::I4: tile(8,8,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){uint8_t v=s[off++];uint8_t a=expand4(v>>4),b=expand4(v&15);put(r.rgba,d.width,d.height,bx+x,by+y,{a,a,a,a});put(r.rgba,d.width,d.height,bx+x+1,by+y,{b,b,b,b});}});break;
-  case TextureFormat::I8: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){uint8_t v=s[off++];put(r.rgba,d.width,d.height,bx+x,by+y,{v,v,v,v});}});break;
-  case TextureFormat::IA4: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){uint8_t v=s[off++],a=expand4(v>>4),i=expand4(v&15);put(r.rgba,d.width,d.height,bx+x,by+y,{i,i,i,a});}});break;
-  case TextureFormat::IA8: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){uint8_t a=s[off++],i=s[off++];put(r.rgba,d.width,d.height,bx+x,by+y,{i,i,i,a});}});break;
-  case TextureFormat::RGB565: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){put(r.rgba,d.width,d.height,bx+x,by+y,decode_rgb565(be16(s+off)));off+=2;}});break;
-  case TextureFormat::RGB5A3: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){put(r.rgba,d.width,d.height,bx+x,by+y,decode_rgb5a3(be16(s+off)));off+=2;}});break;
-  case TextureFormat::RGBA8: tile(4,4,[&](uint32_t bx,uint32_t by){size_t base=off; for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){size_t i=y*4+x; RGBA c{s[base+i*2+1],s[base+32+i*2],s[base+32+i*2+1],s[base+i*2]};put(r.rgba,d.width,d.height,bx+x,by+y,c);}off+=64;});break;
-  case TextureFormat::C4: tile(8,8,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){uint8_t v=s[off++];put(r.rgba,d.width,d.height,bx+x,by+y,palette_color(d,v>>4));put(r.rgba,d.width,d.height,bx+x+1,by+y,palette_color(d,v&15));}});break;
-  case TextureFormat::C8: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++)put(r.rgba,d.width,d.height,bx+x,by+y,palette_color(d,s[off++]));});break;
-  case TextureFormat::C14X2: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){uint16_t v=be16(s+off)&0x3fff;off+=2;put(r.rgba,d.width,d.height,bx+x,by+y,palette_color(d,v));}});break;
-  case TextureFormat::CMPR: tile(8,8,[&](uint32_t bx,uint32_t by){cmpr_block(s+off,r.rgba,d.width,d.height,bx,by);cmpr_block(s+off+8,r.rgba,d.width,d.height,bx+4,by);cmpr_block(s+off+16,r.rgba,d.width,d.height,bx,by+4);cmpr_block(s+off+24,r.rgba,d.width,d.height,bx+4,by+4);off+=32;});break;
+  case TextureFormat::I4: tile(8,8,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){uint8_t v=s[off++];uint8_t a=expand4(v>>4),b=expand4(v&15);put(out,d.width,d.height,bx+x,by+y,{a,a,a,a});put(out,d.width,d.height,bx+x+1,by+y,{b,b,b,b});}});break;
+  case TextureFormat::I8: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){uint8_t v=s[off++];put(out,d.width,d.height,bx+x,by+y,{v,v,v,v});}});break;
+  case TextureFormat::IA4: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){uint8_t v=s[off++],a=expand4(v>>4),i=expand4(v&15);put(out,d.width,d.height,bx+x,by+y,{i,i,i,a});}});break;
+  case TextureFormat::IA8: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){uint8_t a=s[off++],i=s[off++];put(out,d.width,d.height,bx+x,by+y,{i,i,i,a});}});break;
+  case TextureFormat::RGB565: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){put(out,d.width,d.height,bx+x,by+y,decode_rgb565(be16(s+off)));off+=2;}});break;
+  case TextureFormat::RGB5A3: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){put(out,d.width,d.height,bx+x,by+y,decode_rgb5a3(be16(s+off)));off+=2;}});break;
+  case TextureFormat::RGBA8: tile(4,4,[&](uint32_t bx,uint32_t by){size_t base=off; for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){size_t i=y*4+x; RGBA c{s[base+i*2+1],s[base+32+i*2],s[base+32+i*2+1],s[base+i*2]};put(out,d.width,d.height,bx+x,by+y,c);}off+=64;});break;
+  case TextureFormat::C4: tile(8,8,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){uint8_t v=s[off++];put(out,d.width,d.height,bx+x,by+y,palette_color(d,v>>4));put(out,d.width,d.height,bx+x+1,by+y,palette_color(d,v&15));}});break;
+  case TextureFormat::C8: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++)put(out,d.width,d.height,bx+x,by+y,palette_color(d,s[off++]));});break;
+  case TextureFormat::C14X2: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){uint16_t v=be16(s+off)&0x3fff;off+=2;put(out,d.width,d.height,bx+x,by+y,palette_color(d,v));}});break;
+  case TextureFormat::CMPR: tile(8,8,[&](uint32_t bx,uint32_t by){cmpr_block(s+off,out,d.width,d.height,bx,by);cmpr_block(s+off+8,out,d.width,d.height,bx+4,by);cmpr_block(s+off+16,out,d.width,d.height,bx,by+4);cmpr_block(s+off+24,out,d.width,d.height,bx+4,by+4);off+=32;});break;
   case TextureFormat::RGBA8888: break;
   }
-  r.ok=true; return r;
+  return true;
+}
+
+DecodeResult decode_texture_rgba8(const TextureDesc& d) noexcept {
+  DecodeResult r; r.width=d.width; r.height=d.height;
+  r.ok=decode_texture_rgba8(d,r.rgba);
+  return r;
 }
 } // namespace aurora::vita::gfx

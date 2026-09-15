@@ -16,7 +16,8 @@ public:
   // Capture a rectangle from the framebuffer that is currently bound, optionally
   // scaling it into an existing/new sampled EFB texture. srcY is GL bottom-left.
   Handle capture_from_bound(Handle existing,int32_t srcX,int32_t srcY,uint32_t srcWidth,uint32_t srcHeight,
-                            uint32_t dstWidth,uint32_t dstHeight,EfbCopyFormat format=EfbCopyFormat::Passthrough) noexcept;
+                            uint32_t dstWidth,uint32_t dstHeight,EfbCopyFormat format=EfbCopyFormat::Passthrough,
+                            bool scissorEnabled=false) noexcept;
   // Low-memory sampled EFB path for optimized Vita builds. The caller supplies RGBA8 pixels
   // from the currently rendered target; no framebuffer/renderbuffer or temporary capture texture
   // is allocated. Existing handles are updated in-place when dimensions match.
@@ -33,7 +34,7 @@ public:
   unsigned color_texture(Handle h)const noexcept;
 #endif
 private:
-  struct Entry{unsigned fbo=0,color=0,depth=0;uint32_t width=0,height=0;size_t bytes=0;};
+  struct Entry{unsigned fbo=0,color=0,depth=0;uint32_t width=0,height=0;size_t bytes=0;SamplerDesc sampler{};bool samplerValid=false;};
   std::unordered_map<Handle,Entry> map_;
   Handle next_=1;
   static constexpr size_t CopyProgramCount = static_cast<size_t>(EfbCopyFormat::GB8) + 1;

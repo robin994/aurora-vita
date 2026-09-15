@@ -32,4 +32,126 @@ TEST(VitaShaderDepth, ForwardZMatchesAuroraThenMapsToOpenGLClipRange) {
   EXPECT_NE(shader.fragment.find("float fd=(1.0-gl_FragCoord.z)"), std::string::npos);
 }
 
+TEST(VitaShaderInputs, StreamsOnlyTexcoordsUsedByPipeline) {
+  PipelineDesc desc{};
+  desc.texgenCount = 1;
+  desc.tev.stageCount = 1;
+  desc.tev.stages[0].texCoord = 0;
+  desc.tev.stages[0].texture = 0;
+  desc.tev.stages[0].color.a = aurora::vita::gfx::TevColorArg::TexColor;
+
+  EXPECT_EQ(aurora::vita::gfx::pipeline_texcoord_mask(desc), 0x01u);
+  const auto shader = build_tev_glsl(desc);
+  EXPECT_NE(shader.vertex.find("attribute vec3 a_tex0"), std::string::npos);
+  EXPECT_EQ(shader.vertex.find("attribute vec3 a_tex1"), std::string::npos);
+  EXPECT_EQ(shader.vertex.find("attribute vec4 a_color0"), std::string::npos);
+  EXPECT_EQ(shader.vertex.find("attribute vec4 a_color1"), std::string::npos);
+  EXPECT_NE(shader.fragment.find("varying vec3 v_tex0"), std::string::npos);
+  EXPECT_EQ(shader.fragment.find("varying vec3 v_tex1"), std::string::npos);
+  EXPECT_NE(shader.fragment.find("uniform sampler2D u_tex0"), std::string::npos);
+  EXPECT_EQ(shader.fragment.find("uniform sampler2D u_tex1"), std::string::npos);
+}
+
+TEST(VitaShaderInputs, IndirectStageAddsItsLookupTexcoord) {
+  PipelineDesc desc{};
+  desc.tev.stageCount = 1;
+  desc.tev.indirectStageCount = 1;
+  desc.tev.indirectStages[0].texCoord = 3;
+  desc.tev.indirectStages[0].texture = 0;
+  desc.tev.stages[0].texCoord = 1;
+  desc.tev.stages[0].indirectEnabled = true;
+  desc.tev.stages[0].indirectStage = 0;
+
+  EXPECT_EQ(aurora::vita::gfx::pipeline_texcoord_mask(desc),
+            static_cast<uint8_t>((1u << 1) | (1u << 3)));
+  const auto shader = build_tev_glsl(desc);
+  EXPECT_NE(shader.vertex.find("attribute vec3 a_tex1"), std::string::npos);
+  EXPECT_NE(shader.vertex.find("attribute vec3 a_tex3"), std::string::npos);
+  EXPECT_EQ(shader.vertex.find("attribute vec3 a_tex2"), std::string::npos);
+  EXPECT_NE(shader.fragment.find("uniform sampler2D u_tex0"), std::string::npos);
+}
+
+TEST(VitaShaderInputs, UnusedTexgenDoesNotConsumeVertexBandwidth) {
+  PipelineDesc desc{};
+  desc.texgenCount = 4;
+  desc.tev.stageCount = 1;
+  desc.tev.stages[0].texCoord = 2;
+  desc.tev.stages[0].texture = 0;
+  desc.tev.stages[0].color.a = aurora::vita::gfx::TevColorArg::TexColor;
+
+  EXPECT_EQ(aurora::vita::gfx::pipeline_texcoord_mask(desc), static_cast<uint8_t>(1u << 2));
+  const auto shader = build_tev_glsl(desc);
+  EXPECT_EQ(shader.vertex.find("attribute vec3 a_tex0"), std::string::npos);
+  EXPECT_EQ(shader.vertex.find("attribute vec3 a_tex1"), std::string::npos);
+  EXPECT_NE(shader.vertex.find("attribute vec3 a_tex2"), std::string::npos);
+  EXPECT_EQ(shader.vertex.find("attribute vec3 a_tex3"), std::string::npos);
+}
+
+TEST(VitaShaderInputs, BumpTexgenKeepsItsCpuDependencyWithoutStreamingIt) {
+  PipelineDesc desc{};
+  desc.texgenCount = 4;
+  desc.texgens[3].type = aurora::vita::gfx::TexGenType::Bump0;
+  desc.texgens[3].embossSource = 1;
+  desc.tev.stageCount = 1;
+  desc.tev.stages[0].texCoord = 3;
+  desc.tev.stages[0].texture = 0;
+  desc.tev.stages[0].color.a = aurora::vita::gfx::TevColorArg::TexColor;
+
+  EXPECT_EQ(aurora::vita::gfx::pipeline_texcoord_mask(desc), static_cast<uint8_t>(1u << 3));
+  EXPECT_EQ(aurora::vita::gfx::pipeline_texgen_compute_mask(desc),
+            static_cast<uint8_t>((1u << 1) | (1u << 3)));
+}
+
+TEST(VitaShaderInputs, UnusedDirectTextureStateDoesNotFetchOrStreamTexcoord) {
+  PipelineDesc desc{};
+  desc.texgenCount = 1;
+  desc.tev.stageCount = 1;
+  desc.tev.stages[0].texCoord = 0;
+  desc.tev.stages[0].texture = 0;
+
+  EXPECT_EQ(aurora::vita::gfx::pipeline_texcoord_mask(desc), 0u);
+  const auto shader = build_tev_glsl(desc);
+  EXPECT_EQ(shader.vertex.find("attribute vec3 a_tex0"), std::string::npos);
+  EXPECT_EQ(shader.fragment.find("texture2D(u_tex0,tev_uv)"), std::string::npos);
+  EXPECT_EQ(shader.fragment.find("uniform sampler2D u_tex0"), std::string::npos);
+}
+
+TEST(VitaShaderInputs, MissingTextureDoesNotNeedDirectTexcoord) {
+  PipelineDesc desc{};
+  desc.texgenCount = 1;
+  desc.tev.stageCount = 1;
+  desc.tev.stages[0].texCoord = 0;
+  desc.tev.stages[0].texture = 0xff;
+  desc.tev.stages[0].color.a = aurora::vita::gfx::TevColorArg::TexColor;
+
+  EXPECT_EQ(aurora::vita::gfx::pipeline_texcoord_mask(desc), 0u);
+}
+
+TEST(VitaShaderInputs, StreamsOnlyRasterColorActuallyConsumedByTev) {
+  PipelineDesc desc{};
+  desc.tev.stageCount = 1;
+  desc.tev.stages[0].color.a = aurora::vita::gfx::TevColorArg::RasColor;
+  desc.tev.stages[0].rasterSource = aurora::vita::gfx::RasterSource::Color1;
+
+  EXPECT_EQ(aurora::vita::gfx::pipeline_raster_color_mask(desc), 0x02u);
+  const auto shader = build_tev_glsl(desc);
+  EXPECT_EQ(shader.vertex.find("attribute vec4 a_color0"), std::string::npos);
+  EXPECT_NE(shader.vertex.find("attribute vec4 a_color1"), std::string::npos);
+  EXPECT_EQ(shader.fragment.find("varying vec4 v_color0"), std::string::npos);
+  EXPECT_NE(shader.fragment.find("varying vec4 v_color1"), std::string::npos);
+}
+
+TEST(VitaShaderInputs, AlphaBumpRasterDoesNotRequireVertexColor) {
+  PipelineDesc desc{};
+  desc.tev.stageCount = 1;
+  desc.tev.stages[0].alpha.a = aurora::vita::gfx::TevAlphaArg::RasAlpha;
+  desc.tev.stages[0].rasterSource = aurora::vita::gfx::RasterSource::AlphaBump;
+
+  EXPECT_EQ(aurora::vita::gfx::pipeline_raster_color_mask(desc), 0u);
+  const auto shader = build_tev_glsl(desc);
+  EXPECT_EQ(shader.vertex.find("attribute vec4 a_color0"), std::string::npos);
+  EXPECT_EQ(shader.vertex.find("attribute vec4 a_color1"), std::string::npos);
+  EXPECT_NE(shader.fragment.find("vec4 raw_ras=vec4(vec3(ind_alpha),ind_alpha)"), std::string::npos);
+}
+
 } // namespace

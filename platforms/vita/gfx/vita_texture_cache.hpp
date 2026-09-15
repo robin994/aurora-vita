@@ -23,11 +23,17 @@ public:
   uint64_t pre_evicted_bytes() const noexcept{return preEvictedBytes_;}
   uint64_t last_requested_bytes() const noexcept{return lastRequestedBytes_;}
 private:
-  struct Entry{Handle handle=InvalidHandle;unsigned gl=0;uint64_t key=0,lastUse=0;size_t bytes=0;bool hasMipmaps=false;uint64_t sourceId=0,paletteSourceId=0;size_t sourceBytes=0,paletteBytes=0;};
+  struct Entry{Handle handle=InvalidHandle;unsigned gl=0;uint64_t key=0,lastUse=0;size_t bytes=0;bool hasMipmaps=false,cacheable=true;uint64_t sourceId=0,paletteSourceId=0;size_t sourceBytes=0,paletteBytes=0;SamplerDesc sampler{};bool samplerValid=false;};
   // Evict LRU entries (never the entry keyed protectKey) until bytes_+requiredBytes fits
   // under budget_ with headroom. Runs BEFORE any vitaGL allocation.
   void pre_evict(size_t requiredBytes,uint64_t frame,uint64_t protectKey) noexcept;
-  std::unordered_map<uint64_t,Entry> byKey_;std::unordered_map<Handle,uint64_t> byHandle_;Handle next_=1;size_t budget_=0,bytes_=0,highWaterBytes_=0;uint64_t evictions_=0;
+  std::unordered_map<uint64_t,Entry> byKey_;
+  // unordered_map references are stable across rehash, so handles resolve
+  // directly to Entry with one lookup instead of handle->key->entry. Keep only
+  // live handles here: non-cacheable texture handles are monotonic and a vector
+  // indexed by them would grow for the lifetime of a long-running game.
+  std::unordered_map<Handle,Entry*> byHandle_{};
+  Handle next_=1;size_t budget_=0,bytes_=0,highWaterBytes_=0;uint64_t evictions_=0;
   uint64_t allocFailTotal_=0,preEvictions_=0,preEvictedBytes_=0,lastRequestedBytes_=0,retrySuppressTotal_=0;
   // A failed GPU allocation used to be retried by every draw that referenced the
   // same GX texture. Under pressure this can turn one OOM into hundreds of decode /
@@ -38,5 +44,11 @@ private:
   // Reused by the CMPR -> DXT1 fast path so streaming new textures does not
   // allocate and free a temporary buffer for every cache miss.
   std::vector<uint8_t> nativeCompressedScratch_{};
+  // Reused tiled-GX -> linear native-format staging. I/I+A/RGB565 stay at
+  // 1/2 bytes per texel instead of expanding to a 4-byte RGBA upload.
+  std::vector<uint8_t> nativeLinearScratch_{};
+  // Same principle for all decoded GX formats. Keeping the largest RGBA upload
+  // buffer alive removes allocator churn when games stream many texture mips.
+  std::vector<uint8_t> rgbaDecodeScratch_{};
 };
 } // namespace aurora::vita::gfx

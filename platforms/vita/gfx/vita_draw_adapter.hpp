@@ -31,6 +31,9 @@ struct PreparedDraw {
   PrepareDrawError error = PrepareDrawError::None;
   std::vector<CanonicalVertex> vertices{};
   std::vector<uint16_t> indices{};
+  // Reused decode storage for line/point expansion. Keeping it with the prepared
+  // draw lets the Vita submit path retain allocations across thousands of draws.
+  std::vector<CanonicalVertex> scratch{};
   Primitive primitive = Primitive::Triangles;
   bool positionIsClipSpace = false;
   bool ok() const noexcept { return error == PrepareDrawError::None; }
@@ -44,12 +47,17 @@ struct DrawFootprint {
   bool valid=false;
 };
 
-DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t vertexCount,uint32_t explicitIndexCount=0) noexcept;
+DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t vertexCount,uint32_t explicitIndexCount=0,
+                                      size_t vertexStride=sizeof(GpuVertex)) noexcept;
 
 PreparedDraw prepare_draw(const uint8_t* rawVertices,size_t rawBytes,uint32_t vertexCount,SourcePrimitive source,
                           const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
                           const VertexTransformState& state,DrawUniforms* uniforms=nullptr,
                           const PrimitiveExpansionState& expansion={},Telemetry* telemetry=nullptr) noexcept;
+bool prepare_draw_into(PreparedDraw& out,const uint8_t* rawVertices,size_t rawBytes,uint32_t vertexCount,SourcePrimitive source,
+                       const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
+                       const VertexTransformState& state,DrawUniforms* uniforms=nullptr,
+                       const PrimitiveExpansionState& expansion={},Telemetry* telemetry=nullptr) noexcept;
 
 // Resolves the effective post-conversion pipeline once. Callers submitting a
 // consecutive run with unchanged GX state may reuse the returned key.

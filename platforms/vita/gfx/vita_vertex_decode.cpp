@@ -152,12 +152,20 @@ VertexLayout canonical_vertex_layout() noexcept {
   for(unsigned i=0;i<8;i++)l.attributes[3+i]={static_cast<uint8_t>(3+i),3,VertexScalar::F32,false,sizeof(CanonicalVertex),static_cast<uint16_t>(offsetof(CanonicalVertex,texcoord)+sizeof(float)*3*i)};
   return l;
 }
-VertexLayout gpu_vertex_layout() noexcept {
-  VertexLayout l{};l.count=11;
-  l.attributes[0]={0,4,VertexScalar::F32,false,sizeof(GpuVertex),offsetof(GpuVertex,position)};
-  l.attributes[1]={1,4,VertexScalar::U8,true,sizeof(GpuVertex),offsetof(GpuVertex,color0)};
-  l.attributes[2]={2,4,VertexScalar::U8,true,sizeof(GpuVertex),offsetof(GpuVertex,color1)};
-  for(unsigned i=0;i<8;i++)l.attributes[3+i]={static_cast<uint8_t>(3+i),3,VertexScalar::F32,false,sizeof(GpuVertex),static_cast<uint16_t>(offsetof(GpuVertex,texcoord)+sizeof(float)*3*i)};
+VertexLayout gpu_vertex_layout(uint8_t texcoordMask,uint8_t colorMask) noexcept {
+  VertexLayout l{};
+  uint16_t stride=16;
+  if(colorMask&1u)stride+=4;
+  if(colorMask&2u)stride+=4;
+  for(unsigned i=0;i<8;i++)if(texcoordMask&(1u<<i))stride+=12;
+  l.attributes[l.count++]={0,4,VertexScalar::F32,false,stride,0};
+  uint16_t offset=16;
+  if(colorMask&1u){l.attributes[l.count++]={1,4,VertexScalar::U8,true,stride,offset};offset+=4;}
+  if(colorMask&2u){l.attributes[l.count++]={2,4,VertexScalar::U8,true,stride,offset};offset+=4;}
+  for(unsigned i=0;i<8;i++)if(texcoordMask&(1u<<i)){
+    l.attributes[l.count++]={static_cast<uint8_t>(3+i),3,VertexScalar::F32,false,stride,offset};
+    offset+=12;
+  }
   return l;
 }
 bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,

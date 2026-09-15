@@ -14,6 +14,9 @@
 #ifndef AURORA_VITA_NATIVE_CMPR
 #define AURORA_VITA_NATIVE_CMPR 0
 #endif
+#ifndef AURORA_VITA_NATIVE_GX_TEXTURES
+#define AURORA_VITA_NATIVE_GX_TEXTURES 0
+#endif
 namespace aurora::vita::gfx {
 namespace {
 void vgl_log_texture_alloc_fail(uint32_t w,uint32_t h,unsigned fmt,uint8_t mips,uint64_t sourceId,
@@ -27,6 +30,9 @@ void vgl_log_texture_alloc_fail(uint32_t w,uint32_t h,unsigned fmt,uint8_t mips,
 // vitaGL uploads RGBA8 as VGL_ALIGN(w,8)*h*4 (row-stride padded to 8 texels).
 inline size_t aligned_rgba_bytes(uint32_t width,uint32_t height) noexcept {
   return static_cast<size_t>((width+7u)&~7u)*height*4u;
+}
+inline size_t aligned_native_bytes(uint32_t width,uint32_t height,uint8_t bpp) noexcept {
+  return static_cast<size_t>((width+7u)&~7u)*height*bpp;
 }
 #if !defined(__vita__) || AURORA_VITA_RUNTIME_MIPMAP_GENERATION
 size_t rgba_full_mip_bytes(uint32_t width,uint32_t height) noexcept {
@@ -53,6 +59,16 @@ size_t estimate_gpu_bytes(const TextureDesc& d) noexcept {
     }
     // Keep the same conservative allocator slack as the RGBA path. The payload
     // itself is now BC1-sized, avoiding the 8x CMPR -> RGBA8 expansion.
+    return total+total/5u+65536u;
+  }
+#endif
+#if defined(__vita__) && AURORA_VITA_NATIVE_GX_TEXTURES
+  if(const uint8_t bpp=native_texture_bytes_per_pixel(d.format)){
+    size_t total=0;const unsigned levels=std::max<unsigned>(1u,d.mipCount);
+    for(unsigned l=0;l<levels;l++)total+=aligned_native_bytes(std::max(1u,d.width>>l),std::max(1u,d.height>>l),bpp);
+#if AURORA_VITA_RUNTIME_MIPMAP_GENERATION
+    if(d.generateMipmaps&&levels==1){uint32_t w=d.width,h=d.height;total=0;for(;;){total+=aligned_native_bytes(w,h,bpp);if(w==1&&h==1)break;w=std::max(1u,w>>1);h=std::max(1u,h>>1);}}
+#endif
     return total+total/5u+65536u;
   }
 #endif
@@ -95,7 +111,15 @@ void TextureCache::pre_evict(size_t requiredBytes,uint64_t frame,uint64_t protec
   }
 }
 Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStats* st) noexcept {
-  uint64_t key=texture_key(d);if(!d.cacheable)key^=(frame+0x9e3779b97f4a7c15ull)+(key<<6)+(key>>2);auto it=byKey_.find(key);if(d.cacheable&&it!=byKey_.end()){it->second.lastUse=frame;if(st)st->textureHits++;return it->second.handle;}if(st)st->textureMisses++;
+  uint64_t key=texture_key(d);
+  if(!d.cacheable){
+    // A non-cacheable GX texture may be uploaded more than once in one frame.
+    // Give every successful handle distinct backing storage so queued draws can
+    // never be redirected by a later upload of the same guest pointer.
+    const uint64_t salt=(frame+0x9e3779b97f4a7c15ull)^(static_cast<uint64_t>(next_)*0xbf58476d1ce4e5b9ull);
+    key^=salt+(key<<6)+(key>>2);
+  }
+  auto it=byKey_.find(key);if(d.cacheable&&it!=byKey_.end()){it->second.lastUse=frame;if(st)st->textureHits++;return it->second.handle;}if(st)st->textureMisses++;
   if(failedFrame_!=frame){failedFrame_=frame;failedKeys_.clear();}
   if(failedKeys_.find(key)!=failedKeys_.end()){
     ++retrySuppressTotal_;
@@ -120,7 +144,7 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
     }
     return InvalidHandle;
   }
-  Entry e{};e.handle=next_++;e.key=key;e.lastUse=frame;e.hasMipmaps=false;e.sourceId=d.sourceId;e.paletteSourceId=d.paletteSourceId;e.sourceBytes=d.dataSize;e.paletteBytes=d.paletteSize;
+  Entry e{};e.handle=next_;e.key=key;e.lastUse=frame;e.hasMipmaps=false;e.cacheable=d.cacheable;e.sourceId=d.sourceId;e.paletteSourceId=d.paletteSourceId;e.sourceBytes=d.dataSize;e.paletteBytes=d.paletteSize;
 #if defined(__vita__)
   GLuint id=0;glGenTextures(1,&id);if(!id){++allocFailTotal_;failedKeys_.insert(key);return InvalidHandle;}e.gl=id;glBindTexture(GL_TEXTURE_2D,id);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
 #else
@@ -130,6 +154,20 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
   for(unsigned level=0;level<levels;level++){
     TextureDesc ld=d;ld.width=std::max(1u,d.width>>level);ld.height=std::max(1u,d.height>>level);ld.data=base+encodedOffset;ld.mipCount=1;ld.generateMipmaps=false;const size_t encoded=encoded_texture_size(ld.width,ld.height,ld.format);if(d.dataSize&&encodedOffset+encoded>d.dataSize)break;ld.dataSize=encoded;
 #if defined(__vita__)
+#if AURORA_VITA_NATIVE_GX_TEXTURES
+    NativeTextureFormat nativeFormat=NativeTextureFormat::None;
+    if(transcode_texture_native(ld,nativeFormat,nativeLinearScratch_)){
+      GLint internal=GL_RGBA;GLenum format=GL_RGBA,type=GL_UNSIGNED_BYTE;
+      switch(nativeFormat){
+      case NativeTextureFormat::Intensity8:internal=GL_INTENSITY;format=GL_LUMINANCE;type=GL_UNSIGNED_BYTE;break;
+      case NativeTextureFormat::LuminanceAlpha8:internal=GL_LUMINANCE_ALPHA;format=GL_LUMINANCE_ALPHA;type=GL_UNSIGNED_BYTE;break;
+      case NativeTextureFormat::Rgb565:internal=GL_RGB;format=GL_RGB;type=GL_UNSIGNED_SHORT_5_6_5;break;
+      default:break;
+      }
+      glTexImage2D(GL_TEXTURE_2D,static_cast<GLint>(level),internal,ld.width,ld.height,0,format,type,nativeLinearScratch_.data());
+      ++uploadedLevels;encodedOffset+=encoded;continue;
+    }
+#endif
 #if AURORA_VITA_NATIVE_CMPR
     if(ld.format==TextureFormat::CMPR){
       if(!transcode_cmpr_to_dxt1(ld,nativeCompressedScratch_))break;
@@ -142,9 +180,9 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
     }
 #endif
 #endif
-    auto decoded=decode_texture_rgba8(ld);if(!decoded.ok)break;++uploadedLevels;
+    if(!decode_texture_rgba8(ld,rgbaDecodeScratch_))break;++uploadedLevels;
 #if defined(__vita__)
-    glTexImage2D(GL_TEXTURE_2D,static_cast<GLint>(level),GL_RGBA,decoded.width,decoded.height,0,GL_RGBA,GL_UNSIGNED_BYTE,decoded.rgba.data());
+    glTexImage2D(GL_TEXTURE_2D,static_cast<GLint>(level),GL_RGBA,ld.width,ld.height,0,GL_RGBA,GL_UNSIGNED_BYTE,rgbaDecodeScratch_.data());
 #endif
     encodedOffset+=encoded;
   }
@@ -179,22 +217,57 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
   e.hasMipmaps=(d.generateMipmaps&&uploadedLevels==1)||uploadedLevels>1;
 #endif
   e.bytes=estBytes; // GPU-side footprint (row-aligned + slack), not the CPU decode size
-  bytes_+=e.bytes;if(bytes_>highWaterBytes_)highWaterBytes_=bytes_;byHandle_[e.handle]=key;byKey_[key]=e;if(st)st->textureUploads++;trim(frame);return e.handle;
-}
-void TextureCache::bind(Handle h,unsigned unit,const SamplerDesc&s) noexcept {auto hi=byHandle_.find(h);if(hi==byHandle_.end())return;auto it=byKey_.find(hi->second);if(it==byKey_.end())return;
+  const Handle handle=e.handle;
+  const unsigned uploadedGl=e.gl;
+  auto [inserted,ok]=byKey_.emplace(key,std::move(e));
+  if(!ok){
 #if defined(__vita__)
-  glActiveTexture(GL_TEXTURE0+unit);glBindTexture(GL_TEXTURE_2D,it->second.gl);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,wrap(s.wrapS));glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,wrap(s.wrapT));const Filter minFilter=!it->second.hasMipmaps&&mip_filter(s.minFilter)?without_mips(s.minFilter):s.minFilter;glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,filt(minFilter));glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,filt(s.magFilter));glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_LOD_BIAS,s.lodBias);
+    GLuint id=uploadedGl;if(id)glDeleteTextures(1,&id);
+#endif
+    return InvalidHandle;
+  }
+  ++next_;
+  byHandle_[handle]=&inserted->second;
+  bytes_+=inserted->second.bytes;if(bytes_>highWaterBytes_)highWaterBytes_=bytes_;if(st)st->textureUploads++;trim(frame);return handle;
+}
+void TextureCache::bind(Handle h,unsigned unit,const SamplerDesc&s) noexcept {auto hi=byHandle_.find(h);if(hi==byHandle_.end()||!hi->second)return;auto&e=*hi->second;
+#if defined(__vita__)
+  glActiveTexture(GL_TEXTURE0+unit);glBindTexture(GL_TEXTURE_2D,e.gl);
+  const auto&old=e.sampler;
+  if(!e.samplerValid||old.wrapS!=s.wrapS)glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,wrap(s.wrapS));
+  if(!e.samplerValid||old.wrapT!=s.wrapT)glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,wrap(s.wrapT));
+  if(!e.samplerValid||old.minFilter!=s.minFilter){const Filter minFilter=!e.hasMipmaps&&mip_filter(s.minFilter)?without_mips(s.minFilter):s.minFilter;glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,filt(minFilter));}
+  if(!e.samplerValid||old.magFilter!=s.magFilter)glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,filt(s.magFilter));
+  if(!e.samplerValid||old.lodBias!=s.lodBias)glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_LOD_BIAS,s.lodBias);
+  e.sampler=s;e.samplerValid=true;
 #else
   (void)unit;(void)s;
 #endif
 }
-void TextureCache::erase(Handle h) noexcept {auto hi=byHandle_.find(h);if(hi==byHandle_.end())return;auto it=byKey_.find(hi->second);if(it==byKey_.end()){byHandle_.erase(hi);return;}bytes_-=it->second.bytes;
+void TextureCache::erase(Handle h) noexcept {auto hi=byHandle_.find(h);if(hi==byHandle_.end()||!hi->second)return;Entry*e=hi->second;const uint64_t key=e->key;bytes_-=e->bytes;
 #if defined(__vita__)
-  GLuint id=it->second.gl;glDeleteTextures(1,&id);
+  GLuint id=e->gl;glDeleteTextures(1,&id);
 #endif
-  byKey_.erase(it);byHandle_.erase(hi);}
-void TextureCache::clear() noexcept {std::vector<Handle> hs;hs.reserve(byHandle_.size());for(auto&[h,k]:byHandle_){(void)k;hs.push_back(h);}for(auto h:hs)erase(h);bytes_=0;failedKeys_.clear();failedFrame_=~uint64_t{0};}
+  byHandle_.erase(hi);byKey_.erase(key);}
+void TextureCache::clear() noexcept {
+#if defined(__vita__)
+  for(auto&[_,e]:byKey_){GLuint id=e.gl;glDeleteTextures(1,&id);}
+#endif
+  byKey_.clear();byHandle_.clear();bytes_=0;failedKeys_.clear();failedFrame_=~uint64_t{0};}
 void TextureCache::trim(uint64_t frame) noexcept {
+  // Non-cacheable textures are intentionally unique within a frame so commands
+  // already enqueued keep valid GL ids. Once that frame has executed they have no
+  // reuse value; retire them regardless of the global cache budget.
+  for(auto it=byKey_.begin();it!=byKey_.end();){
+    if(!it->second.cacheable&&it->second.lastUse<frame){
+      const Handle h=it->second.handle;bytes_-=it->second.bytes;
+#if defined(__vita__)
+      GLuint id=it->second.gl;glDeleteTextures(1,&id);
+#endif
+      byHandle_.erase(h);
+      it=byKey_.erase(it);++evictions_;
+    }else ++it;
+  }
   const size_t target=budget_>kEvictHeadroom?budget_-kEvictHeadroom:budget_;
   while(bytes_>target&&!byKey_.empty()){
     auto victim=byKey_.end();

@@ -58,6 +58,11 @@ public:
   void begin_frame(uint64_t frame) noexcept;
   void flush() noexcept;
   void reset_commands() noexcept { stream_.reset(); reset_pipeline_run_cache(); }
+  void invalidate_texture_resolve_cache() noexcept {
+#if defined(AURORA_VITA_UPSTREAM)
+    resolvedTextureBindingsValid_ = false;
+#endif
+  }
 
 #if defined(AURORA_VITA_UPSTREAM)
   SubmitResult submit(uint8_t primitive, uint8_t fmt, const uint8_t* rawVertices,
@@ -86,8 +91,29 @@ private:
   gfx::Renderer* renderer_ = nullptr;
   std::unique_ptr<gfx::StreamingArena> arena_{};
   gfx::CommandStream stream_{};
+  gfx::PreparedDraw preparedScratch_{};
+  gfx::VertexTransformState translatedVertexState_{};
+  gfx::DrawUniforms translatedUniforms_{};
+  bool translatedVertexStateValid_ = false;
   gfx::Handle whiteTexture_ = gfx::InvalidHandle;
 #if defined(AURORA_VITA_UPSTREAM)
+  uint32_t translatedStateGeneration_ = 0;
+  uint8_t translatedPrimitive_ = 0;
+  uint8_t translatedFmt_ = 0;
+  gfx::PipelineDesc translatedPipeline_{};
+  gfx::VertexDecodeLayout translatedLayout_{};
+  uint64_t translatedPipelineKey_ = 0;
+  uint8_t translatedTextureMask_ = 0;
+  bool translatedUsesOrigLod_ = false;
+  bool translatedHasIndirect_ = false;
+  bool translatedLit_ = false;
+  bool translatedStateValid_ = false;
+  std::array<gfx::TextureBinding,gfx::MaxTextures> resolvedTextureBindings_{};
+  uint8_t resolvedTextureMask_ = 0;
+  uint8_t resolvedVolatileTextureMask_ = 0;
+  uint8_t resolvedFallbackTextureMask_ = 0;
+  SubmitWarning resolvedTextureWarnings_ = SubmitWarning::None;
+  bool resolvedTextureBindingsValid_ = false;
   uint64_t queuedTranslatedPipelineKey_ = 0;
   uint64_t queuedResolvedPipelineKey_ = 0;
   gfx::Primitive queuedPrimitive_ = gfx::Primitive::Triangles;
