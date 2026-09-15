@@ -51,6 +51,7 @@ private:
   size_t bytes_=0,highWaterBytes_=0;
   bool ensure_blitter(EfbCopyFormat format) noexcept;
   bool ensure_capture_target(uint32_t width,uint32_t height) noexcept;
-  bool draw_texture(unsigned texture,uint32_t width,uint32_t height,EfbCopyFormat format=EfbCopyFormat::Passthrough) noexcept;
+  bool draw_texture(unsigned texture,uint32_t width,uint32_t height,EfbCopyFormat format=EfbCopyFormat::Passthrough,
+                    bool flipY=false) noexcept;
 };
 } // namespace aurora::vita::gfx

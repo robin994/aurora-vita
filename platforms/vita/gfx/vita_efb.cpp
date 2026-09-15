@@ -225,7 +225,14 @@ bool EfbManager::ensure_blitter(EfbCopyFormat format) noexcept {
     if (blitTex_[idx] >= 0) glUniform1i(blitTex_[idx], 0);
   }
   if (!blitVbo_) {
-    const float q[] = {-1,-1,0,0, 1,-1,1,0, -1,1,0,1, 1,1,1,1};
+    // FBO color attachments use GL's bottom-left image convention, while the
+    // presentable Vita surface is consumed in top-left display order. Keep both
+    // UV orientations in one immutable buffer so display copies can compensate
+    // without changing GXCopyTex textures sampled later by TEV stages.
+    const float q[] = {
+      -1,-1,0,0,  1,-1,1,0,  -1,1,0,1,  1,1,1,1,
+      -1,-1,0,1,  1,-1,1,1,  -1,1,0,0,  1,1,1,0,
+    };
     glGenBuffers(1, &blitVbo_);
     glBindBuffer(GL_ARRAY_BUFFER, blitVbo_);
     glBufferData(GL_ARRAY_BUFFER, sizeof(q), q, GL_STATIC_DRAW);
@@ -271,7 +278,8 @@ bool EfbManager::ensure_capture_target(uint32_t w,uint32_t h) noexcept {
   return true;
 }
 
-bool EfbManager::draw_texture(unsigned texture, uint32_t width, uint32_t height, EfbCopyFormat format) noexcept {
+bool EfbManager::draw_texture(unsigned texture, uint32_t width, uint32_t height, EfbCopyFormat format,
+                              bool flipY) noexcept {
   if (!ensure_blitter(format)) return false;
 #if defined(__vita__)
   const size_t idx = static_cast<size_t>(format);
@@ -293,11 +301,12 @@ bool EfbManager::draw_texture(unsigned texture, uint32_t width, uint32_t height,
   glEnableVertexAttribArray(3);
   glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void*)0);
   glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void*)(2 * sizeof(float)));
-  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  glDrawArrays(GL_TRIANGLE_STRIP, flipY ? 4 : 0, 4);
 #else
   (void)texture;
   (void)width;
   (void)height;
+  (void)flipY;
 #endif
   return true;
 }
@@ -306,7 +315,7 @@ bool EfbManager::blit_to_default(Handle h, uint32_t w, uint32_t he) noexcept {
   const auto it = map_.find(h);
   if (it == map_.end()) return false;
   bind_default(w, he);
-  const bool ok=draw_texture(it->second.color, w, he, EfbCopyFormat::Passthrough);
+  const bool ok=draw_texture(it->second.color, w, he, EfbCopyFormat::Passthrough, true);
   // draw_texture enforces its own linear/clamp sampling state on the raw GL id.
   // Force the next GX sampling bind to refresh this entry's requested sampler.
   if(ok) it->second.samplerValid=false;
