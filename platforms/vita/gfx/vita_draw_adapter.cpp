@@ -368,19 +368,16 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
       pack_gpu_vertex(gpu+i*gpuStride,prepared.vertices[i],gpuLayout);
     }
     if(!prepared.indices.empty()){
-      // Keep indices relative to this draw's vertex slice.  Rebasing U16 indices
-      // against the whole streaming VBO only works when every preceding draw has
-      // the same stride; Aurora intentionally packs pipeline-specific 28/40/etc.
-      // byte vertices into the same page.  Relative indices let the renderer use
-      // `vertices.offset` as the attribute base, remove the artificial 65k-vertex
-      // page limit, and make mixed-stride streaming correct.
-      ib=arena.upload_indices(prepared.indices.data(),prepared.indices.size()*sizeof(uint16_t),alignof(uint16_t));
-      if(!ib.buffer)return fail(PrepareDrawError::StreamingOverflow);
+      if(vb.offset%gpuStride!=0)return fail(PrepareDrawError::StreamingOverflow);
+      const uint32_t base=vb.offset/static_cast<uint32_t>(gpuStride);
+      if(base>std::numeric_limits<uint16_t>::max())return fail(PrepareDrawError::TooManyVertices);
+      for(const uint16_t idx:prepared.indices)if(base+idx>std::numeric_limits<uint16_t>::max())return fail(PrepareDrawError::TooManyVertices);
+      ib=arena.upload_rebased_indices(prepared.indices.data(),prepared.indices.size(),base);if(!ib.buffer)return fail(PrepareDrawError::StreamingOverflow);
     }
   }
   uint64_t key=resolvedPipelineKey?resolvedPipelineKey:resolve_draw_pipeline(renderer,prepared,pipeline,telemetry);
   if(!key)return fail(PrepareDrawError::PipelineFailed);
-  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild); DrawPacket d{};d.pipelineKey=key;d.vertices=vb;d.indices=ib;d.vertexCount=static_cast<uint32_t>(prepared.vertices.size());d.indexCount=static_cast<uint32_t>(prepared.indices.size());d.absoluteVertexIndices=false;d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
+  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild); DrawPacket d{};d.pipelineKey=key;d.vertices=vb;d.indices=ib;d.vertexCount=static_cast<uint32_t>(prepared.vertices.size());d.indexCount=static_cast<uint32_t>(prepared.indices.size());d.absoluteVertexIndices=!prepared.indices.empty();d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
     if(auto*tail=stream.tail_draw();tail&&batch_compatible(*tail,d)){
       tail->vertices.size=(d.vertices.offset+d.vertices.size)-tail->vertices.offset;
       tail->indices.size+=d.indices.size;
