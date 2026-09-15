@@ -1,4 +1,5 @@
 #include "vita_streaming_arena.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -30,6 +31,7 @@ bool StreamingArena::initialize() noexcept {
   if (cfg_.slots == 0 || cfg_.vertexBytes == 0 || cfg_.indexBytes == 0) return false;
 
   slots_.resize(cfg_.slots);
+  inFlight_.assign(cfg_.slots, 0);
   for (auto& slot : slots_) {
     slot.vertex = pool_.create_vertex(nullptr, cfg_.vertexBytes, true);
     slot.index = pool_.create_index(nullptr, cfg_.indexBytes, true);
@@ -59,6 +61,7 @@ void StreamingArena::shutdown() noexcept {
     if (slot.index) pool_.destroy(slot.index);
   }
   slots_.clear();
+  inFlight_.clear();
   vertexStage_.clear();
   indexStage_.clear();
   initialized_ = false;
@@ -67,18 +70,46 @@ void StreamingArena::shutdown() noexcept {
   current_ = 0;
 }
 
-void StreamingArena::begin_frame(uint64_t frame) noexcept {
-  if (!initialized_ || slots_.empty()) return;
-  current_ = static_cast<uint32_t>(frame % slots_.size());
-  auto& slot = slots_[current_];
+bool StreamingArena::activate_slot(uint32_t index) noexcept {
+  if (!initialized_ || index >= slots_.size()) return false;
+  auto& slot = slots_[index];
 #if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
   if (slot.vmapped && slot.vertex) { glBindBuffer(GL_ARRAY_BUFFER, pool_.gl_id(slot.vertex)); (void)glUnmapBuffer(GL_ARRAY_BUFFER); slot.vmapped = nullptr; }
   if (slot.imapped && slot.index) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pool_.gl_id(slot.index)); (void)glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER); slot.imapped = nullptr; }
 #endif
+  current_ = index;
   slot.voff = 0;
   slot.ioff = 0;
   slot.vflushed = 0;
   slot.iflushed = 0;
+  return true;
+}
+
+bool StreamingArena::acquire_slot(uint32_t preferred) noexcept {
+  if (!initialized_ || slots_.empty()) return false;
+  const uint32_t count = static_cast<uint32_t>(slots_.size());
+  preferred %= count;
+  if (!inFlight_[preferred]) return activate_slot(preferred);
+  for (uint32_t step = 1; step < count; ++step) {
+    const uint32_t index = (preferred + step) % count;
+    if (!inFlight_[index]) return activate_slot(index);
+  }
+
+  // With no per-buffer fence exposed by vitaGL, the safe fallback is one global
+  // drain after the whole ring has been consumed. This is much cheaper than a
+  // glFinish for every 4 MiB streaming chunk while still preventing overwrite of
+  // VBO/IBO storage that the GPU may reference.
+#if defined(__vita__)
+  glFinish();
+  ++gpuSyncs_;
+#endif
+  std::fill(inFlight_.begin(), inFlight_.end(), 0);
+  return activate_slot(preferred);
+}
+
+void StreamingArena::begin_frame(uint64_t frame) noexcept {
+  if (!initialized_ || slots_.empty()) return;
+  (void)acquire_slot(static_cast<uint32_t>(frame % slots_.size()));
 }
 
 BufferSlice StreamingArena::reserve(bool vertex, size_t bytes, size_t alignment, void** writable) noexcept {
@@ -185,6 +216,9 @@ bool StreamingArena::flush() noexcept {
   return true;
 #endif
 }
+void StreamingArena::mark_current_submitted() noexcept {
+  if (initialized_ && current_ < inFlight_.size()) inFlight_[current_] = 1;
+}
 bool StreamingArena::can_reserve(size_t vertexBytes,size_t vertexAlignment,size_t indexBytes,size_t indexAlignment) const noexcept {
   if(!initialized_||slots_.empty())return false;
   const auto&slot=slots_[current_];
@@ -199,14 +233,8 @@ bool StreamingArena::recycle_current() noexcept {
 #if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
   if(slot.vmapped||slot.imapped)return false;
 #endif
-#if defined(__vita__)
-  // Keep rollover ownership conservative until the backend has per-buffer GPU
-  // fences. Rotating persistent VBOs without a fence caused Strikers to stall in
-  // the first gameplay frame; wait for the submitted chunk and rewind in place.
-  glFinish();
-  ++gpuSyncs_;
-#endif
-  slot.voff=slot.ioff=slot.vflushed=slot.iflushed=0;
+  const uint32_t next = static_cast<uint32_t>((current_ + 1u) % slots_.size());
+  if (!acquire_slot(next)) return false;
   ++recycles_;
   return true;
 }

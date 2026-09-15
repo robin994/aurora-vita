@@ -35,13 +35,10 @@ public:
   // frame-global vertex base. This avoids a temporary heap allocation per draw.
   BufferSlice upload_rebased_indices(const uint16_t* data, size_t count, uint32_t vertexBase) noexcept;
   bool flush() noexcept;
+  void mark_current_submitted() noexcept;
   bool can_reserve(size_t vertexBytes,size_t vertexAlignment,size_t indexBytes,size_t indexAlignment) const noexcept;
-  // Called only after the current command stream has been submitted. Waits for
-  // those draws to finish, then rewinds the current VBO/IBO so a large GX frame
-  // can be rendered in bounded chunks without allocating another backing store.
-  // This is intentionally conservative on Vita: vitaGL's dynamic-buffer scratch
-  // allocator shares its circular pool with texture upload staging, so orphaning
-  // a 4 MiB/1 MiB pair here can starve a following compressed-texture upload.
+  // Called only after the current command stream has been submitted. Advances to
+  // a free persistent slot and only drains the GPU once every slot is in flight.
   bool recycle_current() noexcept;
 
   size_t vertex_used() const noexcept;
@@ -65,10 +62,13 @@ private:
   };
   BufferSlice reserve(bool vertex, size_t bytes, size_t alignment, void** writable) noexcept;
   BufferSlice upload(bool vertex, const void* data, size_t bytes, size_t alignment) noexcept;
+  bool activate_slot(uint32_t index) noexcept;
+  bool acquire_slot(uint32_t preferred) noexcept;
   static size_t align_up(size_t value,size_t alignment) noexcept;
   BufferPool& pool_;
   StreamingArenaConfig cfg_{};
   std::vector<Slot> slots_{};
+  std::vector<uint8_t> inFlight_{};
   std::vector<uint8_t> vertexStage_{};
   std::vector<uint8_t> indexStage_{};
   uint32_t current_=0;

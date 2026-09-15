@@ -94,6 +94,7 @@ void DrawSink::flush() noexcept {
     return;
   }
   { gfx::ScopedTelemetryPhase phase(telemetry_, gfx::TelemetryPhase::Submit); renderer_->execute(stream_); }
+  arena_->mark_current_submitted();
   stream_.reset();
   reset_pipeline_run_cache();
 }
