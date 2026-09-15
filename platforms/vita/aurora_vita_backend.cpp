@@ -126,6 +126,12 @@ bool initialize(const BackendConfig& c) noexcept {
     vglSetDisplayBufferCount(static_cast<int>(g_config.vgl_display_buffer_count));
   vglSetupScratchMemory(g_config.vgl_scratch_dynamic?GL_TRUE:GL_FALSE,
                         g_config.vgl_scratch_stream?GL_TRUE:GL_FALSE);
+  // Aurora always compiles vertex/fragment shaders as an immediate pair before
+  // linking them. Use vitaGL's matching semantic mode so compile failures are
+  // reported by glCompileShader instead of being deferred into glLinkProgram.
+  // The postponed path in current vitaGL can otherwise reach SceGxm with a null
+  // compiled program when a deferred shader translation fails.
+  vglSetSemanticBindingMode(VGL_MODE_SHADER_PAIR);
 
   // vitaGL's current API does not return a success flag here. The value is
   // `res_fallback`: GL_TRUE means the requested framebuffer was clamped to
