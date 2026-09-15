@@ -109,19 +109,17 @@ bool StreamingArena::acquire_slot(uint32_t preferred) noexcept {
 
 void StreamingArena::begin_frame(uint64_t frame) noexcept {
   if (!initialized_ || slots_.empty()) return;
-  // Normal frame rotation is already synchronized by vitaGL's display-buffer
-  // ring: vglSwapBuffers advances the back buffer and sceGxmBeginScene waits on
-  // that buffer's sync object before it is reused. Treating slots submitted by
-  // earlier frames as still in flight here adds a redundant global glFinish()
-  // every time this ring wraps (three frames with the default configuration),
-  // which can collapse a 60 Hz workload to roughly half rate.
-  //
-  // inFlight_ therefore tracks only chunks submitted during *this* frame. It
-  // remains useful for recycle_current(), where a single large GX frame can
-  // consume multiple streaming slots and must drain before overwriting one of
-  // those same-frame chunks.
-  std::fill(inFlight_.begin(), inFlight_.end(), 0);
-  (void)activate_slot(static_cast<uint32_t>(frame % slots_.size()));
+  const uint32_t preferred = static_cast<uint32_t>(frame % slots_.size());
+
+  // The slot selected by the normal frame rotation is safe to reuse when its
+  // matching vitaGL display buffer comes back around. Keep every other slot
+  // marked in flight, though: a large GX frame may spill into one of those
+  // buffers before its own display-buffer turn has synchronized it. Clearing
+  // the entire ring here makes the first rollover overwrite GPU-visible data.
+  // recycle_current() will therefore drain only when a frame actually consumes
+  // the remaining in-flight slots, rather than once every ordinary ring wrap.
+  inFlight_[preferred] = 0;
+  (void)activate_slot(preferred);
 }
 
 BufferSlice StreamingArena::reserve(bool vertex, size_t bytes, size_t alignment, void** writable) noexcept {
