@@ -22,10 +22,13 @@ using namespace aurora::vita::gfx;
 namespace {
 struct Vtx { float x,y,z; uint8_t c0[4]; uint8_t c1[4]; float u,v; };
 constexpr std::array<Vtx,4> quad{{
- {-0.75f,-0.65f,0.5f,{255,60,60,255},{255,255,255,255},0,1},
- { 0.75f,-0.65f,0.5f,{60,255,80,255},{255,255,255,255},1,1},
- {-0.75f, 0.65f,0.5f,{60,100,255,255},{255,255,255,255},0,0},
- { 0.75f, 0.65f,0.5f,{255,255,255,255},{255,255,255,255},1,0},
+ // Aurora's GX projection convention feeds forward-Z clip depth in [-w, 0]
+ // before the WebGPU/Vita remap.  With the identity probe MVP, -0.5 is the
+ // center of the visible depth range; +0.5 would be clipped after remapping.
+ {-0.75f,-0.65f,-0.5f,{255,60,60,255},{255,255,255,255},0,1},
+ { 0.75f,-0.65f,-0.5f,{60,255,80,255},{255,255,255,255},1,1},
+ {-0.75f, 0.65f,-0.5f,{60,100,255,255},{255,255,255,255},0,0},
+ { 0.75f, 0.65f,-0.5f,{255,255,255,255},{255,255,255,255},1,0},
 }};
 constexpr std::array<uint16_t,6> qidx{{0,1,2,2,1,3}};
 VertexLayout layout(){VertexLayout l{};l.count=4;l.attributes[0]={0,3,VertexScalar::F32,false,sizeof(Vtx),0};l.attributes[1]={1,4,VertexScalar::U8,true,sizeof(Vtx),12};l.attributes[2]={2,4,VertexScalar::U8,true,sizeof(Vtx),16};l.attributes[3]={3,2,VertexScalar::F32,false,sizeof(Vtx),20};return l;}
@@ -60,7 +63,7 @@ DrawPacket packet(const Assets&a,uint64_t pipe){DrawPacket d{};d.pipelineKey=pip
 template<class U> void translate(U&u,float x,float y,float sx=1,float sy=1){u.mvp={sx,0,0,0, 0,sy,0,0, 0,0,1,0, x,y,0,1};}
 PipelineDesc batch_pipe(){auto pd=base_pipe();pd.layout=canonical_vertex_layout();pd.tev.stages[0].color={TevColorArg::Zero,TevColorArg::TexColor,TevColorArg::One,TevColorArg::Zero};pd.tev.stages[0].alpha={TevAlphaArg::Zero,TevAlphaArg::TexAlpha,TevAlphaArg::Konst,TevAlphaArg::Zero};pd.tev.stages[0].texture=0;pd.tev.stages[0].texCoord=0;pd.tev.stageCount=2;auto&s1=pd.tev.stages[1];s1.color={TevColorArg::Prev,TevColorArg::RasColor,TevColorArg::Half,TevColorArg::Zero};s1.alpha={TevAlphaArg::PrevA,TevAlphaArg::RasAlpha,TevAlphaArg::Konst,TevAlphaArg::Zero};s1.konstAlpha=KonstAlphaSel::FourEighths;return pd;}
 const PreparedDraw& batch_prepared(){static const PreparedDraw p=[](){PreparedDraw d{};d.vertices.resize(4);for(size_t i=0;i<quad.size();i++){auto&v=d.vertices[i];v.position[0]=quad[i].x;v.position[1]=quad[i].y;v.position[2]=quad[i].z;v.position[3]=1.f;std::copy(std::begin(quad[i].c0),std::end(quad[i].c0),v.color0);std::copy(std::begin(quad[i].c1),std::end(quad[i].c1),v.color1);v.texcoord[0][0]=quad[i].u;v.texcoord[0][1]=quad[i].v;v.texcoord[0][2]=1.f;}d.indices.assign(qidx.begin(),qidx.end());d.primitive=Primitive::Triangles;return d;}();return p;}
-void scene(Renderer&r,StreamingArena&batchArena,const Assets&a,unsigned phase,uint64_t frame){CommandStream cs;ClearCommand cc{};const float pulse=0.02f*(1.f+std::sin(frame*0.03f));cc.color={0.015f+pulse,0.025f,0.06f+phase*0.012f,1};cc.depth=1.f;cs.clear(cc);
+void scene(Renderer&r,StreamingArena&batchArena,const Assets&a,unsigned phase,uint64_t frame){CommandStream cs;ClearCommand cc{};const float pulse=0.04f*(1.f+std::sin(frame*0.03f));cc.color={0.03f+pulse,0.08f,0.18f+phase*0.012f,1};cc.depth=1.f;cs.clear(cc);
   if(phase==0){r.execute(cs);return;}
   if(phase==7&&a.efb){r.execute(cs);r.bind_efb(a.efb);CommandStream off;ClearCommand oc{};oc.color={0.06f,0.01f,0.08f,1};off.clear(oc);auto d=packet(a,a.tev2);d.viewport={0,0,480,272,0,1};d.scissor={0,0,480,272};d.textures[0].texture=a.tex;off.draw(d);r.execute(off);r.blit_efb(a.efb);return;}
   if(phase==1){auto d=packet(a,a.ras);d.indices={};d.indexCount=0;d.vertexCount=3;cs.draw(d);}

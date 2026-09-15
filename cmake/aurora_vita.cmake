@@ -7,6 +7,7 @@ option(AURORA_VITA_DIRECT_STREAM_WRITE "Write frame streaming data directly into
 option(AURORA_VITA_RUNTIME_MIPMAP_GENERATION "Generate missing texture mip chains at runtime on Vita" OFF)
 option(AURORA_VITA_NATIVE_CMPR "Upload GameCube CMPR through vitaGL's native DXT1 path" ON)
 option(AURORA_VITA_NATIVE_GX_TEXTURES "Upload exact GX I/I+A/RGB565 formats through native vitaGL texture formats" ON)
+option(AURORA_VITA_BUILD_PROBE "Build the standalone Vita 3D/backend performance probe" OFF)
 option(AURORA_VITA_BUILD_SDL3_PROBE "Build SDL3 native-platform + vitaGL coexistence probe" OFF)
 
 set(AURORA_VITA_BACKEND_SOURCES
@@ -131,6 +132,19 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
     )
 endif()
 
+if (VITA AND AURORA_VITA_BUILD_PROBE)
+    include("${VITASDK}/share/vita.cmake")
+    add_executable(aurora_vita_probe
+        ${PROJECT_SOURCE_DIR}/platforms/vita/probe/main.cpp
+    )
+    target_compile_features(aurora_vita_probe PRIVATE cxx_std_20)
+    target_compile_options(aurora_vita_probe PRIVATE -fshort-wchar)
+    target_link_libraries(aurora_vita_probe PRIVATE aurora::vita_backend)
+    vita_create_self(aurora_vita_probe.self aurora_vita_probe)
+    vita_create_vpk(aurora_vita_probe.vpk AURVPRB01 aurora_vita_probe.self
+        VERSION 01.00 NAME "Aurora Vita 3D Probe")
+endif ()
+
 if (VITA AND AURORA_VITA_SDL3_NATIVE AND AURORA_VITA_BUILD_SDL3_PROBE)
     include("${VITASDK}/share/vita.cmake")
     add_executable(aurora_vita_sdl3_probe
@@ -138,6 +152,7 @@ if (VITA AND AURORA_VITA_SDL3_NATIVE AND AURORA_VITA_BUILD_SDL3_PROBE)
     )
     target_compile_features(aurora_vita_sdl3_probe PRIVATE cxx_std_20)
     target_compile_definitions(aurora_vita_sdl3_probe PRIVATE AURORA_VITA_SDL3_NATIVE=1)
+    target_compile_options(aurora_vita_sdl3_probe PRIVATE -fshort-wchar)
     target_link_libraries(aurora_vita_sdl3_probe PRIVATE aurora::vita_backend ${AURORA_SDL3_TARGET})
     vita_create_self(aurora_vita_sdl3_probe.self aurora_vita_sdl3_probe)
     vita_create_vpk(aurora_vita_sdl3_probe.vpk AURVSDL01 aurora_vita_sdl3_probe.self
