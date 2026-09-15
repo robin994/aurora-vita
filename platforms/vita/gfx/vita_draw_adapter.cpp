@@ -21,6 +21,30 @@ bool build_indices(std::vector<uint16_t>&o,SourcePrimitive p,uint32_t n) noexcep
   return false;
 }
 
+bool build_indices_into(uint16_t* out,SourcePrimitive p,uint32_t n) noexcept {
+  if(!out&&n)return false;
+  size_t w=0;
+  const auto emit=[&](uint32_t v) noexcept {
+    if(v>std::numeric_limits<uint16_t>::max())return false;
+    out[w++]=static_cast<uint16_t>(v);return true;
+  };
+  const auto triangle=[&](uint32_t a,uint32_t b,uint32_t c) noexcept {
+    return emit(a)&&emit(b)&&emit(c);
+  };
+  switch(p){
+  case SourcePrimitive::Triangles:
+    if(n%3)return false;for(uint32_t i=0;i<n;++i)if(!emit(i))return false;return true;
+  case SourcePrimitive::Quads:
+    if(n%4)return false;for(uint32_t i=0;i<n;i+=4)if(!triangle(i,i+1,i+2)||!triangle(i+2,i+3,i))return false;return true;
+  case SourcePrimitive::TriangleFan:
+    for(uint32_t i=2;i<n;++i)if(!triangle(0,i-1,i))return false;return true;
+  case SourcePrimitive::TriangleStrip:
+    for(uint32_t i=2;i<n;++i){if(i&1){if(!triangle(i-1,i-2,i))return false;}else if(!triangle(i-2,i-1,i))return false;}return true;
+  case SourcePrimitive::Lines: case SourcePrimitive::LineStrip: case SourcePrimitive::Points:return false;
+  }
+  return false;
+}
+
 struct Clip {float x=0,y=0,z=0,w=1;};
 Clip project(const std::array<float,16>&m,const CanonicalVertex&v) noexcept {
   const float x=v.position[0],y=v.position[1],z=v.position[2],w=v.position[3];
@@ -106,6 +130,16 @@ struct FusedVertexContext {
   std::array<uint8_t,3> error{{0,0,0}}; // 1=decode, 2=transform
 };
 
+void pack_gpu_vertex(uint8_t* dst,const CanonicalVertex& src,const VertexLayout& layout) noexcept {
+  for(unsigned ai=0;ai<layout.count;++ai){
+    const auto&a=layout.attributes[ai];
+    if(a.location==0)std::memcpy(dst+a.offset,src.position,sizeof(src.position));
+    else if(a.location==1)std::memcpy(dst+a.offset,src.color0,sizeof(src.color0));
+    else if(a.location==2)std::memcpy(dst+a.offset,src.color1,sizeof(src.color1));
+    else if(a.location>=3&&a.location<3+MaxTextures)std::memcpy(dst+a.offset,src.texcoord[a.location-3],sizeof(src.texcoord[0]));
+  }
+}
+
 bool decode_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
   auto&ctx=*static_cast<FusedVertexContext*>(opaque);
   if(lane>=ctx.error.size())return false;
@@ -117,6 +151,37 @@ bool decode_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) 
     if(!transform_vertex_for_pipeline(v,*ctx.pipeline,*ctx.state,ctx.requirements)){
       ctx.error[lane]=2;return false;
     }
+  }
+  return true;
+}
+
+struct StreamedVertexContext {
+  const uint8_t* raw=nullptr;
+  size_t rawBytes=0;
+  const VertexDecodeLayout* layout=nullptr;
+  const PipelineDesc* pipeline=nullptr;
+  const VertexTransformState* state=nullptr;
+  VertexPipelineRequirements requirements{};
+  VertexSemanticMask decodeSemantics=AllVertexSemantics;
+  VertexLayout gpuLayout{};
+  uint8_t* destination=nullptr;
+  size_t gpuStride=0;
+  bool transformPosition=true;
+  std::array<uint8_t,3> error{{0,0,0}};
+};
+
+bool decode_transform_pack_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
+  auto&ctx=*static_cast<StreamedVertexContext*>(opaque);
+  if(lane>=ctx.error.size()||!ctx.destination||!ctx.gpuStride)return false;
+  for(size_t i=begin;i<end;++i){
+    CanonicalVertex v{};
+    if(!decode_vertex_into(ctx.raw,ctx.rawBytes,static_cast<uint32_t>(i),*ctx.layout,v,ctx.decodeSemantics)){
+      ctx.error[lane]=1;return false;
+    }
+    if(!transform_vertex_for_pipeline(v,*ctx.pipeline,*ctx.state,ctx.requirements,ctx.transformPosition)){
+      ctx.error[lane]=2;return false;
+    }
+    pack_gpu_vertex(ctx.destination+i*ctx.gpuStride,v,ctx.gpuLayout);
   }
   return true;
 }
@@ -212,15 +277,85 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
   }
   return true;
 }
+
+bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint8_t*raw,size_t bytes,uint32_t count,
+                                SourcePrimitive source,const uint16_t*rawIndices,uint32_t rawIndexCount,
+                                const VertexDecodeLayout&layout,const PipelineDesc&pipeline,
+                                const VertexTransformState&state,DrawUniforms*uniforms,Telemetry*telemetry) noexcept {
+  out=StreamedDraw{};
+  if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return false;}
+  if(source==SourcePrimitive::Points||source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip){
+    out.error=PrepareDrawError::UnsupportedLineExpansion;return false;
+  }
+  if(!layout.streamStride||size_t(count)*layout.streamStride>bytes){out.error=PrepareDrawError::VertexDecodeFailed;return false;}
+  const VertexLayout gpuLayout=gpu_vertex_layout(pipeline_texcoord_mask(pipeline),pipeline_raster_color_mask(pipeline));
+  if(gpuLayout.count<1||gpuLayout.attributes[0].stride==0){out.error=PrepareDrawError::InvalidInput;return false;}
+  const size_t gpuStride=gpuLayout.attributes[0].stride;
+  const auto footprint=estimate_draw_footprint(source,count,rawIndexCount,gpuStride);
+  if(!footprint.valid){out.error=PrepareDrawError::TooManyVertices;return false;}
+  if(rawIndexCount&&!rawIndices){out.error=PrepareDrawError::InvalidInput;return false;}
+  const auto requirements=vertex_pipeline_requirements(pipeline);
+  bool perVertexPnMatrix=false;
+  for(unsigned ai=0;ai<layout.count;++ai){
+    const auto&a=layout.attributes[ai];
+    if(a.semantic==VertexSemantic::PnMatrixIndex&&a.source!=VertexSource::None){perVertexPnMatrix=true;break;}
+  }
+  // Lighting and bump mapping consume model-view position on the CPU. All other
+  // ordinary draws with a fixed PN matrix can leave position in model space and
+  // fold that matrix into u_mvp once per draw instead of doing 12 multiply-adds
+  // for every vertex on the CPU.
+  const bool gpuPositionTransform=!perVertexPnMatrix&&!requirements.needNormal&&
+                                  state.currentPnMatrix<state.postexMatrices.size();
+  if(uniforms)uniforms->mvp=gpuPositionTransform
+      ?compose_model_projection(state.projection,state.postexMatrices[state.currentPnMatrix])
+      :state.projection;
+
+  void* vertexDst=nullptr;
+  out.vertices=arena.reserve_vertices(footprint.vertexBytes,gpuStride,&vertexDst);
+  if(!out.vertices.buffer||!vertexDst){out.error=PrepareDrawError::StreamingOverflow;return false;}
+  out.vertexCount=footprint.vertexCount;
+  out.indexCount=footprint.indexCount;
+  out.primitive=Primitive::Triangles;
+  out.positionIsClipSpace=false;
+
+  StreamedVertexContext fused{raw,bytes,&layout,&pipeline,&state,requirements,
+                              decode_semantics_for_pipeline(pipeline,requirements),gpuLayout,
+                              static_cast<uint8_t*>(vertexDst),gpuStride,!gpuPositionTransform};
+  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
+    if(!cpu_parallel_for(count,decode_transform_pack_range,&fused)){
+      bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;
+      out.error=transformFailed?PrepareDrawError::VertexTransformFailed:PrepareDrawError::VertexDecodeFailed;
+      return false;
+    }
+  }
+
+  if(footprint.indexCount){
+    void* indexDst=nullptr;
+    out.indices=arena.reserve_indices(footprint.indexBytes,alignof(uint16_t),&indexDst);
+    if(!out.indices.buffer||!indexDst){out.error=PrepareDrawError::StreamingOverflow;return false;}
+    auto*dst=static_cast<uint16_t*>(indexDst);
+    { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
+      if(rawIndexCount){
+        for(uint32_t i=0;i<rawIndexCount;++i){if(rawIndices[i]>=count){out.error=PrepareDrawError::InvalidInput;return false;}dst[i]=rawIndices[i];}
+      }else if(!build_indices_into(dst,source,count)){
+        out.error=PrepareDrawError::TooManyVertices;return false;
+      }
+    }
+  }
+  return true;
+}
 PreparedDraw prepare_draw(const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry) noexcept {
   PreparedDraw out{};
   (void)prepare_draw_into(out,raw,bytes,count,source,layout,pipeline,state,uniforms,expansion,telemetry);
   return out;
 }
 uint64_t resolve_draw_pipeline(Renderer&renderer,const PreparedDraw&prepared,const PipelineDesc&pipeline,Telemetry*telemetry) noexcept {
+  return resolve_draw_pipeline(renderer,prepared.primitive,prepared.positionIsClipSpace,pipeline,telemetry);
+}
+uint64_t resolve_draw_pipeline(Renderer&renderer,Primitive primitive,bool positionIsClipSpace,const PipelineDesc&pipeline,Telemetry*telemetry) noexcept {
   auto desc=pipeline;
-  desc.primitive=prepared.primitive;
-  desc.positionIsClipSpace=prepared.positionIsClipSpace;
+  desc.primitive=primitive;
+  desc.positionIsClipSpace=positionIsClipSpace;
   desc.layout=gpu_vertex_layout(pipeline_texcoord_mask(desc),pipeline_raster_color_mask(desc));
   ScopedTelemetryPhase phase(telemetry,TelemetryPhase::PipelineResolve);
   return renderer.create_pipeline(desc);
@@ -239,26 +374,22 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
     vb=arena.reserve_vertices(prepared.vertices.size()*gpuStride,gpuStride,&vertexDst);if(!vb.buffer||!vertexDst)return fail(PrepareDrawError::StreamingOverflow);
     auto* gpu=static_cast<uint8_t*>(vertexDst);
     for(size_t i=0;i<prepared.vertices.size();++i){
-      const auto&src=prepared.vertices[i];uint8_t*dst=gpu+i*gpuStride;
-      for(unsigned ai=0;ai<gpuLayout.count;ai++){
-        const auto&a=gpuLayout.attributes[ai];
-        if(a.location==0)std::memcpy(dst+a.offset,src.position,sizeof(src.position));
-        else if(a.location==1)std::memcpy(dst+a.offset,src.color0,sizeof(src.color0));
-        else if(a.location==2)std::memcpy(dst+a.offset,src.color1,sizeof(src.color1));
-        else if(a.location>=3&&a.location<3+MaxTextures)std::memcpy(dst+a.offset,src.texcoord[a.location-3],sizeof(src.texcoord[0]));
-      }
+      pack_gpu_vertex(gpu+i*gpuStride,prepared.vertices[i],gpuLayout);
     }
     if(!prepared.indices.empty()){
-      if(vb.offset%gpuStride!=0)return fail(PrepareDrawError::StreamingOverflow);
-      const uint32_t base=vb.offset/static_cast<uint32_t>(gpuStride);
-      if(base>std::numeric_limits<uint16_t>::max())return fail(PrepareDrawError::TooManyVertices);
-      for(const uint16_t idx:prepared.indices)if(base+idx>std::numeric_limits<uint16_t>::max())return fail(PrepareDrawError::TooManyVertices);
-      ib=arena.upload_rebased_indices(prepared.indices.data(),prepared.indices.size(),base);if(!ib.buffer)return fail(PrepareDrawError::StreamingOverflow);
+      // Keep indices relative to this draw's vertex slice.  Rebasing U16 indices
+      // against the whole streaming VBO only works when every preceding draw has
+      // the same stride; Aurora intentionally packs pipeline-specific 28/40/etc.
+      // byte vertices into the same page.  Relative indices let the renderer use
+      // `vertices.offset` as the attribute base, remove the artificial 65k-vertex
+      // page limit, and make mixed-stride streaming correct.
+      ib=arena.upload_indices(prepared.indices.data(),prepared.indices.size()*sizeof(uint16_t),alignof(uint16_t));
+      if(!ib.buffer)return fail(PrepareDrawError::StreamingOverflow);
     }
   }
   uint64_t key=resolvedPipelineKey?resolvedPipelineKey:resolve_draw_pipeline(renderer,prepared,pipeline,telemetry);
   if(!key)return fail(PrepareDrawError::PipelineFailed);
-  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild); DrawPacket d{};d.pipelineKey=key;d.vertices=vb;d.indices=ib;d.vertexCount=static_cast<uint32_t>(prepared.vertices.size());d.indexCount=static_cast<uint32_t>(prepared.indices.size());d.absoluteVertexIndices=!prepared.indices.empty();d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
+  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild); DrawPacket d{};d.pipelineKey=key;d.vertices=vb;d.indices=ib;d.vertexCount=static_cast<uint32_t>(prepared.vertices.size());d.indexCount=static_cast<uint32_t>(prepared.indices.size());d.absoluteVertexIndices=false;d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
     if(auto*tail=stream.tail_draw();tail&&batch_compatible(*tail,d)){
       tail->vertices.size=(d.vertices.offset+d.vertices.size)-tail->vertices.offset;
       tail->indices.size+=d.indices.size;
@@ -267,6 +398,21 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
     }else stream.draw(d);
   }
   if(err) *err=PrepareDrawError::None;
+  return true;
+}
+
+bool enqueue_streamed_draw(CommandStream&stream,const StreamedDraw&prepared,uint64_t resolvedPipelineKey,
+                           const DrawUniforms&uniforms,const Viewport&viewport,const Scissor&scissor,
+                           const std::array<TextureBinding,MaxTextures>&textures,PrepareDrawError*err) noexcept {
+  auto fail=[&](PrepareDrawError e){if(err)*err=e;return false;};
+  if(!prepared.ok()||!prepared.vertices.buffer||!prepared.vertexCount||!resolvedPipelineKey)
+    return fail(prepared.error==PrepareDrawError::None?PrepareDrawError::InvalidInput:prepared.error);
+  DrawPacket d{};
+  d.pipelineKey=resolvedPipelineKey;d.vertices=prepared.vertices;d.indices=prepared.indices;
+  d.vertexCount=prepared.vertexCount;d.indexCount=prepared.indexCount;d.absoluteVertexIndices=false;
+  d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
+  stream.draw(d);
+  if(err)*err=PrepareDrawError::None;
   return true;
 }
 } // namespace aurora::vita::gfx

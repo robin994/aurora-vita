@@ -89,4 +89,25 @@ TEST(VitaVertexPipeline, DynamicPnMatrixRemainsLimitedToPositionPalette) {
   EXPECT_FALSE(transform_vertex_for_pipeline(vertex,pipeline,state,requirements));
 }
 
+TEST(VitaVertexPipeline, ComposedModelProjectionMatchesCpuPositionTransform) {
+  Matrix3x4 model{};
+  model.v={{2.f,0.f,0.f,5.f, 0.f,3.f,0.f,-7.f, 0.f,0.f,4.f,11.f}};
+  const std::array<float,16> projection{{
+      1.5f,0.f,0.f,0.f,
+      0.f,2.f,0.f,0.f,
+      0.f,0.f,0.5f,0.f,
+      0.25f,-0.5f,1.f,1.f}};
+  const auto combined=compose_model_projection(projection,model);
+  const std::array<float,4> p{{1.f,2.f,3.f,1.f}};
+  const auto apply=[](const std::array<float,16>&m,const std::array<float,4>&v){
+    std::array<float,4> o{};
+    for(unsigned row=0;row<4;++row)for(unsigned k=0;k<4;++k)o[row]+=m[k*4+row]*v[k];
+    return o;
+  };
+  const std::array<float,4> modelPos{{7.f,-1.f,23.f,1.f}};
+  const auto expected=apply(projection,modelPos);
+  const auto actual=apply(combined,p);
+  for(unsigned i=0;i<4;++i)EXPECT_FLOAT_EQ(actual[i],expected[i]);
+}
+
 } // namespace

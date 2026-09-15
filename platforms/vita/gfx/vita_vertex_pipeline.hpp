@@ -34,9 +34,15 @@ struct VertexPipelineRequirements {
 };
 
 VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipeline) noexcept;
+// Compose Aurora's row-vector 3x4 model/view transform with the column-major
+// projection consumed by the Vita GLSL shader. This lets fixed-matrix draws keep
+// model-space positions in the VBO and move the position transform onto SGX.
+std::array<float,16> compose_model_projection(const std::array<float,16>& projection,
+                                              const Matrix3x4& modelView) noexcept;
 bool transform_vertex_for_pipeline(CanonicalVertex& vertex, const PipelineDesc& pipeline,
                                    const VertexTransformState& state,
-                                   VertexPipelineRequirements requirements) noexcept;
+                                   VertexPipelineRequirements requirements,
+                                   bool transformPosition=true) noexcept;
 
 // Correctness-first CPU implementation of the Aurora GX vertex shader semantics.
 // It resolves per-vertex position matrices, vertex lighting and texgen into the canonical Vita stream.

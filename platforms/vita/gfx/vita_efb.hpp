@@ -41,9 +41,16 @@ private:
   std::array<unsigned,CopyProgramCount> blitPrograms_{};
   std::array<int,CopyProgramCount> blitTex_{};
   unsigned blitVbo_=0;
+  // Reusable GPU capture target for copy formats that need conversion. vitaGL's
+  // glCopyTexImage2D currently performs a CPU glReadPixels + re-upload, so using
+  // an FBO here keeps the copy on GXM before the conversion shader runs.
+  unsigned captureFbo_=0,captureTexture_=0;
+  uint32_t captureWidth_=0,captureHeight_=0;
+  size_t captureBytes_=0;
   unsigned boundFbo_=0; // mirror GL_FRAMEBUFFER binding so helper allocations can restore the source target.
   size_t bytes_=0,highWaterBytes_=0;
   bool ensure_blitter(EfbCopyFormat format) noexcept;
+  bool ensure_capture_target(uint32_t width,uint32_t height) noexcept;
   bool draw_texture(unsigned texture,uint32_t width,uint32_t height,EfbCopyFormat format=EfbCopyFormat::Passthrough) noexcept;
 };
 } // namespace aurora::vita::gfx

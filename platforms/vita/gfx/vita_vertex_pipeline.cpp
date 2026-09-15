@@ -76,7 +76,7 @@ V3 normalize3(V3 v) noexcept{return norm(v);}
 
 bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
                       const VertexTransformState& state,bool needNormal,bool needBumpBasis,uint8_t colorMask,
-                      uint8_t texgenMask) noexcept {
+                      uint8_t texgenMask,bool transformPosition) noexcept {
   const CanonicalVertex in=v;
   const bool usesCurrentPn=in.pnMatrixIndex==0xff;
   const unsigned pn=usesCurrentPn?state.currentPnMatrix:in.pnMatrixIndex;
@@ -86,7 +86,9 @@ bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
   // the ten position matrices, matching the upstream shader layout.
   if(pn>=state.postexMatrices.size()||(!usesCurrentPn&&pn>=state.normalMatrices.size()))return false;
   const unsigned normalPn=std::min<unsigned>(pn,state.normalMatrices.size()-1);
-  const V3 mvPos=transform(state.postexMatrices[pn],{in.position[0],in.position[1],in.position[2],1.f});
+  V3 mvPos{};
+  if(transformPosition||needNormal||needBumpBasis)
+    mvPos=transform(state.postexMatrices[pn],{in.position[0],in.position[1],in.position[2],1.f});
   V3 mvNrm{};
   if(needNormal)mvNrm=norm_if_nonzero(transform_dir(state.normalMatrices[normalPn],make3(in.normal)));
   V3 mvBin{},mvTan{};
@@ -96,7 +98,7 @@ bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
   }
   // Normals/tangent basis are CPU-only intermediates on Vita. Do not write them
   // back when the generated shader will only consume position/colors/texcoords.
-  v.position[0]=mvPos.x;v.position[1]=mvPos.y;v.position[2]=mvPos.z;
+  if(transformPosition){v.position[0]=mvPos.x;v.position[1]=mvPos.y;v.position[2]=mvPos.z;}
   for(unsigned base=0;base<2;base++){
     if((colorMask&(1u<<base))==0)continue;
     const V4 rgb=light_channel(in,pipeline.colorChannels[base],base,state,mvPos,mvNrm);const V4 alpha=light_channel(in,pipeline.colorChannels[base+2],base+2,state,mvPos,mvNrm);uint8_t*out=base?v.color1:v.color0;out[0]=byte(rgb.x);out[1]=byte(rgb.y);out[2]=byte(rgb.z);out[3]=byte(alpha.w);
@@ -134,7 +136,7 @@ bool transform_range(void* opaque, size_t begin, size_t end, uint32_t) noexcept 
   auto& ctx = *static_cast<TransformContext*>(opaque);
   for (size_t i = begin; i < end; ++i) {
     if (!transform_vertex(ctx.vertices[i], *ctx.pipeline, *ctx.state,ctx.needNormal,ctx.needBumpBasis,
-                          ctx.colorMask,ctx.texgenMask)) return false;
+                          ctx.colorMask,ctx.texgenMask,true)) return false;
   }
   return true;
 }
@@ -154,11 +156,30 @@ VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipe
   return r;
 }
 
+std::array<float,16> compose_model_projection(const std::array<float,16>& projection,
+                                              const Matrix3x4& modelView) noexcept {
+  // Matrix3x4 is stored as three output rows for row-vector GX math. Convert it
+  // to the equivalent OpenGL column-major mat4 first, then calculate P * M.
+  const auto&m=modelView.v;
+  const std::array<float,16> model{{
+      m[0],m[4],m[8],0.f,
+      m[1],m[5],m[9],0.f,
+      m[2],m[6],m[10],0.f,
+      m[3],m[7],m[11],1.f}};
+  std::array<float,16> out{};
+  for(unsigned col=0;col<4;++col)for(unsigned row=0;row<4;++row){
+    float v=0.f;
+    for(unsigned k=0;k<4;++k)v+=projection[k*4+row]*model[col*4+k];
+    out[col*4+row]=v;
+  }
+  return out;
+}
+
 bool transform_vertex_for_pipeline(CanonicalVertex& vertex,const PipelineDesc& pipeline,
                                    const VertexTransformState& state,
-                                   VertexPipelineRequirements requirements) noexcept {
+                                   VertexPipelineRequirements requirements,bool transformPosition) noexcept {
   return transform_vertex(vertex,pipeline,state,requirements.needNormal,requirements.needBumpBasis,
-                          requirements.colorMask,requirements.texgenMask);
+                          requirements.colorMask,requirements.texgenMask,transformPosition);
 }
 
 bool run_vertex_pipeline(std::vector<CanonicalVertex>& vertices,const PipelineDesc& pipeline,const VertexTransformState& state,DrawUniforms* uniforms) noexcept {

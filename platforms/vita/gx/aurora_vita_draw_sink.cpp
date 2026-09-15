@@ -406,14 +406,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // the 2 MiB arena and then spent hundreds of milliseconds preparing hundreds
   // of draws that could only fail at enqueue time.
   const auto arenaCanFit=[&]() noexcept {
-    if(!arena_->can_reserve(footprint.vertexBytes,gpuStride,footprint.indexBytes,alignof(uint16_t)))return false;
-    if(footprint.indexBytes){
-      const size_t used=arena_->vertex_used();
-      const size_t rem=used%gpuStride;
-      const size_t aligned=rem?used+(gpuStride-rem):used;
-      if(aligned/gpuStride+footprint.vertexCount>static_cast<size_t>(std::numeric_limits<uint16_t>::max())+1u)return false;
-    }
-    return true;
+    return arena_->can_reserve(footprint.vertexBytes,gpuStride,footprint.indexBytes,alignof(uint16_t));
   };
   if(!arenaCanFit()){
     flush();
@@ -436,29 +429,51 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
 #endif
   }
-  (void)gfx::prepare_draw_into(preparedScratch_,rawVertices,rawBytes,vertexCount,source,layout,
-                              pipeline,vertexState,&uniforms,expansion,telemetry_);
   auto& prepared=preparedScratch_;
-  if (prepared.ok() && rawIndices && indexCount) {
-    prepared.indices.assign(rawIndices, rawIndices + indexCount);
-    for (const uint16_t index : prepared.indices) {
-      if (index >= prepared.vertices.size()) {
-        result.drawError = gfx::PrepareDrawError::InvalidInput;
-        if (coverage_) coverage_->unsupported(index, "indexed draw out of range");
-        if (telemetry_) telemetry_->unsupported();
-        if (strictUnsupported_) strictFailed_ = true;
-        return result;
+  gfx::StreamedDraw streamed{};
+  const bool expandedPrimitive=source==gfx::SourcePrimitive::Points||source==gfx::SourcePrimitive::Lines||
+                               source==gfx::SourcePrimitive::LineStrip;
+  // Geometry diagnostics need the canonical array for readable samples. Normal
+  // rendering bypasses it for primitives whose vertex count does not expand.
+  const bool directStreamed=!expandedPrimitive&&!verboseGeometryDiagnostics_;
+  if(directStreamed){
+    (void)gfx::prepare_streamed_draw_into(streamed,*arena_,rawVertices,rawBytes,vertexCount,source,
+                                         rawIndices,indexCount,layout,pipeline,vertexState,&uniforms,telemetry_);
+    if(!streamed.ok()){
+      result.drawError=streamed.error;
+      if(coverage_)coverage_->unsupported(static_cast<uint64_t>(streamed.error),"prepare_streamed_draw failed");
+      if(telemetry_)telemetry_->unsupported();
+      if(strictUnsupported_)strictFailed_=true;
+      return result;
+    }
+  }else{
+    (void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
+                                pipeline,vertexState,&uniforms,expansion,telemetry_);
+    if (prepared.ok() && rawIndices && indexCount) {
+      prepared.indices.assign(rawIndices, rawIndices + indexCount);
+      for (const uint16_t index : prepared.indices) {
+        if (index >= prepared.vertices.size()) {
+          result.drawError = gfx::PrepareDrawError::InvalidInput;
+          if (coverage_) coverage_->unsupported(index, "indexed draw out of range");
+          if (telemetry_) telemetry_->unsupported();
+          if (strictUnsupported_) strictFailed_ = true;
+          return result;
+        }
       }
+    }
+    if (!prepared.ok()) {
+      result.drawError = prepared.error;
+      if (coverage_) coverage_->unsupported(static_cast<uint64_t>(prepared.error), "prepare_draw failed");
+      if (telemetry_) telemetry_->unsupported();
+      if (strictUnsupported_) strictFailed_ = true;
+      return result;
     }
   }
 
-  if (!prepared.ok()) {
-    result.drawError = prepared.error;
-    if (coverage_) coverage_->unsupported(static_cast<uint64_t>(prepared.error), "prepare_draw failed");
-    if (telemetry_) telemetry_->unsupported();
-    if (strictUnsupported_) strictFailed_ = true;
-    return result;
-  }
+  const gfx::Primitive preparedPrimitive=directStreamed?streamed.primitive:prepared.primitive;
+  const bool preparedClipSpace=directStreamed?streamed.positionIsClipSpace:prepared.positionIsClipSpace;
+  const uint32_t preparedVertexCount=directStreamed?streamed.vertexCount:static_cast<uint32_t>(prepared.vertices.size());
+  const uint32_t preparedIndexCount=directStreamed?streamed.indexCount:static_cast<uint32_t>(prepared.indices.size());
 
 #if defined(__vita__)
   if(verboseGeometryDiagnostics_)log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
@@ -534,7 +549,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
 
   if (trace_) {
     trace_->record(translatedPipelineKey, integration::trace_hash_bytes(rawVertices, rawBytes),
-                   static_cast<uint32_t>(rawBytes), vertexCount, static_cast<uint32_t>(prepared.indices.size()),
+                   static_cast<uint32_t>(rawBytes), vertexCount, preparedIndexCount,
                    primitive, fmt, result.fallbackTextureMask, static_cast<uint8_t>(result.warnings));
   }
 
@@ -542,22 +557,30 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto statsBeforeEnqueue = renderer_->stats();
   uint64_t resolvedPipelineKey = 0;
   if (queuedPipelineValid_ && translatedPipelineKey == queuedTranslatedPipelineKey_ &&
-      prepared.primitive == queuedPrimitive_ &&
-      prepared.positionIsClipSpace == queuedPositionIsClipSpace_) {
+      preparedPrimitive == queuedPrimitive_ &&
+      preparedClipSpace == queuedPositionIsClipSpace_) {
     resolvedPipelineKey = queuedResolvedPipelineKey_;
   } else {
-    resolvedPipelineKey = gfx::resolve_draw_pipeline(*renderer_, prepared, pipeline, telemetry_);
+    resolvedPipelineKey = gfx::resolve_draw_pipeline(*renderer_, preparedPrimitive, preparedClipSpace, pipeline, telemetry_);
     if (resolvedPipelineKey) {
       queuedTranslatedPipelineKey_ = translatedPipelineKey;
       queuedResolvedPipelineKey_ = resolvedPipelineKey;
-      queuedPrimitive_ = prepared.primitive;
-      queuedPositionIsClipSpace_ = prepared.positionIsClipSpace;
+      queuedPrimitive_ = preparedPrimitive;
+      queuedPositionIsClipSpace_ = preparedClipSpace;
       queuedPipelineValid_ = true;
     }
   }
-  if (!gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipeline, uniforms,
-                         translate_viewport(), translate_scissor(), bindings, &error, telemetry_,
-                         resolvedPipelineKey)) {
+  bool enqueued=false;
+  if(directStreamed){
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
+    enqueued=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
+                                        translate_viewport(),translate_scissor(),bindings,&error);
+  }else{
+    enqueued=gfx::enqueue_draw(*renderer_,*arena_,stream_,prepared,pipeline,uniforms,
+                               translate_viewport(),translate_scissor(),bindings,&error,telemetry_,
+                               resolvedPipelineKey);
+  }
+  if (!enqueued) {
     result.drawError = error;
     if (coverage_) coverage_->unsupported(static_cast<uint64_t>(error), "enqueue_draw failed");
     if (telemetry_) { telemetry_->arena_overflow(); telemetry_->unsupported(); }
@@ -572,7 +595,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     for (uint32_t i = 0; i < missDelta; ++i) telemetry_->pipeline(false);
   }
   ++submittedDraws_;
-  if (telemetry_) telemetry_->add_draw(static_cast<uint32_t>(prepared.vertices.size()), static_cast<uint32_t>(prepared.indices.size()), static_cast<uint32_t>(prepared.indices.empty() ? prepared.vertices.size() / 3 : prepared.indices.size() / 3));
+  if (telemetry_) telemetry_->add_draw(preparedVertexCount,preparedIndexCount,
+                                       preparedIndexCount?preparedIndexCount/3:preparedVertexCount/3);
   result.ok = true;
   result.drawError = gfx::PrepareDrawError::None;
   return result;

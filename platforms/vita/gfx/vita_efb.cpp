@@ -236,6 +236,41 @@ bool EfbManager::ensure_blitter(EfbCopyFormat format) noexcept {
   return true;
 }
 
+bool EfbManager::ensure_capture_target(uint32_t w,uint32_t h) noexcept {
+  if(!w||!h||w>2048u||h>2048u||static_cast<size_t>(w)>SIZE_MAX/(static_cast<size_t>(h)*4u))return false;
+#if defined(__vita__)
+  if(captureFbo_&&captureTexture_&&captureWidth_==w&&captureHeight_==h)return true;
+  if(captureTexture_){GLuint t=captureTexture_;glDeleteTextures(1,&t);captureTexture_=0;}
+  if(captureFbo_){GLuint f=captureFbo_;glDeleteFramebuffers(1,&f);captureFbo_=0;}
+  if(captureBytes_<=bytes_)bytes_-=captureBytes_;else bytes_=0;
+  captureBytes_=0;captureWidth_=captureHeight_=0;
+
+  const GLuint previousFbo=boundFbo_;
+  GLuint fbo=0,tex=0;
+  glGenFramebuffers(1,&fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER,fbo);
+  glGenTextures(1,&tex);
+  glBindTexture(GL_TEXTURE_2D,tex);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+  const size_t pixelBytes=static_cast<size_t>(w)*h*4u;
+  std::unique_ptr<uint8_t[]> initialPixels(new(std::nothrow) uint8_t[pixelBytes]());
+  if(!initialPixels){if(tex)glDeleteTextures(1,&tex);if(fbo)glDeleteFramebuffers(1,&fbo);glBindFramebuffer(GL_FRAMEBUFFER,previousFbo);return false;}
+  glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,initialPixels.get());
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,tex,0);
+  const bool ok=vglGetTexDataPointer(GL_TEXTURE_2D)!=nullptr&&glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
+  glBindFramebuffer(GL_FRAMEBUFFER,previousFbo);
+  if(!ok){if(tex)glDeleteTextures(1,&tex);if(fbo)glDeleteFramebuffers(1,&fbo);return false;}
+  captureFbo_=fbo;captureTexture_=tex;captureWidth_=w;captureHeight_=h;captureBytes_=pixelBytes;
+  bytes_+=pixelBytes;highWaterBytes_=std::max(highWaterBytes_,bytes_);
+#else
+  captureWidth_=w;captureHeight_=h;
+#endif
+  return true;
+}
+
 bool EfbManager::draw_texture(unsigned texture, uint32_t width, uint32_t height, EfbCopyFormat format) noexcept {
   if (!ensure_blitter(format)) return false;
 #if defined(__vita__)
@@ -325,28 +360,25 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
     return dst;
   }
 
-  // GX formats that require channel/quantization conversion retain the shader
-  // path. This keeps the optimization from changing copy-format semantics.
-  GLuint capture = 0;
-  glGenTextures(1, &capture);
-  if (!capture) { destroy(dst); return InvalidHandle; }
-  glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
-  boundFbo_ = sourceFbo;
-  glBindTexture(GL_TEXTURE_2D, capture);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, srcX, srcY, srcWidth, srcHeight, 0);
-  if (vglGetTexDataPointer(GL_TEXTURE_2D) == nullptr || !bind(dst)) {
-    glDeleteTextures(1, &capture);
-    glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
-    boundFbo_ = sourceFbo;
-    destroy(dst);
-    return InvalidHandle;
+  // Conversion copies used to call vitaGL's glCopyTexImage2D here. Current
+  // vitaGL implements that API as glReadPixels to CPU RAM followed by a texture
+  // upload, which turns a common GXCopyTex into an ~80 ms CPU/GPU round-trip on
+  // Vita. Blit into a reusable sampled FBO instead, then keep the existing
+  // conversion shader so GX channel/quantization semantics remain unchanged.
+  if(!ensure_capture_target(srcWidth,srcHeight)) { destroy(dst); return InvalidHandle; }
+  if(scissorEnabled)glDisable(GL_SCISSOR_TEST);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER,sourceFbo);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER,captureFbo_);
+  while(glGetError()!=GL_NO_ERROR){}
+  glBlitFramebuffer(srcX,srcY,srcX+static_cast<GLint>(srcWidth),srcY+static_cast<GLint>(srcHeight),
+                    0,0,static_cast<GLint>(srcWidth),static_cast<GLint>(srcHeight),
+                    GL_COLOR_BUFFER_BIT,GL_NEAREST);
+  const GLenum captureError=glGetError();
+  if(scissorEnabled)glEnable(GL_SCISSOR_TEST);
+  if(captureError!=GL_NO_ERROR||!bind(dst)){
+    glBindFramebuffer(GL_FRAMEBUFFER,sourceFbo);boundFbo_=sourceFbo;destroy(dst);return InvalidHandle;
   }
-  const bool ok = draw_texture(capture, dstWidth, dstHeight, format);
-  glDeleteTextures(1, &capture);
+  const bool ok = draw_texture(captureTexture_, dstWidth, dstHeight, format);
   glBindFramebuffer(GL_FRAMEBUFFER, sourceFbo);
   boundFbo_ = sourceFbo;
   if (!ok) { destroy(dst); return InvalidHandle; }
@@ -478,6 +510,8 @@ void EfbManager::destroy(Handle h) noexcept {
 void EfbManager::clear() noexcept {
   while (!map_.empty()) destroy(map_.begin()->first);
 #if defined(__vita__)
+  if(captureTexture_){GLuint t=captureTexture_;glDeleteTextures(1,&t);}
+  if(captureFbo_){GLuint f=captureFbo_;glDeleteFramebuffers(1,&f);}
   if (blitVbo_) {
     GLuint b = blitVbo_;
     glDeleteBuffers(1, &b);
@@ -486,6 +520,9 @@ void EfbManager::clear() noexcept {
     if (program) glDeleteProgram(program);
   }
 #endif
+  captureFbo_=captureTexture_=0;
+  captureWidth_=captureHeight_=0;
+  captureBytes_=0;
   blitVbo_ = 0;
   blitPrograms_.fill(0);
   blitTex_.fill(-1);
