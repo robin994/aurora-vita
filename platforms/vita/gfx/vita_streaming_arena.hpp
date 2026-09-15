@@ -65,12 +65,10 @@ private:
   };
   BufferSlice reserve(bool vertex, size_t bytes, size_t alignment, void** writable) noexcept;
   BufferSlice upload(bool vertex, const void* data, size_t bytes, size_t alignment) noexcept;
-  bool activate_slot(uint32_t index) noexcept;
   static size_t align_up(size_t value,size_t alignment) noexcept;
   BufferPool& pool_;
   StreamingArenaConfig cfg_{};
   std::vector<Slot> slots_{};
-  std::vector<uint8_t> usedSinceSync_{};
   std::vector<uint8_t> vertexStage_{};
   std::vector<uint8_t> indexStage_{};
   uint32_t current_=0;
