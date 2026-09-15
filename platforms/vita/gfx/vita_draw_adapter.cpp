@@ -295,20 +295,11 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
   if(!footprint.valid){out.error=PrepareDrawError::TooManyVertices;return false;}
   if(rawIndexCount&&!rawIndices){out.error=PrepareDrawError::InvalidInput;return false;}
   const auto requirements=vertex_pipeline_requirements(pipeline);
-  bool perVertexPnMatrix=false;
-  for(unsigned ai=0;ai<layout.count;++ai){
-    const auto&a=layout.attributes[ai];
-    if(a.semantic==VertexSemantic::PnMatrixIndex&&a.source!=VertexSource::None){perVertexPnMatrix=true;break;}
-  }
-  // Lighting and bump mapping consume model-view position on the CPU. All other
-  // ordinary draws with a fixed PN matrix can leave position in model space and
-  // fold that matrix into u_mvp once per draw instead of doing 12 multiply-adds
-  // for every vertex on the CPU.
-  const bool gpuPositionTransform=!perVertexPnMatrix&&!requirements.needNormal&&
-                                  state.currentPnMatrix<state.postexMatrices.size();
-  if(uniforms)uniforms->mvp=gpuPositionTransform
-      ?compose_model_projection(state.projection,state.postexMatrices[state.currentPnMatrix])
-      :state.projection;
+  // Keep the GX position transform on the correctness-first CPU path. Folding a
+  // fixed PN matrix into u_mvp looked equivalent for simple test matrices, but
+  // real GX streams can change XF/current-matrix semantics independently of the
+  // generated pipeline and produced visibly corrupted model geometry on Vita.
+  if(uniforms)uniforms->mvp=state.projection;
 
   void* vertexDst=nullptr;
   out.vertices=arena.reserve_vertices(footprint.vertexBytes,gpuStride,&vertexDst);
@@ -320,7 +311,7 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
 
   StreamedVertexContext fused{raw,bytes,&layout,&pipeline,&state,requirements,
                               decode_semantics_for_pipeline(pipeline,requirements),gpuLayout,
-                              static_cast<uint8_t*>(vertexDst),gpuStride,!gpuPositionTransform};
+                              static_cast<uint8_t*>(vertexDst),gpuStride,true};
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
     if(!cpu_parallel_for(count,decode_transform_pack_range,&fused)){
       bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;

@@ -156,25 +156,6 @@ VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipe
   return r;
 }
 
-std::array<float,16> compose_model_projection(const std::array<float,16>& projection,
-                                              const Matrix3x4& modelView) noexcept {
-  // Matrix3x4 is stored as three output rows for row-vector GX math. Convert it
-  // to the equivalent OpenGL column-major mat4 first, then calculate P * M.
-  const auto&m=modelView.v;
-  const std::array<float,16> model{{
-      m[0],m[4],m[8],0.f,
-      m[1],m[5],m[9],0.f,
-      m[2],m[6],m[10],0.f,
-      m[3],m[7],m[11],1.f}};
-  std::array<float,16> out{};
-  for(unsigned col=0;col<4;++col)for(unsigned row=0;row<4;++row){
-    float v=0.f;
-    for(unsigned k=0;k<4;++k)v+=projection[k*4+row]*model[col*4+k];
-    out[col*4+row]=v;
-  }
-  return out;
-}
-
 bool transform_vertex_for_pipeline(CanonicalVertex& vertex,const PipelineDesc& pipeline,
                                    const VertexTransformState& state,
                                    VertexPipelineRequirements requirements,bool transformPosition) noexcept {
