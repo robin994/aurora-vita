@@ -1,5 +1,6 @@
 #include "../aurora_vita_backend.hpp"
 #include "../gfx/vita_draw_adapter.hpp"
+#include "../gfx/vita_gl_util.hpp"
 #include "../gfx/vita_renderer.hpp"
 #include "../gfx/vita_pipeline_key.hpp"
 #include "../gfx/vita_streaming_arena.hpp"
@@ -35,6 +36,37 @@ VertexLayout layout(){VertexLayout l{};l.count=4;l.attributes[0]={0,3,VertexScal
 PipelineDesc base_pipe(){PipelineDesc p{};p.layout=layout();p.cull=CullMode::None;p.depthTest=true;p.depthWrite=true;p.depthFunc=Compare::LessEqual;p.reversedZ=false;p.tev.stageCount=1;auto&s=p.tev.stages[0];s.color={TevColorArg::Zero,TevColorArg::RasColor,TevColorArg::One,TevColorArg::Zero};s.alpha={TevAlphaArg::Zero,TevAlphaArg::RasAlpha,TevAlphaArg::Konst,TevAlphaArg::Zero};s.konstAlpha=KonstAlphaSel::One;return p;}
 std::array<uint8_t,32> rgb565_tex(){std::array<uint8_t,32> d{};for(int y=0;y<4;y++)for(int x=0;x<4;x++){uint16_t r=(x*31/3),g=(y*63/3),b=((x+y)*31/6);uint16_t v=(r<<11)|(g<<5)|b;size_t o=(y*4+x)*2;d[o]=v>>8;d[o+1]=v&255;}return d;}
 struct Assets {Handle vb=0,ib=0,tex=0,efb=0;uint64_t ras=0,texp=0,tev2=0,blend=0,multi=0;};
+#if defined(__vita__)
+void probe_status(bool truncate,const char* fmt,...) noexcept;
+void raw_gl_triangle() noexcept {
+  static GLuint program=0,vbo=0;
+  if(!program){
+    constexpr const char* vs="precision highp float; attribute vec2 a_position; void main(){gl_Position=vec4(a_position,0.0,1.0);}";
+    constexpr const char* fs="precision highp float; void main(){gl_FragColor=vec4(1.0,0.0,1.0,1.0);}";
+    program=link_program(vs,fs);
+  }
+  if(!vbo){
+    constexpr float tri[]={-0.70f,-0.60f, 0.70f,-0.60f, 0.0f,0.72f};
+    glGenBuffers(1,&vbo);glBindBuffer(GL_ARRAY_BUFFER,vbo);glBufferData(GL_ARRAY_BUFFER,sizeof(tri),tri,GL_STATIC_DRAW);
+  }
+  if(!program||!vbo)return;
+  glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,960,544);
+  glDisable(GL_DEPTH_TEST);glDisable(GL_SCISSOR_TEST);glDisable(GL_CULL_FACE);glDisable(GL_BLEND);
+  glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+  glUseProgram(program);glBindBuffer(GL_ARRAY_BUFFER,vbo);
+  glEnableVertexAttribArray(0);for(unsigned i=1;i<MaxVertexAttributes;i++)glDisableVertexAttribArray(i);
+  glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),(const void*)0);
+  glDrawArrays(GL_TRIANGLES,0,3);
+}
+void log_gl_probe(unsigned phase) noexcept {
+  uint8_t pixel[4]{};
+  glFinish();
+  glReadPixels(480,272,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+  const GLenum err=glGetError();
+  probe_status(false,"[probe][gl] phase=%u center_rgba=%u,%u,%u,%u error=0x%04x\n",phase,
+               (unsigned)pixel[0],(unsigned)pixel[1],(unsigned)pixel[2],(unsigned)pixel[3],(unsigned)err);
+}
+#endif
 struct PhasePerf {
   uint64_t frames=0;
   uint64_t workUs=0,submitUs=0,drainUs=0,frameUs=0;
@@ -65,9 +97,13 @@ PipelineDesc batch_pipe(){auto pd=base_pipe();pd.layout=canonical_vertex_layout(
 const PreparedDraw& batch_prepared(){static const PreparedDraw p=[](){PreparedDraw d{};d.vertices.resize(4);for(size_t i=0;i<quad.size();i++){auto&v=d.vertices[i];v.position[0]=quad[i].x;v.position[1]=quad[i].y;v.position[2]=quad[i].z;v.position[3]=1.f;std::copy(std::begin(quad[i].c0),std::end(quad[i].c0),v.color0);std::copy(std::begin(quad[i].c1),std::end(quad[i].c1),v.color1);v.texcoord[0][0]=quad[i].u;v.texcoord[0][1]=quad[i].v;v.texcoord[0][2]=1.f;}d.indices.assign(qidx.begin(),qidx.end());d.primitive=Primitive::Triangles;return d;}();return p;}
 void scene(Renderer&r,StreamingArena&batchArena,const Assets&a,unsigned phase,uint64_t frame){CommandStream cs;ClearCommand cc{};const float pulse=0.04f*(1.f+std::sin(frame*0.03f));cc.color={0.03f+pulse,0.08f,0.18f+phase*0.012f,1};cc.depth=1.f;cs.clear(cc);
   if(phase==0){r.execute(cs);return;}
+  if(phase==1){r.execute(cs);
+#if defined(__vita__)
+    raw_gl_triangle();
+#endif
+    return;}
   if(phase==7&&a.efb){r.execute(cs);r.bind_efb(a.efb);CommandStream off;ClearCommand oc{};oc.color={0.06f,0.01f,0.08f,1};off.clear(oc);auto d=packet(a,a.tev2);d.viewport={0,0,480,272,0,1};d.scissor={0,0,480,272};d.textures[0].texture=a.tex;off.draw(d);r.execute(off);r.blit_efb(a.efb);return;}
-  if(phase==1){auto d=packet(a,a.ras);d.indices={};d.indexCount=0;d.vertexCount=3;cs.draw(d);}
-  else if(phase==2){auto d=packet(a,a.ras);cs.draw(d);}
+  if(phase==2){auto d=packet(a,a.ras);cs.draw(d);}
   else if(phase==3){cs.draw(packet(a,a.texp));}
   else if(phase==4){auto d=packet(a,a.blend);d.uniforms.tevreg[0][3]=0.65f;translate(d.uniforms,-0.22f,0.1f,0.72f,0.72f);cs.draw(d);translate(d.uniforms,0.22f,-0.1f,0.72f,0.72f);cs.draw(d);}
   else if(phase==5){cs.draw(packet(a,a.tev2));}
@@ -90,7 +126,7 @@ void scene(Renderer&r,StreamingArena&batchArena,const Assets&a,unsigned phase,ui
   }else {const unsigned count=phase==6?200:1000;for(unsigned i=0;i<count;i++){auto d=packet(a,a.tev2);if(phase!=9){float x=((int)(i%20)-9.5f)*0.09f,y=((int)((i/20)%12)-5.5f)*0.13f;translate(d.uniforms,x,y,0.055f,0.07f);}else translate(d.uniforms,0.f,0.f,0.055f,0.07f);cs.draw(d);} }
   r.execute(cs);
 }
-const char* pname(unsigned p){static const char* n[]={"M0 clear","M1 geometry","M2 indexed vertex","M3 Wii texture decode","M4 fixed state/blend","M5 2-stage TEV","M6 command batching 200 draws","M7 EFB offscreen/copy","M8 benchmark 1000 draws","M9 benchmark 1000 fixed MVP","M10 vitaGL multidraw 1000 fixed MVP","M11 GX adapter coalesced 1000 draws"};return p<12?n[p]:"?";}
+const char* pname(unsigned p){static const char* n[]={"M0 clear","M1 raw vitaGL triangle","M2 Aurora indexed vertex","M3 Wii texture decode","M4 fixed state/blend","M5 2-stage TEV","M6 command batching 200 draws","M7 EFB offscreen/copy","M8 benchmark 1000 draws","M9 benchmark 1000 fixed MVP","M10 vitaGL multidraw 1000 fixed MVP","M11 GX adapter coalesced 1000 draws"};return p<12?n[p]:"?";}
 #if defined(__vita__)
 constexpr const char* ProbeStatusPath="ux0:data/aurora-vita/probe_status.log";
 void probe_status(bool truncate,const char* fmt,...) noexcept {
@@ -160,12 +196,15 @@ int main(){
   probe_status(false,"[probe] phase=0 %s\n",pname(0));
 #endif
   std::printf("[aurora-vita] all-phases probe ready. SELECT cycles phases, START exits\n");bool run=true;uint64_t report=0;
+#if defined(__vita__)
+  bool samplePhase=true;
+#endif
   while(run){
 #if defined(__vita__)
     uint32_t buttons=0;
     SceCtrlData pad{};sceCtrlPeekBufferPositive(0,&pad,1);buttons=pad.buttons;
     if((buttons&SCE_CTRL_START)&&!(prev&SCE_CTRL_START)){log_phase_perf(phase,phasePerf);run=false;}
-    if((buttons&SCE_CTRL_SELECT)&&!(prev&SCE_CTRL_SELECT)){log_phase_perf(phase,phasePerf);phasePerf={};phase=(phase+1)%12;std::printf("[aurora-vita] phase=%u %s\n",phase,pname(phase));probe_status(false,"[probe] phase=%u %s frame=%llu\n",phase,pname(phase),(unsigned long long)aurora::vita::frame_index());}
+    if((buttons&SCE_CTRL_SELECT)&&!(prev&SCE_CTRL_SELECT)){log_phase_perf(phase,phasePerf);phasePerf={};phase=(phase+1)%12;samplePhase=true;std::printf("[aurora-vita] phase=%u %s\n",phase,pname(phase));probe_status(false,"[probe] phase=%u %s frame=%llu\n",phase,pname(phase),(unsigned long long)aurora::vita::frame_index());}
     prev=buttons;
 #else
     #ifndef AURORA_VITA_HOST_SMOKE_FRAMES
@@ -183,6 +222,9 @@ int main(){
 #endif
     const uint64_t workStart=probe_now_us();
     scene(r,batchArena,a,phase,aurora::vita::frame_index());
+#if defined(__vita__)
+    if(samplePhase){log_gl_probe(phase);samplePhase=false;}
+#endif
     const uint64_t submitUs=probe_now_us()-workStart;
     uint64_t drainUs=0;
 #if defined(__vita__)
