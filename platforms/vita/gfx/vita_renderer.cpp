@@ -64,13 +64,13 @@ bool Renderer::blit_efb(Handle h) noexcept {
     invalidate_draw_state();}
   return ok;
 }
-Handle Renderer::capture_current(Handle existing,const Scissor& src,uint32_t dstWidth,uint32_t dstHeight,EfbCopyFormat format) noexcept {if(src.width<=0||src.height<=0||!dstWidth||!dstHeight)return InvalidHandle;const int32_t y=static_cast<int32_t>(targetHeight_)-(src.y+src.height);const int32_t x=std::max<int32_t>(0,src.x);const int32_t sy=std::max<int32_t>(0,y);const uint32_t sw=std::min<uint32_t>(static_cast<uint32_t>(src.width),targetWidth_-std::min<uint32_t>(static_cast<uint32_t>(x),targetWidth_));const uint32_t sh=std::min<uint32_t>(static_cast<uint32_t>(src.height),targetHeight_-std::min<uint32_t>(static_cast<uint32_t>(sy),targetHeight_));if(!sw||!sh)return InvalidHandle;
+Handle Renderer::capture_current(Handle existing,const Scissor& src,uint32_t dstWidth,uint32_t dstHeight,EfbCopyFormat format,bool flipX,bool flipY) noexcept {if(src.width<=0||src.height<=0||!dstWidth||!dstHeight)return InvalidHandle;const int32_t y=static_cast<int32_t>(targetHeight_)-(src.y+src.height);const int32_t x=std::max<int32_t>(0,src.x);const int32_t sy=std::max<int32_t>(0,y);const uint32_t sw=std::min<uint32_t>(static_cast<uint32_t>(src.width),targetWidth_-std::min<uint32_t>(static_cast<uint32_t>(x),targetWidth_));const uint32_t sh=std::min<uint32_t>(static_cast<uint32_t>(src.height),targetHeight_-std::min<uint32_t>(static_cast<uint32_t>(sy),targetHeight_));if(!sw||!sh)return InvalidHandle;
 #if defined(__vita__)
   const bool scissorWasEnabled=scissorEnabled_;
 #else
   const bool scissorWasEnabled=false;
 #endif
-  Handle out=efb_.capture_from_bound(existing,x,sy,sw,sh,dstWidth,dstHeight,format,scissorWasEnabled);/* EFB allocation/capture may bind a raw GL texture, so the logical texture cache cannot survive the copy. Keep the much more expensive pipeline/vertex state hot for passthrough copies. */invalidate_texture_bindings();if(format!=EfbCopyFormat::Passthrough){
+  Handle out=efb_.capture_from_bound(existing,x,sy,sw,sh,dstWidth,dstHeight,format,scissorWasEnabled,flipX,flipY);/* EFB allocation/capture may bind a raw GL texture, so the logical texture cache cannot survive the copy. Keep the much more expensive pipeline/vertex state hot for passthrough copies. */invalidate_texture_bindings();if(format!=EfbCopyFormat::Passthrough){
 #if defined(__vita__)
     scissorEnabled_=false;
 #endif

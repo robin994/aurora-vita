@@ -277,7 +277,11 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const auto oldIt = copyTextures_.find(copyKey);
   const gfx::Handle oldHandle = oldIt == copyTextures_.end() ? gfx::InvalidHandle : oldIt->second.handle;
   const uint32_t oldRevision = oldIt == copyTextures_.end() ? 0 : oldIt->second.revision;
-  const auto h = renderer_->capture_current(oldHandle, src, dstW, dstH, copyFormat);
+  // GX EFB copies are consumed later as textures in GX's image convention. On
+  // vitaGL the framebuffer and sampled texture orientation differ on both axes,
+  // so rotate the copied image 180 degrees here rather than touching display
+  // presentation or menu rendering.
+  const auto h = renderer_->capture_current(oldHandle, src, dstW, dstH, copyFormat, true, true);
   if (!h) {
     // capture_current may destroy an incompatible old target before allocation/copy; never retain
     // a potentially stale handle in the guest-destination map after failure.

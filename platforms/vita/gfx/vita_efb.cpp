@@ -225,14 +225,7 @@ bool EfbManager::ensure_blitter(EfbCopyFormat format) noexcept {
     if (blitTex_[idx] >= 0) glUniform1i(blitTex_[idx], 0);
   }
   if (!blitVbo_) {
-    // FBO color attachments use GL's bottom-left image convention, while the
-    // presentable Vita surface is consumed in top-left display order. Keep both
-    // UV orientations in one immutable buffer so display copies can compensate
-    // without changing GXCopyTex textures sampled later by TEV stages.
-    const float q[] = {
-      -1,-1,0,0,  1,-1,1,0,  -1,1,0,1,  1,1,1,1,
-      -1,-1,0,1,  1,-1,1,1,  -1,1,0,0,  1,1,1,0,
-    };
+    const float q[] = {-1,-1,0,0, 1,-1,1,0, -1,1,0,1, 1,1,1,1};
     glGenBuffers(1, &blitVbo_);
     glBindBuffer(GL_ARRAY_BUFFER, blitVbo_);
     glBufferData(GL_ARRAY_BUFFER, sizeof(q), q, GL_STATIC_DRAW);
@@ -278,8 +271,7 @@ bool EfbManager::ensure_capture_target(uint32_t w,uint32_t h) noexcept {
   return true;
 }
 
-bool EfbManager::draw_texture(unsigned texture, uint32_t width, uint32_t height, EfbCopyFormat format,
-                              bool flipY) noexcept {
+bool EfbManager::draw_texture(unsigned texture, uint32_t width, uint32_t height, EfbCopyFormat format) noexcept {
   if (!ensure_blitter(format)) return false;
 #if defined(__vita__)
   const size_t idx = static_cast<size_t>(format);
@@ -301,12 +293,11 @@ bool EfbManager::draw_texture(unsigned texture, uint32_t width, uint32_t height,
   glEnableVertexAttribArray(3);
   glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void*)0);
   glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void*)(2 * sizeof(float)));
-  glDrawArrays(GL_TRIANGLE_STRIP, flipY ? 4 : 0, 4);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 #else
   (void)texture;
   (void)width;
   (void)height;
-  (void)flipY;
 #endif
   return true;
 }
@@ -315,7 +306,7 @@ bool EfbManager::blit_to_default(Handle h, uint32_t w, uint32_t he) noexcept {
   const auto it = map_.find(h);
   if (it == map_.end()) return false;
   bind_default(w, he);
-  const bool ok=draw_texture(it->second.color, w, he, EfbCopyFormat::Passthrough, true);
+  const bool ok=draw_texture(it->second.color, w, he, EfbCopyFormat::Passthrough);
   // draw_texture enforces its own linear/clamp sampling state on the raw GL id.
   // Force the next GX sampling bind to refresh this entry's requested sampler.
   if(ok) it->second.samplerValid=false;
@@ -324,7 +315,7 @@ bool EfbManager::blit_to_default(Handle h, uint32_t w, uint32_t he) noexcept {
 
 Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t srcY, uint32_t srcWidth,
                                       uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight,
-                                      EfbCopyFormat format, bool scissorEnabled) noexcept {
+                                      EfbCopyFormat format, bool scissorEnabled, bool flipX, bool flipY) noexcept {
   if (!srcWidth || !srcHeight || !dstWidth || !dstHeight || is_depth_copy_format(format)) return InvalidHandle;
   Handle dst = existing;
   uint32_t ew = 0, eh = 0;
@@ -353,9 +344,13 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
     glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstIt->second.fbo);
     while (glGetError() != GL_NO_ERROR) {}
+    const GLint dx0=flipX?static_cast<GLint>(dstWidth):0;
+    const GLint dx1=flipX?0:static_cast<GLint>(dstWidth);
+    const GLint dy0=flipY?static_cast<GLint>(dstHeight):0;
+    const GLint dy1=flipY?0:static_cast<GLint>(dstHeight);
     glBlitFramebuffer(srcX, srcY, srcX + static_cast<GLint>(srcWidth),
                       srcY + static_cast<GLint>(srcHeight),
-                      0, 0, static_cast<GLint>(dstWidth), static_cast<GLint>(dstHeight),
+                      dx0, dy0, dx1, dy1,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     const GLenum blitError = glGetError();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
@@ -379,8 +374,12 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
   glBindFramebuffer(GL_READ_FRAMEBUFFER,sourceFbo);
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER,captureFbo_);
   while(glGetError()!=GL_NO_ERROR){}
+  const GLint cx0=flipX?static_cast<GLint>(srcWidth):0;
+  const GLint cx1=flipX?0:static_cast<GLint>(srcWidth);
+  const GLint cy0=flipY?static_cast<GLint>(srcHeight):0;
+  const GLint cy1=flipY?0:static_cast<GLint>(srcHeight);
   glBlitFramebuffer(srcX,srcY,srcX+static_cast<GLint>(srcWidth),srcY+static_cast<GLint>(srcHeight),
-                    0,0,static_cast<GLint>(srcWidth),static_cast<GLint>(srcHeight),
+                    cx0,cy0,cx1,cy1,
                     GL_COLOR_BUFFER_BIT,GL_NEAREST);
   const GLenum captureError=glGetError();
   if(scissorEnabled)glEnable(GL_SCISSOR_TEST);
@@ -396,6 +395,8 @@ Handle EfbManager::capture_from_bound(Handle existing, int32_t srcX, int32_t src
   (void)srcY;
   (void)format;
   (void)scissorEnabled;
+  (void)flipX;
+  (void)flipY;
 #endif
   return dst;
 }

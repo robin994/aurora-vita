@@ -23,9 +23,10 @@ public:
   Handle create_efb(uint32_t w,uint32_t h,bool depth=true) noexcept;
   bool bind_efb(Handle h) noexcept;void bind_default() noexcept;
   bool blit_efb(Handle h) noexcept;
-  // GPU-resident framebuffer copy used for GXCopyTex. Source coordinates are top-left Aurora/GX coordinates.
+  // GPU-resident framebuffer copy. Source coordinates are top-left Aurora/GX coordinates.
+  // flipX/flipY rotate only the sampled copy, leaving the display path untouched.
   Handle capture_current(Handle existing,const Scissor& src,uint32_t dstWidth,uint32_t dstHeight,
-                         EfbCopyFormat format=EfbCopyFormat::Passthrough) noexcept;
+                         EfbCopyFormat format=EfbCopyFormat::Passthrough,bool flipX=false,bool flipY=false) noexcept;
   Handle upload_efb_rgba(Handle existing,uint32_t width,uint32_t height,const void* rgba) noexcept;
   void clear_current(const Color& color,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
   void execute(const CommandStream& stream) noexcept;void draw(const DrawPacket& d) noexcept;

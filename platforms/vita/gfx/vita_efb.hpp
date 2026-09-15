@@ -15,9 +15,10 @@ public:
   bool blit_to_default(Handle h,uint32_t width,uint32_t height) noexcept;
   // Capture a rectangle from the framebuffer that is currently bound, optionally
   // scaling it into an existing/new sampled EFB texture. srcY is GL bottom-left.
+  // flipX/flipY affect only the copied texture; they do not change presentation.
   Handle capture_from_bound(Handle existing,int32_t srcX,int32_t srcY,uint32_t srcWidth,uint32_t srcHeight,
                             uint32_t dstWidth,uint32_t dstHeight,EfbCopyFormat format=EfbCopyFormat::Passthrough,
-                            bool scissorEnabled=false) noexcept;
+                            bool scissorEnabled=false,bool flipX=false,bool flipY=false) noexcept;
   // Low-memory sampled EFB path for optimized Vita builds. The caller supplies RGBA8 pixels
   // from the currently rendered target; no framebuffer/renderbuffer or temporary capture texture
   // is allocated. Existing handles are updated in-place when dimensions match.
@@ -51,7 +52,6 @@ private:
   size_t bytes_=0,highWaterBytes_=0;
   bool ensure_blitter(EfbCopyFormat format) noexcept;
   bool ensure_capture_target(uint32_t width,uint32_t height) noexcept;
-  bool draw_texture(unsigned texture,uint32_t width,uint32_t height,EfbCopyFormat format=EfbCopyFormat::Passthrough,
-                    bool flipY=false) noexcept;
+  bool draw_texture(unsigned texture,uint32_t width,uint32_t height,EfbCopyFormat format=EfbCopyFormat::Passthrough) noexcept;
 };
 } // namespace aurora::vita::gfx
