@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 
 namespace {
 
@@ -106,6 +107,51 @@ TEST(VitaVertexPipeline, DynamicPnMatrixRemainsLimitedToPositionPalette) {
   PipelineDesc pipeline{};
   VertexPipelineRequirements requirements{};
   EXPECT_FALSE(transform_vertex_for_pipeline(vertex,pipeline,state,requirements));
+}
+
+TEST(VitaVertexPipeline, UnlitVertexChannelsPreserveEveryByte) {
+  PipelineDesc pipeline{};
+  VertexTransformState state{};
+  VertexPipelineRequirements requirements{};
+  requirements.colorMask=3;
+  for(auto& channel:pipeline.colorChannels)channel.materialSource=ColorSource::Vertex;
+  for(unsigned n=0;n<256;++n){
+    CanonicalVertex vertex{};
+    for(unsigned k=0;k<4;++k){
+      vertex.color0[k]=static_cast<uint8_t>(n+k*61u);
+      vertex.color1[k]=static_cast<uint8_t>(255u-n+k*37u);
+    }
+    const auto original=vertex;
+    ASSERT_TRUE(transform_vertex_for_pipeline(vertex,pipeline,state,requirements));
+    for(unsigned k=0;k<4;++k){
+      EXPECT_EQ(vertex.color0[k],original.color0[k]);
+      EXPECT_EQ(vertex.color1[k],original.color1[k]);
+    }
+  }
+}
+
+TEST(VitaVertexPipeline, RegisterQuantizationMatchesLroundIncludingHalfBoundaries) {
+  PipelineDesc pipeline{};
+  VertexTransformState state{};
+  VertexPipelineRequirements requirements{};
+  requirements.colorMask=1;
+  const auto check=[&](float f){
+    state.channelMaterial[0]={f,f,f,f};
+    state.channelMaterial[2]={f,f,f,f};
+    CanonicalVertex vertex{};
+    ASSERT_TRUE(transform_vertex_for_pipeline(vertex,pipeline,state,requirements));
+    const auto expected=static_cast<uint8_t>(std::clamp(std::lround(f*255.f),0l,255l));
+    for(unsigned k=0;k<4;++k)EXPECT_EQ(vertex.color0[k],expected)<<f;
+  };
+  for(unsigned n=0;n<255;++n){
+    const float f=(static_cast<float>(n)+0.5f)/255.f;
+    check(f);check(std::nextafter(f,0.f));check(std::nextafter(f,1.f));
+  }
+  uint32_t random=17;
+  for(unsigned n=0;n<10000;++n){
+    random=random*1664525u+1013904223u;
+    check(static_cast<float>(random&0xffffffu)/static_cast<float>(0xffffffu)*3.f-1.f);
+  }
 }
 
 } // namespace

@@ -20,7 +20,16 @@ float len(V3 a) noexcept{return std::sqrt(std::max(dot(a,a),0.f));}
 V3 norm(V3 a) noexcept{const float l=len(a);return l>1e-10f?mul(a,1.f/l):V3{};}
 V3 norm_if_nonzero(V3 a) noexcept{const float l2=dot(a,a);if(l2<=1e-20f)return V3{};return mul(a,1.f/std::sqrt(l2));}
 V4 clamp01(V4 a) noexcept{return {std::clamp(a.x,0.f,1.f),std::clamp(a.y,0.f,1.f),std::clamp(a.z,0.f,1.f),std::clamp(a.w,0.f,1.f)};}
-uint8_t byte(float f) noexcept{return static_cast<uint8_t>(std::clamp(std::lround(f*255.f),0l,255l));}
+uint8_t byte(float f) noexcept {
+  const float value=f*255.f;
+  if(!(value>0.f))return 0;
+  if(value>=255.f)return 255;
+  // Match lround's positive ties-away rule without a libm call per channel.
+  // Splitting integer/fraction avoids the rounding error of int(value+0.5f)
+  // immediately below the first half-integer threshold.
+  const unsigned integral=static_cast<unsigned>(value);
+  return static_cast<uint8_t>(integral+(value-static_cast<float>(integral)>=0.5f?1u:0u));
+}
 
 V3 transform(const Matrix3x4& m,V4 p) noexcept {
   // Each four-float group is one result column: result = row-vector(p) * mat3x4.
@@ -101,7 +110,21 @@ bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
   if(transformPosition){v.position[0]=mvPos.x;v.position[1]=mvPos.y;v.position[2]=mvPos.z;}
   for(unsigned base=0;base<2;base++){
     if((colorMask&(1u<<base))==0)continue;
-    const V4 rgb=light_channel(in,pipeline.colorChannels[base],base,state,mvPos,mvNrm);const V4 alpha=light_channel(in,pipeline.colorChannels[base+2],base+2,state,mvPos,mvNrm);uint8_t*out=base?v.color1:v.color0;out[0]=byte(rgb.x);out[1]=byte(rgb.y);out[2]=byte(rgb.z);out[3]=byte(alpha.w);
+    const auto& rgbChannel=pipeline.colorChannels[base];
+    const auto& alphaChannel=pipeline.colorChannels[base+2];
+    const uint8_t* input=base?in.color1:in.color0;
+    uint8_t* out=base?v.color1:v.color0;
+    if(!rgbChannel.lightingEnabled&&rgbChannel.materialSource==ColorSource::Vertex){
+      std::copy_n(input,3,out);
+    }else{
+      const V4 rgb=light_channel(in,rgbChannel,base,state,mvPos,mvNrm);
+      out[0]=byte(rgb.x);out[1]=byte(rgb.y);out[2]=byte(rgb.z);
+    }
+    if(!alphaChannel.lightingEnabled&&alphaChannel.materialSource==ColorSource::Vertex){
+      out[3]=input[3];
+    }else{
+      out[3]=byte(light_channel(in,alphaChannel,base+2,state,mvPos,mvNrm).w);
+    }
   }
   for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;i++){
     if((texgenMask&(1u<<i))==0)continue;
