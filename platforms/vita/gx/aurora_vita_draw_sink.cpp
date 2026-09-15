@@ -342,6 +342,38 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   translate_vertex_state(vertexState, uniforms);
   const auto source = translate_source_primitive(primitive);
   const auto expansion = translate_primitive_expansion(translate_line_mode(primitive));
+  const auto footprint = gfx::estimate_draw_footprint(source,vertexCount,indexCount);
+  if(!footprint.valid){
+    result.drawError=gfx::PrepareDrawError::TooManyVertices;
+    if(telemetry_)telemetry_->unsupported();
+    return result;
+  }
+  // A GX frame is not required to fit in one giant CPU/GPU staging buffer.
+  // Submit the completed chunk and orphan the dynamic backing store before doing
+  // any decode/lighting/texture work for the next draw. Previously Strikers hit
+  // the 2 MiB arena and then spent hundreds of milliseconds preparing hundreds
+  // of draws that could only fail at enqueue time.
+  if(!arena_->can_reserve(footprint.vertexBytes,alignof(gfx::GpuVertex),
+                          footprint.indexBytes,alignof(uint16_t))){
+    flush();
+    if(!arena_->recycle_current()||
+       !arena_->can_reserve(footprint.vertexBytes,alignof(gfx::GpuVertex),
+                            footprint.indexBytes,alignof(uint16_t))){
+      result.drawError=gfx::PrepareDrawError::StreamingOverflow;
+      if(telemetry_)telemetry_->arena_overflow();
+      return result;
+    }
+#if defined(__vita__)
+    static uint64_t rolloverLogCount=0;
+    const auto n=arena_->recycles();
+    if(rolloverLogCount<8||(n&&(n&(n-1))==0)){
+      std::fprintf(stderr,"[aurora-vita] stream_rollover total=%llu gpu_stride=%u next_vtx=%u next_idx=%u\n",
+                   static_cast<unsigned long long>(n),static_cast<unsigned>(sizeof(gfx::GpuVertex)),
+                   footprint.vertexCount,footprint.indexCount);
+      ++rolloverLogCount;
+    }
+#endif
+  }
   auto prepared = gfx::prepare_draw(rawVertices, rawBytes, vertexCount, source, layout,
                                     pipeline, vertexState, &uniforms, expansion, telemetry_);
   if (prepared.ok() && rawIndices && indexCount) {

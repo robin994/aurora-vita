@@ -1,10 +1,17 @@
 #include "aurora_vita_backend.hpp"
 #include "gfx/vita_cpu_workers.hpp"
 #include "gfx/vita_renderer.hpp"
+#include "gfx/vita_vertex_decode.hpp"
 #include "gx/aurora_vita_draw_sink.hpp"
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#ifndef AURORA_VITA_NATIVE_CMPR
+#define AURORA_VITA_NATIVE_CMPR 0
+#endif
+#ifndef AURORA_VITA_DIRECT_STREAM_WRITE
+#define AURORA_VITA_DIRECT_STREAM_WRITE 0
+#endif
 #if defined(__vita__)
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
@@ -167,6 +174,12 @@ bool initialize(const BackendConfig& c) noexcept {
   if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices)) {
     std::fprintf(stderr, "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
+  std::fprintf(stderr,
+               "[aurora-vita] render config native_cmpr=%u direct_stream=%u gpu_vertex_stride=%u stream_v=%llu stream_i=%llu slots=%u\n",
+               AURORA_VITA_NATIVE_CMPR?1u:0u,AURORA_VITA_DIRECT_STREAM_WRITE?1u:0u,
+               static_cast<unsigned>(sizeof(gfx::GpuVertex)),
+               static_cast<unsigned long long>(c.stream_vertex_bytes),
+               static_cast<unsigned long long>(c.stream_index_bytes),c.stream_slots);
   g_telemetry.reset(); g_coverage.reset(); g_trace=std::make_unique<integration::FrameTrace>(c.trace_capacity);
   gxbridge::DrawSinkConfig dc{};
   dc.streaming.vertexBytes=c.stream_vertex_bytes; dc.streaming.indexBytes=c.stream_index_bytes; dc.streaming.slots=c.stream_slots;

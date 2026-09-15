@@ -35,6 +35,11 @@ public:
   // frame-global vertex base. This avoids a temporary heap allocation per draw.
   BufferSlice upload_rebased_indices(const uint16_t* data, size_t count, uint32_t vertexBase) noexcept;
   bool flush() noexcept;
+  bool can_reserve(size_t vertexBytes,size_t vertexAlignment,size_t indexBytes,size_t indexAlignment) const noexcept;
+  // Called only after the current command stream has been submitted. Orphans the
+  // current VBO/IBO and rewinds offsets so a large GX frame can be rendered in
+  // bounded chunks instead of requiring the whole frame to fit in RAM at once.
+  bool recycle_current() noexcept;
 
   size_t vertex_used() const noexcept;
   size_t index_used() const noexcept;
@@ -45,6 +50,7 @@ public:
   size_t index_high_water() const noexcept { return indexHighWater_; }
   uint64_t vertex_overflows() const noexcept { return vertexOverflows_; }
   uint64_t index_overflows() const noexcept { return indexOverflows_; }
+  uint64_t recycles() const noexcept { return recycles_; }
 
 private:
   struct Slot {
@@ -64,7 +70,7 @@ private:
   uint32_t current_=0;
   bool initialized_=false;
   size_t vertexHighWater_=0,indexHighWater_=0;
-  uint64_t vertexOverflows_=0,indexOverflows_=0;
+  uint64_t vertexOverflows_=0,indexOverflows_=0,recycles_=0;
 };
 
 } // namespace aurora::vita::gfx

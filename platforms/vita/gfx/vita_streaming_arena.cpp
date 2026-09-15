@@ -63,7 +63,7 @@ void StreamingArena::shutdown() noexcept {
   indexStage_.clear();
   initialized_ = false;
   vertexHighWater_ = indexHighWater_ = 0;
-  vertexOverflows_ = indexOverflows_ = 0;
+  vertexOverflows_ = indexOverflows_ = recycles_ = 0;
   current_ = 0;
 }
 
@@ -184,6 +184,25 @@ bool StreamingArena::flush() noexcept {
   }
   return true;
 #endif
+}
+bool StreamingArena::can_reserve(size_t vertexBytes,size_t vertexAlignment,size_t indexBytes,size_t indexAlignment) const noexcept {
+  if(!initialized_||slots_.empty())return false;
+  const auto&slot=slots_[current_];
+  const size_t va=align_up(slot.voff,vertexAlignment?vertexAlignment:cfg_.alignment);
+  const size_t ia=align_up(slot.ioff,indexAlignment?indexAlignment:cfg_.alignment);
+  return va<=cfg_.vertexBytes&&vertexBytes<=cfg_.vertexBytes-va&&
+         ia<=cfg_.indexBytes&&indexBytes<=cfg_.indexBytes-ia;
+}
+bool StreamingArena::recycle_current() noexcept {
+  if(!initialized_||slots_.empty())return false;
+  auto&slot=slots_[current_];
+#if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
+  if(slot.vmapped||slot.imapped)return false;
+#endif
+  if(!pool_.orphan(slot.vertex)||!pool_.orphan(slot.index))return false;
+  slot.voff=slot.ioff=slot.vflushed=slot.iflushed=0;
+  ++recycles_;
+  return true;
 }
 size_t StreamingArena::vertex_used() const noexcept { return initialized_ ? slots_[current_].voff : 0; }
 size_t StreamingArena::index_used() const noexcept { return initialized_ ? slots_[current_].ioff : 0; }

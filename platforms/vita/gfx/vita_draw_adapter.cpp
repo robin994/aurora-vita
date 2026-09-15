@@ -90,6 +90,25 @@ bool batch_compatible(const DrawPacket&a,const DrawPacket&b) noexcept {
   return true;
 }
 }
+DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint32_t explicitIndexCount) noexcept {
+  DrawFootprint f{};
+  if(!count)return f;
+  uint64_t vertices=count,indices=0;
+  switch(source){
+  case SourcePrimitive::Triangles: if(count%3)return f;indices=count;break;
+  case SourcePrimitive::Quads: if(count%4)return f;indices=(uint64_t(count)/4u)*6u;break;
+  case SourcePrimitive::TriangleFan: case SourcePrimitive::TriangleStrip: indices=count<3?0:(uint64_t(count)-2u)*3u;break;
+  case SourcePrimitive::Lines: if(count%2)return f;vertices=(uint64_t(count)/2u)*4u;indices=(uint64_t(count)/2u)*6u;break;
+  case SourcePrimitive::LineStrip: {const uint64_t seg=count>1?uint64_t(count)-1u:0u;vertices=seg*4u;indices=seg*6u;break;}
+  case SourcePrimitive::Points: vertices=uint64_t(count)*4u;indices=uint64_t(count)*6u;break;
+  }
+  if(explicitIndexCount)indices=explicitIndexCount;
+  if(vertices>std::numeric_limits<uint16_t>::max()||indices>std::numeric_limits<uint32_t>::max())return f;
+  f.vertexCount=static_cast<uint32_t>(vertices);f.indexCount=static_cast<uint32_t>(indices);
+  f.vertexBytes=static_cast<size_t>(vertices)*sizeof(GpuVertex);
+  f.indexBytes=static_cast<size_t>(indices)*sizeof(uint16_t);
+  f.valid=true;return f;
+}
 PreparedDraw prepare_draw(const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry) noexcept {
   PreparedDraw out{};
   if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return out;}
@@ -117,13 +136,21 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
   if(!prepared.ok()||prepared.vertices.empty())return fail(prepared.error==PrepareDrawError::None?PrepareDrawError::InvalidInput:prepared.error);
   BufferSlice vb{},ib{};
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
-    // Canonical GX vertices are always naturally 4-byte aligned. Keeping each
-    // upload tightly packed makes vb.offset / sizeof(CanonicalVertex) a stable
-    // frame-global vertex base suitable for batchable absolute U16 indices.
-    vb=arena.upload_vertices(prepared.vertices.data(),prepared.vertices.size()*sizeof(CanonicalVertex),alignof(CanonicalVertex));if(!vb.buffer)return fail(PrepareDrawError::StreamingOverflow);
+    // Only stream attributes consumed by the generated Vita shader. The CPU-only
+    // normal/tangent/matrix fields in CanonicalVertex have already done their job.
+    void* vertexDst=nullptr;
+    vb=arena.reserve_vertices(prepared.vertices.size()*sizeof(GpuVertex),alignof(GpuVertex),&vertexDst);if(!vb.buffer||!vertexDst)return fail(PrepareDrawError::StreamingOverflow);
+    auto* gpu=static_cast<GpuVertex*>(vertexDst);
+    for(size_t i=0;i<prepared.vertices.size();++i){
+      const auto&src=prepared.vertices[i];auto&dst=gpu[i];
+      std::memcpy(dst.position,src.position,sizeof(dst.position));
+      std::memcpy(dst.color0,src.color0,sizeof(dst.color0));
+      std::memcpy(dst.color1,src.color1,sizeof(dst.color1));
+      std::memcpy(dst.texcoord,src.texcoord,sizeof(dst.texcoord));
+    }
     if(!prepared.indices.empty()){
-      if(vb.offset%sizeof(CanonicalVertex)!=0)return fail(PrepareDrawError::StreamingOverflow);
-      const uint32_t base=vb.offset/sizeof(CanonicalVertex);
+      if(vb.offset%sizeof(GpuVertex)!=0)return fail(PrepareDrawError::StreamingOverflow);
+      const uint32_t base=vb.offset/sizeof(GpuVertex);
       if(base>std::numeric_limits<uint16_t>::max())return fail(PrepareDrawError::TooManyVertices);
       for(const uint16_t idx:prepared.indices)if(base+idx>std::numeric_limits<uint16_t>::max())return fail(PrepareDrawError::TooManyVertices);
       ib=arena.upload_rebased_indices(prepared.indices.data(),prepared.indices.size(),base);if(!ib.buffer)return fail(PrepareDrawError::StreamingOverflow);

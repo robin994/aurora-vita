@@ -36,6 +36,16 @@ struct PreparedDraw {
   bool ok() const noexcept { return error == PrepareDrawError::None; }
 };
 
+struct DrawFootprint {
+  size_t vertexBytes=0;
+  size_t indexBytes=0;
+  uint32_t vertexCount=0;
+  uint32_t indexCount=0;
+  bool valid=false;
+};
+
+DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t vertexCount,uint32_t explicitIndexCount=0) noexcept;
+
 PreparedDraw prepare_draw(const uint8_t* rawVertices,size_t rawBytes,uint32_t vertexCount,SourcePrimitive source,
                           const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
                           const VertexTransformState& state,DrawUniforms* uniforms=nullptr,

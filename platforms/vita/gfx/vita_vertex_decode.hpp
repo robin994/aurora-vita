@@ -54,6 +54,18 @@ struct CanonicalVertex {
   uint8_t texMatrixIndex[8]{0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff}; // raw GX matrix index
 };
 
+// Post-transform GPU stream. Normals/tangents and matrix selectors are consumed
+// by the CPU vertex pipeline and must not be copied into the Vita VBO afterwards.
+// Keeping the render stream separate from CanonicalVertex cuts the common stride
+// from 168 bytes to 120 bytes without changing shader inputs.
+struct GpuVertex {
+  float position[4]{0.f,0.f,0.f,1.f};
+  uint8_t color0[4]{255,255,255,255};
+  uint8_t color1[4]{255,255,255,255};
+  float texcoord[8][3]{};
+};
+static_assert(sizeof(GpuVertex)==120,"Vita GPU vertex stride must stay compact");
+
 struct VertexDecodeResult {
   bool ok = false;
   size_t badVertex = 0;
@@ -61,6 +73,7 @@ struct VertexDecodeResult {
 };
 
 VertexLayout canonical_vertex_layout() noexcept;
+VertexLayout gpu_vertex_layout() noexcept;
 VertexDecodeResult decode_vertices(const uint8_t* stream, size_t streamSize, uint32_t vertexCount,
                                    const VertexDecodeLayout& layout) noexcept;
 

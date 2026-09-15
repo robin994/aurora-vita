@@ -74,15 +74,21 @@ unsigned bump_light(TexGenType t) noexcept{return static_cast<unsigned>(t)-stati
 V3 normalize3(V3 v) noexcept{return norm(v);}
 
 bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
-                      const VertexTransformState& state) noexcept {
+                      const VertexTransformState& state,bool needNormal,bool needBumpBasis) noexcept {
   const CanonicalVertex in=v;
   const unsigned pn=in.pnMatrixIndex==0xff?state.currentPnMatrix:in.pnMatrixIndex;
   if(pn>=10)return false;
   const V3 mvPos=transform(state.postexMatrices[pn],{in.position[0],in.position[1],in.position[2],1.f});
-  V3 mvNrm=transform_dir(state.normalMatrices[pn],make3(in.normal));if(len(mvNrm)>1e-10f)mvNrm=norm(mvNrm);
-  V3 mvBin=transform_dir(state.normalMatrices[pn],make3(in.binormal));if(len(mvBin)>1e-10f)mvBin=norm(mvBin);
-  V3 mvTan=transform_dir(state.normalMatrices[pn],make3(in.tangent));if(len(mvTan)>1e-10f)mvTan=norm(mvTan);
-  v.position[0]=mvPos.x;v.position[1]=mvPos.y;v.position[2]=mvPos.z;v.normal[0]=mvNrm.x;v.normal[1]=mvNrm.y;v.normal[2]=mvNrm.z;v.binormal[0]=mvBin.x;v.binormal[1]=mvBin.y;v.binormal[2]=mvBin.z;v.tangent[0]=mvTan.x;v.tangent[1]=mvTan.y;v.tangent[2]=mvTan.z;
+  V3 mvNrm{};
+  if(needNormal){mvNrm=transform_dir(state.normalMatrices[pn],make3(in.normal));if(len(mvNrm)>1e-10f)mvNrm=norm(mvNrm);}
+  V3 mvBin{},mvTan{};
+  if(needBumpBasis){
+    mvBin=transform_dir(state.normalMatrices[pn],make3(in.binormal));if(len(mvBin)>1e-10f)mvBin=norm(mvBin);
+    mvTan=transform_dir(state.normalMatrices[pn],make3(in.tangent));if(len(mvTan)>1e-10f)mvTan=norm(mvTan);
+  }
+  // Normals/tangent basis are CPU-only intermediates on Vita. Do not write them
+  // back when the generated shader will only consume position/colors/texcoords.
+  v.position[0]=mvPos.x;v.position[1]=mvPos.y;v.position[2]=mvPos.z;
   for(unsigned base=0;base<2;base++){
     const V4 rgb=light_channel(in,pipeline.colorChannels[base],base,state,mvPos,mvNrm);const V4 alpha=light_channel(in,pipeline.colorChannels[base+2],base+2,state,mvPos,mvNrm);uint8_t*out=base?v.color1:v.color0;out[0]=byte(rgb.x);out[1]=byte(rgb.y);out[2]=byte(rgb.z);out[3]=byte(alpha.w);
   }
@@ -108,12 +114,14 @@ struct TransformContext {
   CanonicalVertex* vertices = nullptr;
   const PipelineDesc* pipeline = nullptr;
   const VertexTransformState* state = nullptr;
+  bool needNormal = false;
+  bool needBumpBasis = false;
 };
 
 bool transform_range(void* opaque, size_t begin, size_t end, uint32_t) noexcept {
   auto& ctx = *static_cast<TransformContext*>(opaque);
   for (size_t i = begin; i < end; ++i) {
-    if (!transform_vertex(ctx.vertices[i], *ctx.pipeline, *ctx.state)) return false;
+    if (!transform_vertex(ctx.vertices[i], *ctx.pipeline, *ctx.state,ctx.needNormal,ctx.needBumpBasis)) return false;
   }
   return true;
 }
@@ -122,7 +130,11 @@ bool transform_range(void* opaque, size_t begin, size_t end, uint32_t) noexcept 
 
 bool run_vertex_pipeline(std::vector<CanonicalVertex>& vertices,const PipelineDesc& pipeline,const VertexTransformState& state,DrawUniforms* uniforms) noexcept {
   if(uniforms)uniforms->mvp=state.projection;
-  TransformContext ctx{vertices.data(), &pipeline, &state};
+  bool needNormal=false,needBumpBasis=false;
+  for(const auto&c:pipeline.colorChannels)needNormal=needNormal||c.lightingEnabled;
+  for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;++i)needBumpBasis=needBumpBasis||is_bump(pipeline.texgens[i].type);
+  needNormal=needNormal||needBumpBasis;
+  TransformContext ctx{vertices.data(), &pipeline, &state,needNormal,needBumpBasis};
   return cpu_parallel_for(vertices.size(), transform_range, &ctx);
 }
 
