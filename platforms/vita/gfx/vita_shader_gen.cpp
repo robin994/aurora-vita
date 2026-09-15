@@ -306,7 +306,10 @@ ShaderSources build_tev_glsl(const PipelineDesc& desc) noexcept {
   for (unsigned i = 0; i < n; i++) {
     const auto& s = desc.tev.stages[i];
     fs << " {\n  float ind_alpha=0.0;\n  vec2 tev_uv=";
-    if (s.texCoord < MaxTextures) fs << texcoord_expr(desc, s.texCoord);
+    // GX keeps the stage's texcoord selector even when that stage does not
+    // sample a texture. The liveness mask can omit its varying entirely.
+    if (s.texCoord < MaxTextures && (texcoordMask & (1u << s.texCoord)))
+      fs << texcoord_expr(desc, s.texCoord);
     else fs << "vec2(0.0)";
     fs << ";\n";
 

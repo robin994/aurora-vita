@@ -114,6 +114,25 @@ TEST(VitaShaderInputs, UnusedDirectTextureStateDoesNotFetchOrStreamTexcoord) {
   EXPECT_EQ(shader.vertex.find("attribute vec3 a_tex0"), std::string::npos);
   EXPECT_EQ(shader.fragment.find("texture2D(u_tex0,tev_uv)"), std::string::npos);
   EXPECT_EQ(shader.fragment.find("uniform sampler2D u_tex0"), std::string::npos);
+  EXPECT_EQ(shader.fragment.find("v_tex0"), std::string::npos);
+}
+
+TEST(VitaShaderInputs, UnsampledStageNeverReferencesAnUndeclaredVarying) {
+  // The six-stage stadium pipeline leaves TEXCOORD5 in its last TEV stage,
+  // although only TEXCOORD0..2 are sampled. GLSL must still compile.
+  PipelineDesc desc{};
+  desc.texgenCount = 3;
+  desc.tev.stageCount = 2;
+  desc.tev.stages[0].texCoord = 0;
+  desc.tev.stages[0].texture = 0;
+  desc.tev.stages[0].color.a = aurora::vita::gfx::TevColorArg::TexColor;
+  desc.tev.stages[1].texCoord = 5;
+  desc.tev.stages[1].texture = 0xff;
+  desc.tev.stages[1].color.d = aurora::vita::gfx::TevColorArg::Prev;
+  const auto shader = build_tev_glsl(desc);
+  EXPECT_NE(shader.fragment.find("v_tex0"), std::string::npos);
+  EXPECT_EQ(shader.fragment.find("v_tex5"), std::string::npos);
+  EXPECT_EQ(shader.vertex.find("a_tex5"), std::string::npos);
 }
 
 TEST(VitaShaderInputs, MissingTextureDoesNotNeedDirectTexcoord) {
