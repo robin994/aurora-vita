@@ -141,8 +141,10 @@ if (VITA AND AURORA_VITA_BUILD_PROBE)
     target_compile_options(aurora_vita_probe PRIVATE -fshort-wchar)
     target_link_libraries(aurora_vita_probe PRIVATE aurora::vita_backend)
     vita_create_self(aurora_vita_probe.self aurora_vita_probe)
-    vita_create_vpk(aurora_vita_probe.vpk AURVPRB01 aurora_vita_probe.self
-        VERSION 01.00 NAME "Aurora Vita 3D Probe")
+    # Keep diagnostic probe installs independent from older AURVPRB01 builds so
+    # VitaShell cannot accidentally launch an already-installed stale eboot.
+    vita_create_vpk(aurora_vita_probe_diag2.vpk AURVPRB02 aurora_vita_probe.self
+        VERSION 01.10 NAME "Aurora Vita 3D Probe D2")
 endif ()
 
 if (VITA AND AURORA_VITA_SDL3_NATIVE AND AURORA_VITA_BUILD_SDL3_PROBE)

@@ -152,7 +152,7 @@ void log_phase_perf(unsigned phase,const PhasePerf& p) noexcept {
 int main(){
 #if defined(__vita__)
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
-  probe_status(true,"[probe] boot\n");
+  probe_status(true,"[probe] boot build_id=diag2-rawgl-readback\n");
 #if defined(AURORA_VITAGL_MAPPED_STREAM_UPLOAD)
   probe_status(false,"[probe] build local_vitagl=1 no_debug=1 draw_speedhack=1 indices_draw_speedhack=1 buffers_speedhack=0 stream_upload=map_range cpu_fastpath=rebased_indices+pipeline_run_cache\n");
 #else
