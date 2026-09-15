@@ -37,6 +37,7 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   telemetry_ = config.telemetry;
   coverage_ = config.coverage;
   trace_ = config.trace;
+  verboseGeometryDiagnostics_ = config.verboseGeometryDiagnostics;
   strictUnsupported_ = config.strictUnsupported;
   strictFailed_ = false;
   whiteTexture_ = white_texture();
@@ -75,6 +76,7 @@ void DrawSink::shutdown() noexcept {
   telemetry_ = nullptr;
   coverage_ = nullptr;
   trace_ = nullptr;
+  verboseGeometryDiagnostics_ = false;
   strictUnsupported_ = false;
   strictFailed_ = false;
   initialized_ = false;
@@ -459,20 +461,20 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
 
 #if defined(__vita__)
-  if(telemetry_||coverage_||trace_)log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
+  if(verboseGeometryDiagnostics_)log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
 #endif
 
   std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
   const uint8_t textureMask = translatedTextureMask_;
   const auto white = white_texture();
-  const bool textureResolveInstrumentation=telemetry_||coverage_||trace_;
-  const bool reuseResolvedTextures=!textureResolveInstrumentation&&resolvedTextureBindingsValid_&&
+  const bool reuseResolvedTextures=resolvedTextureBindingsValid_&&
                                    !aurora::gx::g_gxState.stateDirty&&resolvedTextureMask_==textureMask&&
                                    resolvedVolatileTextureMask_==0;
   if(reuseResolvedTextures){
     bindings=resolvedTextureBindings_;
     result.fallbackTextureMask=resolvedFallbackTextureMask_;
     result.warnings|=resolvedTextureWarnings_;
+    if(telemetry_)for(unsigned slot=0;slot<gfx::MaxTextures;++slot)if(textureMask&(1u<<slot))telemetry_->texture(true,false,0);
   }else{ gfx::ScopedTelemetryPhase textureTimer(telemetry_, gfx::TelemetryPhase::TextureResolve);
   uint8_t volatileTextureMask=0;
   for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
@@ -514,15 +516,14 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (translated.dynamicCopy) result.warnings |= SubmitWarning::DynamicCopyFallback;
     else result.warnings |= SubmitWarning::MissingTextureFallback;
   }
-  if(!textureResolveInstrumentation){
-    resolvedTextureBindings_=bindings;
-    resolvedTextureMask_=textureMask;
-    resolvedVolatileTextureMask_=volatileTextureMask;
-    resolvedFallbackTextureMask_=result.fallbackTextureMask;
-    resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
-      (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
-    resolvedTextureBindingsValid_=true;
-  }}
+  resolvedTextureBindings_=bindings;
+  resolvedTextureMask_=textureMask;
+  resolvedVolatileTextureMask_=volatileTextureMask;
+  resolvedFallbackTextureMask_=result.fallbackTextureMask;
+  resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
+    (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
+  resolvedTextureBindingsValid_=true;
+  }
   if (result.fallbackTextureMask != 0) {
     uint32_t fallbackCount = 0;
     for (uint8_t bits = result.fallbackTextureMask; bits; bits >>= 1) fallbackCount += bits & 1u;

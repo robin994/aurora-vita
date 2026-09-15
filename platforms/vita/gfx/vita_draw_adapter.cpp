@@ -101,6 +101,7 @@ struct FusedVertexContext {
   const PipelineDesc* pipeline=nullptr;
   const VertexTransformState* state=nullptr;
   VertexPipelineRequirements requirements{};
+  VertexSemanticMask decodeSemantics=AllVertexSemantics;
   CanonicalVertex* vertices=nullptr;
   std::array<uint8_t,3> error{{0,0,0}}; // 1=decode, 2=transform
 };
@@ -110,7 +111,7 @@ bool decode_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) 
   if(lane>=ctx.error.size())return false;
   for(size_t i=begin;i<end;++i){
     auto&v=ctx.vertices[i];
-    if(!decode_vertex_into(ctx.raw,ctx.rawBytes,static_cast<uint32_t>(i),*ctx.layout,v)){
+    if(!decode_vertex_into(ctx.raw,ctx.rawBytes,static_cast<uint32_t>(i),*ctx.layout,v,ctx.decodeSemantics)){
       ctx.error[lane]=1;return false;
     }
     if(!transform_vertex_for_pipeline(v,*ctx.pipeline,*ctx.state,ctx.requirements)){
@@ -118,6 +119,49 @@ bool decode_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) 
     }
   }
   return true;
+}
+
+VertexSemanticMask decode_semantics_for_pipeline(const PipelineDesc& pipeline,
+                                                 VertexPipelineRequirements requirements) noexcept {
+  VertexSemanticMask mask=vertex_semantic_bit(VertexSemantic::Position)|
+                          vertex_semantic_bit(VertexSemantic::PnMatrixIndex);
+  if(requirements.needNormal)mask|=vertex_semantic_bit(VertexSemantic::Normal);
+  if(requirements.needBumpBasis)mask|=vertex_semantic_bit(VertexSemantic::Binormal)|vertex_semantic_bit(VertexSemantic::Tangent);
+
+  const auto require_color=[&](unsigned color) noexcept {
+    mask|=vertex_semantic_bit(color?VertexSemantic::Color1:VertexSemantic::Color0);
+  };
+  for(unsigned base=0;base<2;++base)if(requirements.colorMask&(1u<<base)){
+    const auto&rgb=pipeline.colorChannels[base];
+    const auto&alpha=pipeline.colorChannels[base+2];
+    if(rgb.materialSource==ColorSource::Vertex||alpha.materialSource==ColorSource::Vertex||
+       (rgb.lightingEnabled&&rgb.ambientSource==ColorSource::Vertex)||
+       (alpha.lightingEnabled&&alpha.ambientSource==ColorSource::Vertex))require_color(base);
+  }
+
+  const auto require_texgen_source=[&](TexGenSource source) noexcept {
+    switch(source){
+    case TexGenSource::Position: mask|=vertex_semantic_bit(VertexSemantic::Position); break;
+    case TexGenSource::Normal: mask|=vertex_semantic_bit(VertexSemantic::Normal); break;
+    case TexGenSource::Binormal: mask|=vertex_semantic_bit(VertexSemantic::Binormal); break;
+    case TexGenSource::Tangent: mask|=vertex_semantic_bit(VertexSemantic::Tangent); break;
+    case TexGenSource::Color0: require_color(0); break;
+    case TexGenSource::Color1: require_color(1); break;
+    default: {
+      const unsigned ti=static_cast<unsigned>(source)-static_cast<unsigned>(TexGenSource::Tex0);
+      if(ti<MaxTextures)mask|=vertex_semantic_bit(static_cast<VertexSemantic>(static_cast<unsigned>(VertexSemantic::Tex0)+ti));
+      break;
+    }
+    }
+  };
+  const unsigned texgenCount=std::min<unsigned>(pipeline.texgenCount,MaxTextures);
+  for(unsigned i=0;i<texgenCount;++i)if(requirements.texgenMask&(1u<<i)){
+    const auto&t=pipeline.texgens[i];
+    if(!texgen_type_is_bump(t.type))require_texgen_source(t.source);
+    if(t.matrixFromVertex)
+      mask|=vertex_semantic_bit(static_cast<VertexSemantic>(static_cast<unsigned>(VertexSemantic::TexMatrixIndex0)+i));
+  }
+  return mask;
 }
 }
 DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint32_t explicitIndexCount,size_t vertexStride) noexcept {
@@ -148,7 +192,9 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
   const bool expanded=source==SourcePrimitive::Points||source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip;
   auto&transformed=expanded?out.scratch:out.vertices;
   transformed.resize(count);
-  FusedVertexContext fused{raw,bytes,&layout,&pipeline,&state,vertex_pipeline_requirements(pipeline),transformed.data()};
+  const auto requirements=vertex_pipeline_requirements(pipeline);
+  FusedVertexContext fused{raw,bytes,&layout,&pipeline,&state,requirements,
+                           decode_semantics_for_pipeline(pipeline,requirements),transformed.data()};
   // Decode and GX vertex processing used to dispatch the worker pool twice and
   // walk the 168-byte canonical array twice. Fusing them keeps each vertex hot
   // in cache and makes medium-sized Strikers draws worth parallelizing.

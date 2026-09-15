@@ -43,6 +43,10 @@ struct DrawSinkConfig {
   gfx::Telemetry* telemetry = nullptr;
   integration::FeatureCoverage* coverage = nullptr;
   integration::FrameTrace* trace = nullptr;
+  // Human-readable geometry dumps intentionally walk prepared vertices and
+  // write several stderr lines per sampled draw. Keep that independent from
+  // structured telemetry/coverage so profiling does not perturb the hot path.
+  bool verboseGeometryDiagnostics = false;
   bool strictUnsupported = false;
 };
 
@@ -124,6 +128,7 @@ private:
   gfx::Telemetry* telemetry_ = nullptr;
   integration::FeatureCoverage* coverage_ = nullptr;
   integration::FrameTrace* trace_ = nullptr;
+  bool verboseGeometryDiagnostics_ = false;
   bool strictUnsupported_ = false;
   bool strictFailed_ = false;
   struct CopyTextureEntry { gfx::Handle handle=gfx::InvalidHandle; uint32_t width=0,height=0; uint32_t revision=0; };

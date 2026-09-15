@@ -35,6 +35,31 @@ TEST(VitaVertexDecode, IndexedBigEndianS16PositionAndDirectPnMatrix) {
   EXPECT_FLOAT_EQ(vertex.position[2],5.f);
 }
 
+TEST(VitaVertexDecode, RequiredSemanticMaskSkipsUnusedInvalidAttribute) {
+  const std::array<uint8_t,3> stream{{0,0,7}};
+  const std::array<uint8_t,6> positions{{0,8, 0xff,0xf4, 0,20}};
+
+  VertexDecodeLayout layout{};
+  layout.streamStride=3;
+  layout.streamLittleEndian=false;
+  layout.count=2;
+  layout.attributes[0]={VertexSemantic::Position,VertexSource::Index16,VertexComponent::S16,3,2,0,0,
+                        {positions.data(),positions.size(),6,false}};
+  // Deliberately invalid array state. A pipeline that does not consume normals
+  // must not resolve or decode this attribute at all.
+  layout.attributes[1]={VertexSemantic::Normal,VertexSource::Index8,VertexComponent::S16,3,0,2,0,{}};
+
+  CanonicalVertex vertex{};
+  ASSERT_TRUE(decode_vertex_into(stream.data(),stream.size(),0,layout,vertex,
+                                 vertex_semantic_bit(VertexSemantic::Position)));
+  EXPECT_FLOAT_EQ(vertex.position[0],2.f);
+  EXPECT_FLOAT_EQ(vertex.position[1],-3.f);
+  EXPECT_FLOAT_EQ(vertex.position[2],5.f);
+
+  CanonicalVertex fullVertex{};
+  EXPECT_FALSE(decode_vertex_into(stream.data(),stream.size(),0,layout,fullVertex));
+}
+
 TEST(VitaVertexPipeline, FixedCurrentMatrixCanAddressTextureRegion) {
   CanonicalVertex vertex{};
   vertex.position[0]=1.f;

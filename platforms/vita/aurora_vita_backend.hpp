@@ -43,6 +43,8 @@ struct BackendConfig {
   // CPU-side per-vertex decode/transform work, giving Vita three CPU lanes in
   // total with the default two workers plus the caller.
   uint32_t cpu_worker_threads=2;
+  // Minimum useful work per CPU lane. Smaller draws stay on the render thread;
+  // larger draws progressively use one or two workers as their size warrants.
   uint32_t cpu_parallel_min_vertices=512;
   // Expensive per-draw coverage/trace instrumentation is opt-in for shipping
   // ports. Supplying any diagnostic output path still enables it automatically.

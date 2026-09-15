@@ -157,11 +157,21 @@ void shutdown_cpu_workers() noexcept {
 bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
   if (!task) return false;
   if (count == 0) return true;
-  if (!g_workers.initialized || g_workers.workerCount == 0 || count < g_workers.minItems) {
+  if (!g_workers.initialized || g_workers.workerCount == 0) {
     return task(context, 0, count, 0);
   }
 
-  const uint32_t lanes = g_workers.workerCount + 1;
+  // `minItems` is the minimum useful amount of work per execution lane, not
+  // merely the threshold for waking every worker.  Waking two Vita pthreads for
+  // a ~150-vertex draw used to split it into ~50-vertex chunks, where condition
+  // variable traffic cost more than the decode/transform work itself.  Scale the
+  // active lane count with the draw instead and keep small draws on the caller.
+  const uint32_t maxLanes = g_workers.workerCount + 1;
+  const uint32_t usefulLanes = static_cast<uint32_t>(std::min<size_t>(
+      maxLanes, std::max<size_t>(1, count / g_workers.minItems)));
+  if (usefulLanes <= 1) return task(context, 0, count, 0);
+
+  const uint32_t lanes = usefulLanes;
   const size_t chunk = (count + lanes - 1) / lanes;
   const size_t mainEnd = std::min(count, chunk);
 
@@ -173,9 +183,10 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
   for (uint32_t i = 0; i < g_workers.workerCount; ++i) {
     const size_t begin = std::min(count, chunk * static_cast<size_t>(i + 1));
     const size_t end = std::min(count, begin + chunk);
+    const bool laneEnabled = i + 1 < lanes;
     g_workers.begin[i] = begin;
     g_workers.end[i] = end;
-    g_workers.active[i] = begin < end;
+    g_workers.active[i] = laneEnabled && begin < end;
     g_workers.result[i] = true;
     if (g_workers.active[i]) ++g_workers.activeWorkers;
   }

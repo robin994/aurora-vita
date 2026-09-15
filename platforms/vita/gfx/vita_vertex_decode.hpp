@@ -14,6 +14,12 @@ enum class VertexSemantic : uint8_t {
   Position, Normal, Binormal, Tangent, Color0, Color1,
   Tex0, Tex1, Tex2, Tex3, Tex4, Tex5, Tex6, Tex7
 };
+using VertexSemanticMask = uint32_t;
+inline constexpr VertexSemanticMask vertex_semantic_bit(VertexSemantic semantic) noexcept {
+  return VertexSemanticMask{1u} << static_cast<unsigned>(semantic);
+}
+inline constexpr VertexSemanticMask AllVertexSemantics =
+    (VertexSemanticMask{1u} << (static_cast<unsigned>(VertexSemantic::Tex7) + 1u)) - 1u;
 enum class VertexSource : uint8_t { None, Direct, Index8, Index16 };
 enum class VertexComponent : uint8_t { U8, S8, U16, S16, F32, RGB565, RGB8, RGBX8, RGBA4, RGBA6, RGBA8 };
 
@@ -79,7 +85,8 @@ VertexLayout gpu_vertex_layout(uint8_t texcoordMask=0xff,uint8_t colorMask=0x03)
 // Decode one GX FIFO vertex into the canonical CPU representation. Exposed so
 // the Vita draw adapter can fuse decode + transform into a single worker pass.
 bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,
-                        const VertexDecodeLayout& layout, CanonicalVertex& vertex) noexcept;
+                        const VertexDecodeLayout& layout, CanonicalVertex& vertex,
+                        VertexSemanticMask requiredSemantics=AllVertexSemantics) noexcept;
 VertexDecodeResult decode_vertices(const uint8_t* stream, size_t streamSize, uint32_t vertexCount,
                                    const VertexDecodeLayout& layout) noexcept;
 

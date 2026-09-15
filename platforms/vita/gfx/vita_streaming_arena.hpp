@@ -10,6 +10,9 @@ struct StreamingArenaConfig {
   size_t vertexBytes = 4 * 1024 * 1024;
   size_t indexBytes = 1024 * 1024;
   uint32_t slots = 3;
+  // Number of submitted display frames that may still reference a streaming
+  // page. This normally matches vitaGL's double/triple-buffer count.
+  uint32_t framesInFlight = 3;
   size_t alignment = 16;
 };
 
@@ -69,9 +72,11 @@ private:
   StreamingArenaConfig cfg_{};
   std::vector<Slot> slots_{};
   std::vector<uint8_t> inFlight_{};
+  std::vector<uint64_t> submittedFrame_{};
   std::vector<uint8_t> vertexStage_{};
   std::vector<uint8_t> indexStage_{};
   uint32_t current_=0;
+  uint64_t currentFrame_=0;
   bool initialized_=false;
   size_t vertexHighWater_=0,indexHighWater_=0;
   uint64_t vertexOverflows_=0,indexOverflows_=0,recycles_=0,gpuSyncs_=0;

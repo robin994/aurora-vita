@@ -67,11 +67,13 @@ bool resolve(const uint8_t* stream, size_t streamSize, size_t base, const Vertex
 }
 
 bool decode_vertex(const uint8_t* stream, size_t streamSize, uint32_t vi,
-                   const VertexDecodeLayout& layout, CanonicalVertex& v) noexcept {
+                   const VertexDecodeLayout& layout, CanonicalVertex& v,
+                   VertexSemanticMask requiredSemantics) noexcept {
   const size_t base = size_t(vi) * layout.streamStride;
   for (unsigned ai = 0; ai < layout.count; ++ai) {
     const auto& a = layout.attributes[ai];
     if (a.source == VertexSource::None) continue;
+    if ((requiredSemantics & vertex_semantic_bit(a.semantic)) == 0) continue;
     const uint8_t* p = nullptr;
     size_t avail = 0;
     bool le = false;
@@ -136,7 +138,7 @@ bool decode_range(void* opaque, size_t begin, size_t end, uint32_t lane) noexcep
   auto& ctx = *static_cast<DecodeContext*>(opaque);
   if (lane >= ctx.badVertex.size()) return false;
   for (size_t vi = begin; vi < end; ++vi) {
-    if (!decode_vertex(ctx.stream, ctx.streamSize, static_cast<uint32_t>(vi), *ctx.layout, ctx.vertices[vi])) {
+    if (!decode_vertex(ctx.stream, ctx.streamSize, static_cast<uint32_t>(vi), *ctx.layout, ctx.vertices[vi], AllVertexSemantics)) {
       ctx.badVertex[lane] = vi;
       return false;
     }
@@ -169,10 +171,11 @@ VertexLayout gpu_vertex_layout(uint8_t texcoordMask,uint8_t colorMask) noexcept 
   return l;
 }
 bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,
-                        const VertexDecodeLayout& layout, CanonicalVertex& vertex) noexcept {
+                        const VertexDecodeLayout& layout, CanonicalVertex& vertex,
+                        VertexSemanticMask requiredSemantics) noexcept {
   if (!stream || !layout.streamStride || layout.count > layout.attributes.size()) return false;
   if (size_t(vertexIndex) * layout.streamStride >= streamSize) return false;
-  return decode_vertex(stream, streamSize, vertexIndex, layout, vertex);
+  return decode_vertex(stream, streamSize, vertexIndex, layout, vertex, requiredSemantics);
 }
 VertexDecodeResult decode_vertices(const uint8_t* stream, size_t streamSize, uint32_t vertexCount,
                                    const VertexDecodeLayout& layout) noexcept {

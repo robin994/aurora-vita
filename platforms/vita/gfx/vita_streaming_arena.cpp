@@ -32,6 +32,7 @@ bool StreamingArena::initialize() noexcept {
 
   slots_.resize(cfg_.slots);
   inFlight_.assign(cfg_.slots, 0);
+  submittedFrame_.assign(cfg_.slots, std::numeric_limits<uint64_t>::max());
   for (auto& slot : slots_) {
     slot.vertex = pool_.create_vertex(nullptr, cfg_.vertexBytes, true);
     slot.index = pool_.create_index(nullptr, cfg_.indexBytes, true);
@@ -62,12 +63,14 @@ void StreamingArena::shutdown() noexcept {
   }
   slots_.clear();
   inFlight_.clear();
+  submittedFrame_.clear();
   vertexStage_.clear();
   indexStage_.clear();
   initialized_ = false;
   vertexHighWater_ = indexHighWater_ = 0;
   vertexOverflows_ = indexOverflows_ = recycles_ = gpuSyncs_ = 0;
   current_ = 0;
+  currentFrame_ = 0;
 }
 
 bool StreamingArena::activate_slot(uint32_t index) noexcept {
@@ -104,22 +107,29 @@ bool StreamingArena::acquire_slot(uint32_t preferred) noexcept {
   ++gpuSyncs_;
 #endif
   std::fill(inFlight_.begin(), inFlight_.end(), 0);
+  std::fill(submittedFrame_.begin(), submittedFrame_.end(), std::numeric_limits<uint64_t>::max());
   return activate_slot(preferred);
 }
 
 void StreamingArena::begin_frame(uint64_t frame) noexcept {
   if (!initialized_ || slots_.empty()) return;
+  currentFrame_=frame;
   const uint32_t preferred = static_cast<uint32_t>(frame % slots_.size());
 
-  // The slot selected by the normal frame rotation is safe to reuse when its
-  // matching vitaGL display buffer comes back around. Keep every other slot
-  // marked in flight, though: a large GX frame may spill into one of those
-  // buffers before its own display-buffer turn has synchronized it. Clearing
-  // the entire ring here makes the first rollover overwrite GPU-visible data.
-  // recycle_current() will therefore drain only when a frame actually consumes
-  // the remaining in-flight slots, rather than once every ordinary ring wrap.
-  inFlight_[preferred] = 0;
-  (void)activate_slot(preferred);
+  // Streaming pages are not intrinsically tied to display-buffer indices: a
+  // large frame can spill into several pages. Retire each page by the frame in
+  // which it was actually submitted rather than assuming `frame % slots` owns
+  // it. Once the display ring has advanced `framesInFlight` times, vitaGL/GXM
+  // has synchronized the corresponding work and that storage is safe to reuse.
+  const uint64_t latency=std::max<uint32_t>(1,cfg_.framesInFlight);
+  for(size_t i=0;i<inFlight_.size();++i){
+    if(!inFlight_[i]||submittedFrame_[i]==std::numeric_limits<uint64_t>::max())continue;
+    if(frame>=submittedFrame_[i]&&frame-submittedFrame_[i]>=latency){
+      inFlight_[i]=0;
+      submittedFrame_[i]=std::numeric_limits<uint64_t>::max();
+    }
+  }
+  (void)acquire_slot(preferred);
 }
 
 BufferSlice StreamingArena::reserve(bool vertex, size_t bytes, size_t alignment, void** writable) noexcept {
@@ -227,7 +237,10 @@ bool StreamingArena::flush() noexcept {
 #endif
 }
 void StreamingArena::mark_current_submitted() noexcept {
-  if (initialized_ && current_ < inFlight_.size()) inFlight_[current_] = 1;
+  if (initialized_ && current_ < inFlight_.size()) {
+    inFlight_[current_] = 1;
+    submittedFrame_[current_] = currentFrame_;
+  }
 }
 bool StreamingArena::can_reserve(size_t vertexBytes,size_t vertexAlignment,size_t indexBytes,size_t indexAlignment) const noexcept {
   if(!initialized_||slots_.empty())return false;
