@@ -36,9 +36,12 @@ public:
   BufferSlice upload_rebased_indices(const uint16_t* data, size_t count, uint32_t vertexBase) noexcept;
   bool flush() noexcept;
   bool can_reserve(size_t vertexBytes,size_t vertexAlignment,size_t indexBytes,size_t indexAlignment) const noexcept;
-  // Called only after the current command stream has been submitted. Orphans the
-  // current VBO/IBO and rewinds offsets so a large GX frame can be rendered in
-  // bounded chunks instead of requiring the whole frame to fit in RAM at once.
+  // Called only after the current command stream has been submitted. Waits for
+  // those draws to finish, then rewinds the current VBO/IBO so a large GX frame
+  // can be rendered in bounded chunks without allocating another backing store.
+  // This is intentionally conservative on Vita: vitaGL's dynamic-buffer scratch
+  // allocator shares its circular pool with texture upload staging, so orphaning
+  // a 4 MiB/1 MiB pair here can starve a following compressed-texture upload.
   bool recycle_current() noexcept;
 
   size_t vertex_used() const noexcept;

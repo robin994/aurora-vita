@@ -175,8 +175,9 @@ bool initialize(const BackendConfig& c) noexcept {
     std::fprintf(stderr, "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
   std::fprintf(stderr,
-               "[aurora-vita] render config native_cmpr=%u direct_stream=%u gpu_vertex_stride=%u stream_v=%llu stream_i=%llu slots=%u\n",
+               "[aurora-vita] render config native_cmpr=%u direct_stream=%u scratch_dynamic=%u scratch_stream=%u gpu_vertex_stride=%u stream_v=%llu stream_i=%llu slots=%u\n",
                AURORA_VITA_NATIVE_CMPR?1u:0u,AURORA_VITA_DIRECT_STREAM_WRITE?1u:0u,
+               c.vgl_scratch_dynamic?1u:0u,c.vgl_scratch_stream?1u:0u,
                static_cast<unsigned>(sizeof(gfx::GpuVertex)),
                static_cast<unsigned long long>(c.stream_vertex_bytes),
                static_cast<unsigned long long>(c.stream_index_bytes),c.stream_slots);

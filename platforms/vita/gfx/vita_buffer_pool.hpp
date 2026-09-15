@@ -11,10 +11,6 @@ public:
   Handle create_vertex(const void* data,size_t bytes,bool dynamic=false) noexcept;
   Handle create_index(const void* data,size_t bytes,bool dynamic=false) noexcept;
   bool update(Handle h,const void* data,size_t bytes,size_t offset=0) noexcept;
-  // Discard a dynamic buffer's backing store while preserving its GL object.
-  // vitaGL keeps recently-used storage alive until the GPU is done with it,
-  // making this the equivalent of desktop GL buffer orphaning.
-  bool orphan(Handle h) noexcept;
   void destroy(Handle h) noexcept;void clear() noexcept;
 #if defined(__vita__)
   unsigned gl_id(Handle h) const noexcept;

@@ -349,7 +349,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     return result;
   }
   // A GX frame is not required to fit in one giant CPU/GPU staging buffer.
-  // Submit the completed chunk and orphan the dynamic backing store before doing
+  // Submit the completed chunk and safely rewind its backing store before doing
   // any decode/lighting/texture work for the next draw. Previously Strikers hit
   // the 2 MiB arena and then spent hundreds of milliseconds preparing hundreds
   // of draws that could only fail at enqueue time.

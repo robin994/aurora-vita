@@ -199,7 +199,18 @@ bool StreamingArena::recycle_current() noexcept {
 #if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
   if(slot.vmapped||slot.imapped)return false;
 #endif
-  if(!pool_.orphan(slot.vertex)||!pool_.orphan(slot.index))return false;
+#if defined(__vita__)
+  // DrawSink::flush() has already issued every command that references the
+  // current ranges. vitaGL's glMapBufferRange implementation does not fence an
+  // in-flight VBO before exposing its pointer again, so make that ownership
+  // transfer explicit before rewinding the same backing memory.
+  //
+  // Do NOT use glBufferData/orphan here. Dynamic vitaGL buffers can live in the
+  // same circular scratch pool used by glCompressedTexImage2D's transfer source;
+  // repeated 4 MiB + 1 MiB orphans exhausted that pool just before Strikers'
+  // CMPR uploads and could fault inside SceGxm/kernel allocation paths.
+  glFinish();
+#endif
   slot.voff=slot.ioff=slot.vflushed=slot.iflushed=0;
   ++recycles_;
   return true;
