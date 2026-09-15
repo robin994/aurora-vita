@@ -74,6 +74,10 @@ struct VertexDecodeResult {
 
 VertexLayout canonical_vertex_layout() noexcept;
 VertexLayout gpu_vertex_layout() noexcept;
+// Decode one GX FIFO vertex into the canonical CPU representation. Exposed so
+// the Vita draw adapter can fuse decode + transform into a single worker pass.
+bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,
+                        const VertexDecodeLayout& layout, CanonicalVertex& vertex) noexcept;
 VertexDecodeResult decode_vertices(const uint8_t* stream, size_t streamSize, uint32_t vertexCount,
                                    const VertexDecodeLayout& layout) noexcept;
 

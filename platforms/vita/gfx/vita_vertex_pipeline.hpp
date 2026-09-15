@@ -26,6 +26,16 @@ struct VertexTransformState {
   uint8_t currentPnMatrix = 0;
 };
 
+struct VertexPipelineRequirements {
+  bool needNormal = false;
+  bool needBumpBasis = false;
+};
+
+VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipeline) noexcept;
+bool transform_vertex_for_pipeline(CanonicalVertex& vertex, const PipelineDesc& pipeline,
+                                   const VertexTransformState& state,
+                                   VertexPipelineRequirements requirements) noexcept;
+
 // Correctness-first CPU implementation of the Aurora GX vertex shader semantics.
 // It resolves per-vertex position matrices, vertex lighting and texgen into the canonical Vita stream.
 bool run_vertex_pipeline(std::vector<CanonicalVertex>& vertices, const PipelineDesc& pipeline,

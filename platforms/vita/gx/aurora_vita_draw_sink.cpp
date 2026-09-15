@@ -367,8 +367,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     static uint64_t rolloverLogCount=0;
     const auto n=arena_->recycles();
     if(rolloverLogCount<8||(n&&(n&(n-1))==0)){
-      std::fprintf(stderr,"[aurora-vita] stream_rollover total=%llu gpu_stride=%u next_vtx=%u next_idx=%u\n",
-                   static_cast<unsigned long long>(n),static_cast<unsigned>(sizeof(gfx::GpuVertex)),
+      std::fprintf(stderr,"[aurora-vita] stream_rollover total=%llu syncs=%llu slot=%u gpu_stride=%u next_vtx=%u next_idx=%u\n",
+                   static_cast<unsigned long long>(n),static_cast<unsigned long long>(arena_->gpu_syncs()),arena_->slot(),
+                   static_cast<unsigned>(sizeof(gfx::GpuVertex)),
                    footprint.vertexCount,footprint.indexCount);
       ++rolloverLogCount;
     }

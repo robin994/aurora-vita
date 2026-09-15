@@ -1,4 +1,5 @@
 #include "vita_draw_adapter.hpp"
+#include "vita_cpu_workers.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -89,6 +90,32 @@ bool batch_compatible(const DrawPacket&a,const DrawPacket&b) noexcept {
   for(unsigned i=0;i<MaxTextures;i++)if(!same_texture(a.textures[i],b.textures[i]))return false;
   return true;
 }
+
+struct FusedVertexContext {
+  const uint8_t* raw=nullptr;
+  size_t rawBytes=0;
+  const VertexDecodeLayout* layout=nullptr;
+  const PipelineDesc* pipeline=nullptr;
+  const VertexTransformState* state=nullptr;
+  VertexPipelineRequirements requirements{};
+  CanonicalVertex* vertices=nullptr;
+  std::array<uint8_t,3> error{{0,0,0}}; // 1=decode, 2=transform
+};
+
+bool decode_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
+  auto&ctx=*static_cast<FusedVertexContext*>(opaque);
+  if(lane>=ctx.error.size())return false;
+  for(size_t i=begin;i<end;++i){
+    auto&v=ctx.vertices[i];
+    if(!decode_vertex_into(ctx.raw,ctx.rawBytes,static_cast<uint32_t>(i),*ctx.layout,v)){
+      ctx.error[lane]=1;return false;
+    }
+    if(!transform_vertex_for_pipeline(v,*ctx.pipeline,*ctx.state,ctx.requirements)){
+      ctx.error[lane]=2;return false;
+    }
+  }
+  return true;
+}
 }
 DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint32_t explicitIndexCount) noexcept {
   DrawFootprint f{};
@@ -112,11 +139,20 @@ DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint
 PreparedDraw prepare_draw(const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry) noexcept {
   PreparedDraw out{};
   if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return out;}
-  VertexDecodeResult decoded{};
-  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode); decoded=decode_vertices(raw,bytes,count,layout); }
-  if(!decoded.ok){out.error=PrepareDrawError::VertexDecodeFailed;return out;}
-  auto transformed=std::move(decoded.vertices);
-  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexTransform); if(!run_vertex_pipeline(transformed,pipeline,state,uniforms)){out.error=PrepareDrawError::VertexTransformFailed;return out;} }
+  if(size_t(count)*layout.streamStride>bytes){out.error=PrepareDrawError::VertexDecodeFailed;return out;}
+  if(uniforms)uniforms->mvp=state.projection;
+  std::vector<CanonicalVertex> transformed(count);
+  FusedVertexContext fused{raw,bytes,&layout,&pipeline,&state,vertex_pipeline_requirements(pipeline),transformed.data()};
+  // Decode and GX vertex processing used to dispatch the worker pool twice and
+  // walk the 168-byte canonical array twice. Fusing them keeps each vertex hot
+  // in cache and makes medium-sized Strikers draws worth parallelizing.
+  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
+    if(!cpu_parallel_for(count,decode_transform_range,&fused)){
+      bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;
+      out.error=transformFailed?PrepareDrawError::VertexTransformFailed:PrepareDrawError::VertexDecodeFailed;
+      return out;
+    }
+  }
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
     if(source==SourcePrimitive::Points){if(!expand_points(transformed,out.vertices,out.indices,state.projection,expansion)){out.error=PrepareDrawError::TooManyVertices;return out;}out.positionIsClipSpace=true;out.primitive=Primitive::Triangles;return out;}
     if(source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip){if(!expand_lines(transformed,source,out.vertices,out.indices,state.projection,expansion)){out.error=PrepareDrawError::TooManyVertices;return out;}out.positionIsClipSpace=true;out.primitive=Primitive::Triangles;return out;}

@@ -20,7 +20,12 @@ size_t component_bytes(VertexComponent c, uint8_t n) noexcept {
 }
 bool numeric(const uint8_t* p, size_t avail, const VertexDecodeAttribute& a, bool le, float out[4]) noexcept {
   if (a.components == 0 || a.components > 4 || avail < component_bytes(a.component, a.components)) return false;
-  const float scale = std::ldexp(1.0f, -static_cast<int>(a.frac));
+  // GX fractional bits are small (5 bits in VAT). Constructing 2^-frac from
+  // the IEEE exponent avoids a libm ldexp call for every attribute of every
+  // vertex, which was a major cost on Vita's ARM CPU.
+  const float scale = a.frac <= 126
+      ? std::bit_cast<float>(static_cast<uint32_t>(127u - a.frac) << 23u)
+      : std::ldexp(1.0f, -static_cast<int>(a.frac));
   for (unsigned i = 0; i < a.components; i++) {
     switch (a.component) {
     case VertexComponent::U8: out[i] = p[i] * scale; break;
@@ -154,6 +159,12 @@ VertexLayout gpu_vertex_layout() noexcept {
   l.attributes[2]={2,4,VertexScalar::U8,true,sizeof(GpuVertex),offsetof(GpuVertex,color1)};
   for(unsigned i=0;i<8;i++)l.attributes[3+i]={static_cast<uint8_t>(3+i),3,VertexScalar::F32,false,sizeof(GpuVertex),static_cast<uint16_t>(offsetof(GpuVertex,texcoord)+sizeof(float)*3*i)};
   return l;
+}
+bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,
+                        const VertexDecodeLayout& layout, CanonicalVertex& vertex) noexcept {
+  if (!stream || !layout.streamStride || layout.count > layout.attributes.size()) return false;
+  if (size_t(vertexIndex) * layout.streamStride >= streamSize) return false;
+  return decode_vertex(stream, streamSize, vertexIndex, layout, vertex);
 }
 VertexDecodeResult decode_vertices(const uint8_t* stream, size_t streamSize, uint32_t vertexCount,
                                    const VertexDecodeLayout& layout) noexcept {

@@ -30,6 +30,7 @@ bool StreamingArena::initialize() noexcept {
   if (cfg_.slots == 0 || cfg_.vertexBytes == 0 || cfg_.indexBytes == 0) return false;
 
   slots_.resize(cfg_.slots);
+  usedSinceSync_.assign(cfg_.slots, 0);
   for (auto& slot : slots_) {
     slot.vertex = pool_.create_vertex(nullptr, cfg_.vertexBytes, true);
     slot.index = pool_.create_index(nullptr, cfg_.indexBytes, true);
@@ -59,26 +60,44 @@ void StreamingArena::shutdown() noexcept {
     if (slot.index) pool_.destroy(slot.index);
   }
   slots_.clear();
+  usedSinceSync_.clear();
   vertexStage_.clear();
   indexStage_.clear();
   initialized_ = false;
   vertexHighWater_ = indexHighWater_ = 0;
-  vertexOverflows_ = indexOverflows_ = recycles_ = 0;
+  vertexOverflows_ = indexOverflows_ = recycles_ = gpuSyncs_ = 0;
   current_ = 0;
 }
 
-void StreamingArena::begin_frame(uint64_t frame) noexcept {
-  if (!initialized_ || slots_.empty()) return;
-  current_ = static_cast<uint32_t>(frame % slots_.size());
-  auto& slot = slots_[current_];
+bool StreamingArena::activate_slot(uint32_t index) noexcept {
+  if(!initialized_||slots_.empty()||index>=slots_.size())return false;
+  auto& slot=slots_[index];
 #if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
   if (slot.vmapped && slot.vertex) { glBindBuffer(GL_ARRAY_BUFFER, pool_.gl_id(slot.vertex)); (void)glUnmapBuffer(GL_ARRAY_BUFFER); slot.vmapped = nullptr; }
   if (slot.imapped && slot.index) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pool_.gl_id(slot.index)); (void)glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER); slot.imapped = nullptr; }
 #endif
+#if defined(__vita__)
+  // A slot can be reused only after every draw that referenced its previous
+  // contents has completed. Rotate through all configured VBO/IBO pairs first;
+  // pay one global sync only when wrapping onto a slot used since the last sync.
+  if(usedSinceSync_[index]){
+    glFinish();
+    ++gpuSyncs_;
+    std::fill(usedSinceSync_.begin(),usedSinceSync_.end(),0);
+  }
+#endif
+  current_=index;
   slot.voff = 0;
   slot.ioff = 0;
   slot.vflushed = 0;
   slot.iflushed = 0;
+  usedSinceSync_[index]=1;
+  return true;
+}
+
+void StreamingArena::begin_frame(uint64_t frame) noexcept {
+  if (!initialized_ || slots_.empty()) return;
+  (void)activate_slot(static_cast<uint32_t>(frame % slots_.size()));
 }
 
 BufferSlice StreamingArena::reserve(bool vertex, size_t bytes, size_t alignment, void** writable) noexcept {
@@ -199,19 +218,11 @@ bool StreamingArena::recycle_current() noexcept {
 #if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
   if(slot.vmapped||slot.imapped)return false;
 #endif
-#if defined(__vita__)
-  // DrawSink::flush() has already issued every command that references the
-  // current ranges. vitaGL's glMapBufferRange implementation does not fence an
-  // in-flight VBO before exposing its pointer again, so make that ownership
-  // transfer explicit before rewinding the same backing memory.
-  //
-  // Do NOT use glBufferData/orphan here. Dynamic vitaGL buffers can live in the
-  // same circular scratch pool used by glCompressedTexImage2D's transfer source;
-  // repeated 4 MiB + 1 MiB orphans exhausted that pool just before Strikers'
-  // CMPR uploads and could fault inside SceGxm/kernel allocation paths.
-  glFinish();
-#endif
-  slot.voff=slot.ioff=slot.vflushed=slot.iflushed=0;
+  // DrawSink::flush() has issued all commands referencing this chunk. Move to a
+  // different persistent backing buffer instead of immediately stalling the GPU
+  // and rewinding the same one. activate_slot() synchronizes only on wraparound.
+  const uint32_t next=static_cast<uint32_t>((current_+1u)%slots_.size());
+  if(!activate_slot(next))return false;
   ++recycles_;
   return true;
 }

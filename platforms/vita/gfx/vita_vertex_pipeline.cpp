@@ -18,6 +18,7 @@ V4 mul(V4 a,float s) noexcept{return {a.x*s,a.y*s,a.z*s,a.w*s};}
 float dot(V3 a,V3 b) noexcept{return a.x*b.x+a.y*b.y+a.z*b.z;}
 float len(V3 a) noexcept{return std::sqrt(std::max(dot(a,a),0.f));}
 V3 norm(V3 a) noexcept{const float l=len(a);return l>1e-10f?mul(a,1.f/l):V3{};}
+V3 norm_if_nonzero(V3 a) noexcept{const float l2=dot(a,a);if(l2<=1e-20f)return V3{};return mul(a,1.f/std::sqrt(l2));}
 V4 clamp01(V4 a) noexcept{return {std::clamp(a.x,0.f,1.f),std::clamp(a.y,0.f,1.f),std::clamp(a.z,0.f,1.f),std::clamp(a.w,0.f,1.f)};}
 uint8_t byte(float f) noexcept{return static_cast<uint8_t>(std::clamp(std::lround(f*255.f),0l,255l));}
 
@@ -80,11 +81,11 @@ bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
   if(pn>=10)return false;
   const V3 mvPos=transform(state.postexMatrices[pn],{in.position[0],in.position[1],in.position[2],1.f});
   V3 mvNrm{};
-  if(needNormal){mvNrm=transform_dir(state.normalMatrices[pn],make3(in.normal));if(len(mvNrm)>1e-10f)mvNrm=norm(mvNrm);}
+  if(needNormal)mvNrm=norm_if_nonzero(transform_dir(state.normalMatrices[pn],make3(in.normal)));
   V3 mvBin{},mvTan{};
   if(needBumpBasis){
-    mvBin=transform_dir(state.normalMatrices[pn],make3(in.binormal));if(len(mvBin)>1e-10f)mvBin=norm(mvBin);
-    mvTan=transform_dir(state.normalMatrices[pn],make3(in.tangent));if(len(mvTan)>1e-10f)mvTan=norm(mvTan);
+    mvBin=norm_if_nonzero(transform_dir(state.normalMatrices[pn],make3(in.binormal)));
+    mvTan=norm_if_nonzero(transform_dir(state.normalMatrices[pn],make3(in.tangent)));
   }
   // Normals/tangent basis are CPU-only intermediates on Vita. Do not write them
   // back when the generated shader will only consume position/colors/texcoords.
@@ -128,13 +129,24 @@ bool transform_range(void* opaque, size_t begin, size_t end, uint32_t) noexcept 
 
 } // namespace
 
+VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipeline) noexcept {
+  VertexPipelineRequirements r{};
+  for(const auto& c:pipeline.colorChannels)r.needNormal=r.needNormal||c.lightingEnabled;
+  for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;++i)r.needBumpBasis=r.needBumpBasis||is_bump(pipeline.texgens[i].type);
+  r.needNormal=r.needNormal||r.needBumpBasis;
+  return r;
+}
+
+bool transform_vertex_for_pipeline(CanonicalVertex& vertex,const PipelineDesc& pipeline,
+                                   const VertexTransformState& state,
+                                   VertexPipelineRequirements requirements) noexcept {
+  return transform_vertex(vertex,pipeline,state,requirements.needNormal,requirements.needBumpBasis);
+}
+
 bool run_vertex_pipeline(std::vector<CanonicalVertex>& vertices,const PipelineDesc& pipeline,const VertexTransformState& state,DrawUniforms* uniforms) noexcept {
   if(uniforms)uniforms->mvp=state.projection;
-  bool needNormal=false,needBumpBasis=false;
-  for(const auto&c:pipeline.colorChannels)needNormal=needNormal||c.lightingEnabled;
-  for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;++i)needBumpBasis=needBumpBasis||is_bump(pipeline.texgens[i].type);
-  needNormal=needNormal||needBumpBasis;
-  TransformContext ctx{vertices.data(), &pipeline, &state,needNormal,needBumpBasis};
+  const auto requirements=vertex_pipeline_requirements(pipeline);
+  TransformContext ctx{vertices.data(), &pipeline, &state,requirements.needNormal,requirements.needBumpBasis};
   return cpu_parallel_for(vertices.size(), transform_range, &ctx);
 }
 

@@ -54,6 +54,7 @@ public:
   uint64_t vertex_overflows() const noexcept { return vertexOverflows_; }
   uint64_t index_overflows() const noexcept { return indexOverflows_; }
   uint64_t recycles() const noexcept { return recycles_; }
+  uint64_t gpu_syncs() const noexcept { return gpuSyncs_; }
 
 private:
   struct Slot {
@@ -64,16 +65,18 @@ private:
   };
   BufferSlice reserve(bool vertex, size_t bytes, size_t alignment, void** writable) noexcept;
   BufferSlice upload(bool vertex, const void* data, size_t bytes, size_t alignment) noexcept;
+  bool activate_slot(uint32_t index) noexcept;
   static size_t align_up(size_t value,size_t alignment) noexcept;
   BufferPool& pool_;
   StreamingArenaConfig cfg_{};
   std::vector<Slot> slots_{};
+  std::vector<uint8_t> usedSinceSync_{};
   std::vector<uint8_t> vertexStage_{};
   std::vector<uint8_t> indexStage_{};
   uint32_t current_=0;
   bool initialized_=false;
   size_t vertexHighWater_=0,indexHighWater_=0;
-  uint64_t vertexOverflows_=0,indexOverflows_=0,recycles_=0;
+  uint64_t vertexOverflows_=0,indexOverflows_=0,recycles_=0,gpuSyncs_=0;
 };
 
 } // namespace aurora::vita::gfx
