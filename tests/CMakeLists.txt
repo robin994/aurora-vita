@@ -47,8 +47,12 @@ if (AURORA_ENABLE_GX)
   ../platforms/vita/gfx/vita_shader_gen.cpp
   ../platforms/vita/gfx/vita_texture_cache.cpp
   ../platforms/vita/gfx/vita_texture_decode.cpp
+    ../platforms/vita/gfx/vita_cpu_workers.cpp
+    ../platforms/vita/gfx/vita_vertex_decode.cpp
+    ../platforms/vita/gfx/vita_vertex_pipeline.cpp
     vita_shader_depth_test.cpp
     vita_texture_decode_test.cpp
+    vita_vertex_pipeline_test.cpp
   )
 
   target_include_directories(gx_fifo_tests PRIVATE

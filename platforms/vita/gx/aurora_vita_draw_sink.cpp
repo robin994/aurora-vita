@@ -137,12 +137,42 @@ ClipPoint project_for_diag(const std::array<float,16>& m,const gfx::CanonicalVer
 }
 
 void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::VertexTransformState& state,
-                             const gfx::PipelineDesc& pipeline,uint32_t inputVertices) noexcept {
+                             const gfx::PipelineDesc& pipeline,const uint8_t* rawVertices,size_t rawBytes,
+                             const gfx::VertexDecodeLayout& layout,uint32_t inputVertices) noexcept {
   // Runtime.log is intentionally sampled: enough to diagnose the first stadium /
   // character meshes without turning logging itself into the new performance issue.
   static uint32_t logged=0;
-  if(inputVertices<512||logged>=16||prepared.vertices.empty())return;
+  const auto currentPn=aurora::gx::g_gxState.currentPnMtx;
+  if((inputVertices<512&&currentPn<10)||logged>=16||prepared.vertices.empty())return;
   ++logged;
+
+  const gfx::VertexDecodeAttribute* posAttr=nullptr;
+  const gfx::VertexDecodeAttribute* pnAttr=nullptr;
+  for(unsigned i=0;i<layout.count;i++){
+    const auto& a=layout.attributes[i];
+    if(a.semantic==gfx::VertexSemantic::Position)posAttr=&a;
+    else if(a.semantic==gfx::VertexSemantic::PnMatrixIndex)pnAttr=&a;
+  }
+  std::fprintf(stderr,
+    "[aurora-vita][3d-layout] in=%u stride=%u current_pn=%u vita_current_pn=%u "
+    "pos_src=%u pos_comp=%u pos_cnt=%u pos_frac=%u pos_arr_stride=%u pos_arr_le=%u pn_src=%u\n",
+    inputVertices,static_cast<unsigned>(layout.streamStride),static_cast<unsigned>(currentPn),
+    static_cast<unsigned>(state.currentPnMatrix),
+    posAttr?static_cast<unsigned>(posAttr->source):0u,posAttr?static_cast<unsigned>(posAttr->component):0u,
+    posAttr?static_cast<unsigned>(posAttr->components):0u,posAttr?static_cast<unsigned>(posAttr->frac):0u,
+    posAttr?static_cast<unsigned>(posAttr->array.stride):0u,posAttr?(posAttr->array.littleEndian?1u:0u):0u,
+    pnAttr?static_cast<unsigned>(pnAttr->source):0u);
+
+  const unsigned rawSamples=std::min<unsigned>(3,inputVertices);
+  for(unsigned i=0;i<rawSamples;i++){
+    gfx::CanonicalVertex raw{};
+    if(gfx::decode_vertex_into(rawVertices,rawBytes,i,layout,raw)){
+      std::fprintf(stderr,"[aurora-vita][3d-raw-v] n=%u p=%g,%g,%g pn=%u\n",i,
+                   raw.position[0],raw.position[1],raw.position[2],static_cast<unsigned>(raw.pnMatrixIndex));
+    }else{
+      std::fprintf(stderr,"[aurora-vita][3d-raw-v] n=%u decode_failed\n",i);
+    }
+  }
 
   constexpr float inf=std::numeric_limits<float>::infinity();
   float pmin[4]{inf,inf,inf,inf},pmax[4]{-inf,-inf,-inf,-inf};
@@ -429,7 +459,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
 
 #if defined(__vita__)
-  if(telemetry_||coverage_||trace_)log_large_draw_geometry(prepared,vertexState,pipeline,vertexCount);
+  if(telemetry_||coverage_||trace_)log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
 #endif
 
   std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};

@@ -345,7 +345,10 @@ void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms&
   }
   for (unsigned i = 0; i < aurora::gx::MaxTexMtx; ++i) copy_matrix(state.postexMatrices[10 + i], g.texMtxs[i]);
   for (unsigned i = 0; i < aurora::gx::MaxPTTexMtx; ++i) copy_matrix(state.postMatrices[i], g.ptTexMtxs[i]);
-  state.currentPnMatrix = static_cast<uint8_t>(std::min<u32>(g.currentPnMtx, 9));
+  // The fixed current matrix index addresses the shared XF post-transform
+  // region. Upstream Aurora intentionally permits slots 10..19 here (texture
+  // matrix rows); only dynamic per-vertex PNMTXIDX is restricted to 0..9.
+  state.currentPnMatrix = static_cast<uint8_t>(std::min<u32>(g.currentPnMtx, state.postexMatrices.size() - 1));
 
   const auto proj = aurora::gx::effective_projection_for_depth_range(
       g.proj, g.renderViewport.znear, g.renderViewport.zfar);

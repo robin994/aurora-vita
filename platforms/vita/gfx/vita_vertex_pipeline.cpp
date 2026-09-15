@@ -78,15 +78,21 @@ bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
                       const VertexTransformState& state,bool needNormal,bool needBumpBasis,uint8_t colorMask,
                       uint8_t texgenMask) noexcept {
   const CanonicalVertex in=v;
-  const unsigned pn=in.pnMatrixIndex==0xff?state.currentPnMatrix:in.pnMatrixIndex;
-  if(pn>=10)return false;
+  const bool usesCurrentPn=in.pnMatrixIndex==0xff;
+  const unsigned pn=usesCurrentPn?state.currentPnMatrix:in.pnMatrixIndex;
+  // Aurora's fixed current matrix index addresses the shared post-transform XF
+  // region, so slots 10..19 can legally select texture matrices. A per-vertex
+  // PNMTXIDX, however, uses the dynamic position palette and remains limited to
+  // the ten position matrices, matching the upstream shader layout.
+  if(pn>=state.postexMatrices.size()||(!usesCurrentPn&&pn>=state.normalMatrices.size()))return false;
+  const unsigned normalPn=std::min<unsigned>(pn,state.normalMatrices.size()-1);
   const V3 mvPos=transform(state.postexMatrices[pn],{in.position[0],in.position[1],in.position[2],1.f});
   V3 mvNrm{};
-  if(needNormal)mvNrm=norm_if_nonzero(transform_dir(state.normalMatrices[pn],make3(in.normal)));
+  if(needNormal)mvNrm=norm_if_nonzero(transform_dir(state.normalMatrices[normalPn],make3(in.normal)));
   V3 mvBin{},mvTan{};
   if(needBumpBasis){
-    mvBin=norm_if_nonzero(transform_dir(state.normalMatrices[pn],make3(in.binormal)));
-    mvTan=norm_if_nonzero(transform_dir(state.normalMatrices[pn],make3(in.tangent)));
+    mvBin=norm_if_nonzero(transform_dir(state.normalMatrices[normalPn],make3(in.binormal)));
+    mvTan=norm_if_nonzero(transform_dir(state.normalMatrices[normalPn],make3(in.tangent)));
   }
   // Normals/tangent basis are CPU-only intermediates on Vita. Do not write them
   // back when the generated shader will only consume position/colors/texcoords.
