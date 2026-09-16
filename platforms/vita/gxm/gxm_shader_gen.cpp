@@ -94,15 +94,75 @@ std::string tev_arithmetic(bool alpha, TevOp op, TevBias b, TevScale s) {
   };
   return D + "+((" + packed(A) + relation + packed(B) + ")?" + C + ":float3(0.0))";
 }
+std::string coordinate(const PipelineDesc& d,unsigned index) {
+  if(index>=MaxTextures || !(pipeline_texcoord_mask(d)&(1u<<index)))return "float2(0.0)";
+  const auto v="v_tex"+std::to_string(index);
+  return index<d.texgenCount && d.texgens[index].type==TexGenType::Matrix3x4?
+      "("+v+".xy/"+v+".z)":v+".xy";
+}
+std::string wrapped(IndirectWrap mode,const std::string& value) {
+  if(mode==IndirectWrap::Off)return value;
+  if(mode==IndirectWrap::W0)return "0.0";
+  const auto size=std::to_string(256u>>(unsigned(mode)-1u))+".0";
+  // Cg fmod has different behavior for negative inputs than GX/GLSL modulo.
+  return "("+value+"-floor("+value+"/"+size+")*"+size+")";
+}
+void indirect(std::ostringstream& fs,const PipelineDesc& d,const TevStage& s) {
+  if(!s.indirectEnabled)return;
+  const auto& ind=d.tev.indirectStages[s.indirectStage];
+  const unsigned itc=ind.texCoord,itex=ind.texture;
+  const unsigned divisors[]{1,8,16,32};
+  fs<<"float2 ind_uv="<<coordinate(d,itc)<<"*max(u_texcoord_scale["<<itc<<"].xy,float2(1.0))*float2("
+    <<(1.f/float(1u<<ind.scaleSShift))<<","<<(1.f/float(1u<<ind.scaleTShift))
+    <<")/max(u_texture_size_bias["<<itex<<"].xy,float2(1.0));\n"
+      "float4 ind_sample=tex2D(u_tex"<<itex<<",ind_uv);\n"
+      "float3 ind_raw=ind_sample.abg*255.0;\nfloat3 indv=floor(ind_raw/"<<divisors[unsigned(s.indirectFormat)]<<".0);\n";
+  const unsigned bias=unsigned(s.indirectBias);
+  const char* biasValue=s.indirectFormat==IndirectFormat::Bits8?"-128.0":"1.0";
+  if(bias&1u)fs<<"indv.x+="<<biasValue<<";\n";
+  if(bias&2u)fs<<"indv.y+="<<biasValue<<";\n";
+  if(bias&4u)fs<<"indv.z+="<<biasValue<<";\n";
+  if(s.indirectAlpha!=IndirectAlphaSel::Off) {
+    const char axis="xyz"[unsigned(s.indirectAlpha)-1];
+    const unsigned step=s.indirectFormat==IndirectFormat::Bits5?32:s.indirectFormat==IndirectFormat::Bits4?16:8;
+    fs<<"ind_alpha=floor(ind_raw."<<axis<<"/"<<step<<".0)*"<<step<<".0/255.0;\n";
+  }
+  const unsigned tc=s.texCoord<MaxTextures?s.texCoord:0,tex=s.texture<MaxTextures?s.texture:0;
+  const bool simple=s.indirectMatrix==IndirectMatrix::Off && !s.indirectAddPrev;
+  fs<<"float2 base_texel=tev_uv";
+  if(!simple)fs<<"*max(u_texcoord_scale["<<tc<<"].xy,float2(1.0))";
+  fs<<";\nbase_texel=float2("<<wrapped(s.indirectWrapS,"base_texel.x")<<","<<wrapped(s.indirectWrapT,"base_texel.y")<<");\n";
+  const unsigned matrix=unsigned(s.indirectMatrix);
+  if(!matrix)fs<<"float2 ind_off=float2(0.0);\n";
+  else if(matrix<=unsigned(IndirectMatrix::Mtx2)) {
+    const unsigned m=matrix-unsigned(IndirectMatrix::Mtx0);
+    fs<<"float4 im0=u_ind_mtx["<<m*2<<"],im1=u_ind_mtx["<<m*2+1<<"];\n"
+      "float2 ind_off=float2(dot(float3(im0.x,im0.z,im1.x),indv),dot(float3(im0.y,im0.w,im1.y),indv))*im1.z;\n";
+  } else {
+    const bool rowS=matrix<=unsigned(IndirectMatrix::S2);
+    const unsigned m=matrix-unsigned(rowS?IndirectMatrix::S0:IndirectMatrix::T0);
+    fs<<"float2 ind_off="<<coordinate(d,tc)<<"*max(u_texcoord_scale["<<tc<<"].xy,float2(1.0))*indv."
+      <<(rowS?'x':'y')<<"*u_ind_mtx["<<m*2+1<<"].z/256.0;\n";
+  }
+  fs<<"prev_ind_uv"<<(s.indirectAddPrev?"+=":"=")<<"base_texel+ind_off;\ntev_uv=prev_ind_uv";
+  if(!simple)fs<<"/max(u_texture_size_bias["<<tex<<"].xy,float2(1.0))";
+  fs<<";\n";
+}
+std::string fog_range(const std::string& index) {
+  std::string result="u_fog_range_k[9]";
+  for(int i=8;i>=0;--i)result="("+index+"<"+std::to_string(i)+".5?u_fog_range_k["+std::to_string(i)+"]:"+result+")";
+  return result;
+}
 } // namespace
 
 std::string validate_pipeline(const gfx::PipelineDesc& d) {
   if (!d.tev.stageCount || d.tev.stageCount > MaxTevStages || d.texgenCount > MaxTextures)
     return "invalid TEV/texgen count";
   if (d.fixedVertexOnGpu) return "GXM requires CPU-prepared vertices; fixed GX GPU transform is not implemented";
-  if (d.fogMode != FogMode::None || d.fogRangeEnabled) return "GXM fog is not implemented";
+  if (d.fogMode>FogMode::RevExp2 || d.tev.indirectStageCount>MaxIndStages) return "invalid fog/indirect state";
   if (d.polygonOffset) return "GXM polygon offset is not implemented";
-  if (d.blendMode == BlendMode::Logic) return "GXM logic operations are not implemented";
+  if (d.blendMode == BlendMode::Logic && d.logicOp!=LogicOp::Clear && d.logicOp!=LogicOp::Copy && d.logicOp!=LogicOp::Noop)
+    return "GXM supports only CLEAR, COPY and NOOP logic operations";
   if (static_cast<unsigned>(d.blendMode) > static_cast<unsigned>(BlendMode::Logic) ||
       static_cast<unsigned>(d.srcFactor) > static_cast<unsigned>(BlendFactor::OneMinusDstAlpha) ||
       static_cast<unsigned>(d.dstFactor) > static_cast<unsigned>(BlendFactor::OneMinusDstAlpha) ||
@@ -119,10 +179,16 @@ std::string validate_pipeline(const gfx::PipelineDesc& d) {
     return "invalid alpha compare";
   for (unsigned i = 0; i < d.tev.stageCount; ++i) {
     const auto& s = d.tev.stages[i];
-    if (s.indirectEnabled) return "GXM indirect TEV is not implemented";
+    if(s.indirectEnabled) {
+      if(s.indirectStage>=d.tev.indirectStageCount || s.indirectStage>=MaxIndStages ||
+          s.indirectFormat>IndirectFormat::Bits3 || s.indirectBias>IndirectBias::STU ||
+          s.indirectMatrix>IndirectMatrix::T2 || s.indirectAlpha>IndirectAlphaSel::U ||
+          s.indirectWrapS>IndirectWrap::W0 || s.indirectWrapT>IndirectWrap::W0) return "invalid indirect TEV stage";
+      const auto& ind=d.tev.indirectStages[s.indirectStage];
+      if(ind.texture>=MaxTextures || ind.texCoord>=MaxTextures || ind.scaleSShift>8 || ind.scaleTShift>8)
+        return "invalid indirect TEV texture/scale";
+    }
     if (static_cast<unsigned>(s.rasterSource) > static_cast<unsigned>(RasterSource::Zero)) return "invalid raster source";
-    if (tev_stage_uses_raster(s) && (s.rasterSource == RasterSource::AlphaBump || s.rasterSource == RasterSource::AlphaBumpN))
-      return "GXM alpha bump is not implemented";
     if (s.colorOut > TevReg::Reg2 || s.alphaOut > TevReg::Reg2 || s.colorOp > TevOp::CompRGB8Equal ||
         s.alphaOp > TevOp::CompRGB8Equal || s.colorBias > TevBias::SubHalf || s.alphaBias > TevBias::SubHalf ||
         s.colorScale > TevScale::Divide2 || s.alphaScale > TevScale::Divide2 ||
@@ -164,7 +230,10 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   std::ostringstream vs, fs;
   std::vector<std::string> vp{"float4 a_position : POSITION", "out float4 v_position : POSITION"};
   std::vector<std::string> fp{"float4 window_position : WPOS", "uniform float4 u_clip_rect",
-      "uniform float4 u_kcolor[4]", "uniform float4 u_tevreg[4]"};
+      "uniform float4 u_kcolor[4]", "uniform float4 u_tevreg[4]",
+      "uniform float4 u_ind_mtx[6]", "uniform float4 u_texcoord_scale[8]", "uniform float4 u_texture_size_bias[8]",
+      "uniform float4 u_fog_color", "uniform float4 u_fog_params", "uniform float u_fog_range_k[10]",
+      "uniform float u_render_viewport_width"};
   if (!d.positionIsClipSpace) vp.push_back("uniform float4 u_mvp[4]");
   for (unsigned i = 0; i < 2; ++i) if (out.colorMask & (1u << i)) {
     const auto n = std::to_string(i);
@@ -197,22 +266,21 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   signature(fs, fp);
   fs << ") : COLOR {\n"
         "if(window_position.x<u_clip_rect.x||window_position.y<u_clip_rect.y||window_position.x>=u_clip_rect.z||window_position.y>=u_clip_rect.w) discard;\n"
-        "float4 prev=u_tevreg[0],reg0=u_tevreg[1],reg1=u_tevreg[2],reg2=u_tevreg[3];\n";
+        "float4 prev=u_tevreg[0],reg0=u_tevreg[1],reg1=u_tevreg[2],reg2=u_tevreg[3];\n"
+        "float2 prev_ind_uv=float2(0.0);\n";
   std::array<bool, 4> cn{}, an{};
   for (unsigned i = 0; i < d.tev.stageCount; ++i) {
     const auto& s = d.tev.stages[i];
-    fs << "{\nfloat4 raw_tex=";
+    fs << "{\nfloat ind_alpha=0.0;\nfloat2 tev_uv="<<coordinate(d,s.texCoord)<<";\n";
+    indirect(fs,d,s);
+    fs << "float4 raw_tex=";
     if (tev_stage_uses_texture(s) && s.texture < MaxTextures) {
-      std::string uv = "float2(0.0)";
-      if (s.texCoord < MaxTextures) {
-        const auto tex = "v_tex" + std::to_string(s.texCoord);
-        uv = tex + ".xy";
-        if (s.texCoord < d.texgenCount && d.texgens[s.texCoord].type == TexGenType::Matrix3x4) uv = "(" + uv + "/" + tex + ".z)";
-      }
-      fs << "tex2D(u_tex" << unsigned(s.texture) << "," << uv << ");\n";
+      fs << "tex2D(u_tex" << unsigned(s.texture) << ",tev_uv);\n";
     } else fs << "float4(1.0);\n";
     fs << "float4 texc=" << swizzle("raw_tex", d.tev.swapTable[s.texSwap]) << ";\nfloat4 raw_ras=";
     if (!tev_stage_uses_raster(s) || s.rasterSource == RasterSource::Zero) fs << "float4(0.0)";
+    else if(s.rasterSource==RasterSource::AlphaBump)fs<<"float4(ind_alpha)";
+    else if(s.rasterSource==RasterSource::AlphaBumpN)fs<<"float4(min(ind_alpha*(255.0/248.0),1.0))";
     else fs << (s.rasterSource == RasterSource::Color1 ? "v_color1" : "v_color0");
     fs << ";\nfloat4 rasc=" << swizzle("raw_ras", d.tev.swapTable[s.rasSwap]) << ";\n";
     const TevColorArg colors[]{s.color.a,s.color.b,s.color.c,s.color.d};
@@ -239,6 +307,25 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   static constexpr const char* operators[]{"&&", "||", "!=", "=="};
   fs << "if(!(" << a << operators[ac.op] << b << ")) discard;\n";
   if (d.dstAlpha >= 0) fs << "result.a=" << d.dstAlpha << ".0/255.0;\n";
+  if(d.fogMode!=FogMode::None) {
+    fs<<"{float fd="<<(d.reversedZ?"window_position.z":"(1.0-window_position.z)")<<";\nfloat fb="
+      <<(d.fogOrthographic?"u_fog_params.x*fd":"u_fog_params.x/max(u_fog_params.y-fd,0.000001)")<<";\n";
+    if(d.fogRangeEnabled) {
+      fs<<"float sx=window_position.x/max(u_render_viewport_width,1.0)*2.0-1.0;\n"
+          "float fo=sx-u_fog_params.w;float ri=clamp(9.0-abs(fo)*9.0,0.0,9.0);\n"
+          "float lo=floor(ri),hi=min(lo+1.0,9.0);float fk=max(lerp("
+        <<fog_range("lo")<<","<<fog_range("hi")<<",ri-lo),0.000001);\nfb*=sqrt(fo*fo+fk*fk)/fk;\n";
+    }
+    fs<<"float f=clamp(fb-u_fog_params.z,0.0,1.0);\n";
+    switch(d.fogMode) {
+    case FogMode::Exp:fs<<"f=1.0-exp2(-8.0*f);\n";break;
+    case FogMode::Exp2:fs<<"f=1.0-exp2(-8.0*f*f);\n";break;
+    case FogMode::RevExp:fs<<"f=exp2(-8.0*(1.0-f));\n";break;
+    case FogMode::RevExp2:fs<<"f=1.0-f;f=exp2(-8.0*f*f);\n";break;
+    default:break;
+    }
+    fs<<"result.rgb=lerp(result.rgb,u_fog_color.rgb,clamp(f,0.0,1.0));}\n";
+  }
   fs << "return result;\n}\n";
   out.vertex = vs.str(); out.fragment = fs.str();
   return out;

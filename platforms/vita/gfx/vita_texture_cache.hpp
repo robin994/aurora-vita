@@ -1,5 +1,6 @@
 #pragma once
 #include "vita_gfx_types.hpp"
+#include "vita_native_fwd.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
@@ -23,7 +24,11 @@ public:
   uint64_t pre_evicted_bytes() const noexcept{return preEvictedBytes_;}
   uint64_t last_requested_bytes() const noexcept{return lastRequestedBytes_;}
 private:
-  struct Entry{Handle handle=InvalidHandle;unsigned gl=0;uint64_t key=0,lastUse=0;size_t bytes=0;bool hasMipmaps=false,cacheable=true;uint64_t sourceId=0,paletteSourceId=0;size_t sourceBytes=0,paletteBytes=0;SamplerDesc sampler{};bool samplerValid=false;};
+  friend class Renderer;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  gxm::Renderer* native_=nullptr;
+#endif
+  struct Entry{Handle handle=InvalidHandle;unsigned gl=0;uint64_t key=0,lastUse=0;size_t bytes=0;bool hasMipmaps=false,cacheable=true;uint64_t sourceId=0,paletteSourceId=0;size_t sourceBytes=0,paletteBytes=0;SamplerDesc sampler{};bool samplerValid=false;uint8_t explicitMipCount=0;};
   // Evict LRU entries (never the entry keyed protectKey) until bytes_+requiredBytes fits
   // under budget_ with headroom. Runs BEFORE any vitaGL allocation.
   void pre_evict(size_t requiredBytes,uint64_t frame,uint64_t protectKey) noexcept;

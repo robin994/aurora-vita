@@ -7,77 +7,34 @@ option(AURORA_VITA_NATIVE_CMPR "Upload GameCube CMPR through vitaGL's native DXT
 option(AURORA_VITA_NATIVE_GX_TEXTURES "Upload exact GX I/I+A/RGB565 formats through native vitaGL texture formats" ON)
 
 set(AURORA_VITA_BACKEND_SOURCES
-    ${PROJECT_SOURCE_DIR}/platforms/vita/aurora_vita_backend.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gx/aurora_vita_draw_sink.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/integration/vita_feature_coverage.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/integration/vita_frame_trace.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/integration/vita_fifo_packet_queue.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/integration/vita_gx_capture.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/integration/vita_gx_replay.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/integration/wiicompiled_aurora_adapter.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/integration/vita_gx_backend.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_memory_budget.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_gl_util.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_streaming_arena.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_draw_adapter.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_shader_gen.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_buffer_pool.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_texture_cache.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_pipeline_cache.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_efb.cpp
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx/vita_renderer.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_gl_util.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_shader_gen.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_buffer_pool.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_texture_cache.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_pipeline_cache.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_efb.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_renderer.cpp
 )
 
 if (AURORA_VITA_WITH_UPSTREAM_GX)
     if (NOT AURORA_ENABLE_GX)
         message(FATAL_ERROR "AURORA_VITA_WITH_UPSTREAM_GX requires AURORA_ENABLE_GX=ON until the upstream GX/Dawn split is complete")
     endif ()
-    list(APPEND AURORA_VITA_BACKEND_SOURCES
-        ${PROJECT_SOURCE_DIR}/platforms/vita/gx/aurora_gx_bridge.cpp
-    )
-endif ()
-
-if (AURORA_VITA_WITH_GX_FRONTEND)
-    list(APPEND AURORA_VITA_BACKEND_SOURCES
-        ${PROJECT_SOURCE_DIR}/platforms/vita/gx/aurora_gx_bridge.cpp
-        ${PROJECT_SOURCE_DIR}/lib/vita/runtime.cpp
-        ${PROJECT_SOURCE_DIR}/lib/vita/gx_frontend_state.cpp
-        ${PROJECT_SOURCE_DIR}/lib/gx/fifo.cpp
-        ${PROJECT_SOURCE_DIR}/lib/gx/command_processor.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXBump.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXCull.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXCpu2Efb.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXDispList.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXDraw.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXExtra.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXFifo.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXFrameBuffer.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXGeometry.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXGet.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXLighting.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXManage.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXPixel.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXTev.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXTexture.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXTransform.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXVert.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/gx/GXAurora.cpp
-        ${PROJECT_SOURCE_DIR}/lib/dolphin/vi/vi.cpp
-    )
 endif ()
 
 add_library(aurora_vita_backend STATIC ${AURORA_VITA_BACKEND_SOURCES})
+aurora_vita_attach_frontend(aurora_vita_backend)
 add_library(aurora::vita_backend ALIAS aurora_vita_backend)
 add_library(aurora::vita_vitagl_backend ALIAS aurora_vita_backend)
 target_link_libraries(aurora_vita_backend PUBLIC aurora::vita_common)
 set_target_properties(aurora_vita_backend PROPERTIES FOLDER "aurora")
 target_compile_features(aurora_vita_backend PUBLIC cxx_std_20)
 target_include_directories(aurora_vita_backend PUBLIC
-    ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/lib
-    ${PROJECT_SOURCE_DIR}/platforms/vita
-    ${PROJECT_SOURCE_DIR}/platforms/vita/gfx
-    ${PROJECT_SOURCE_DIR}/platforms/vita/integration
+    ${AURORA_VITA_SOURCE_DIR}/include
+    ${AURORA_VITA_SOURCE_DIR}/lib
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/integration
 )
 target_compile_definitions(aurora_vita_backend PUBLIC
     AURORA_PLATFORM_VITA=1 AURORA_GFX_VITA=1 AURORA_VITA_RENDERER_VITAGL=1)
@@ -130,7 +87,7 @@ endif()
 if (VITA AND AURORA_VITA_BUILD_PROBE)
     include("${VITASDK}/share/vita.cmake")
     add_executable(aurora_vita_probe
-        ${PROJECT_SOURCE_DIR}/platforms/vita/probe/main.cpp
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/probe/main.cpp
     )
     target_compile_features(aurora_vita_probe PRIVATE cxx_std_20)
     target_link_libraries(aurora_vita_probe PRIVATE aurora::vita_backend)
@@ -144,7 +101,7 @@ endif ()
 if (VITA AND AURORA_VITA_SDL3_NATIVE AND AURORA_VITA_BUILD_SDL3_PROBE)
     include("${VITASDK}/share/vita.cmake")
     add_executable(aurora_vita_sdl3_probe
-        ${PROJECT_SOURCE_DIR}/platforms/vita/probe/sdl3_vitagl_probe.cpp
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/probe/sdl3_vitagl_probe.cpp
     )
     target_compile_features(aurora_vita_sdl3_probe PRIVATE cxx_std_20)
     target_compile_definitions(aurora_vita_sdl3_probe PRIVATE AURORA_VITA_SDL3_NATIVE=1)

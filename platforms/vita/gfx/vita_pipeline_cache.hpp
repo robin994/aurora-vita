@@ -1,5 +1,6 @@
 #pragma once
 #include "vita_gfx_types.hpp"
+#include "vita_native_fwd.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -56,6 +57,10 @@ public:
   uint64_t compile_failures() const noexcept{return compileFailures_;}
   uint64_t evictions() const noexcept{return evictions_;}
 private:
+  friend class Renderer;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  gxm::Renderer* native_=nullptr;
+#endif
   bool evict_one() noexcept;
   void destroy_pipeline(CompiledPipeline& pipeline) noexcept;
   std::unordered_map<uint64_t,CompiledPipeline> map_;

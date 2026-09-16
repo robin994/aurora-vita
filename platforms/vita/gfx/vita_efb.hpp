@@ -1,5 +1,6 @@
 #pragma once
 #include "vita_gfx_types.hpp"
+#include "vita_native_fwd.hpp"
 #include <array>
 #include <cstdint>
 #include <unordered_map>
@@ -31,10 +32,14 @@ public:
   size_t bytes() const noexcept { return bytes_; }
   size_t high_water_bytes() const noexcept { return highWaterBytes_; }
   size_t entries() const noexcept { return map_.size(); }
-#if defined(__vita__)
+#if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   unsigned color_texture(Handle h)const noexcept;
 #endif
 private:
+  friend class Renderer;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  gxm::Renderer* native_=nullptr;
+#endif
   struct Entry{unsigned fbo=0,color=0,depth=0;uint32_t width=0,height=0;size_t bytes=0;SamplerDesc sampler{};bool samplerValid=false;};
   std::unordered_map<Handle,Entry> map_;
   Handle next_=1;

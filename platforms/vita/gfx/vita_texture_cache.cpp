@@ -1,6 +1,8 @@
 #include "vita_texture_cache.hpp"
 #include "vita_pipeline_key.hpp"
 #include "vita_texture_decode.hpp"
+#include "vita_sampler_units.hpp"
+#include "gxm/gxm_texture_layout.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <vector>
@@ -63,7 +65,7 @@ size_t estimate_gpu_bytes(const TextureDesc& d) noexcept {
   }
 #endif
 #if defined(__vita__) && AURORA_VITA_NATIVE_GX_TEXTURES
-  if(const uint8_t bpp=native_texture_bytes_per_pixel(d.format)){
+  if(const uint8_t bpp=d.mipCount>1?0:native_texture_bytes_per_pixel(d.format)){
     size_t total=0;const unsigned levels=std::max<unsigned>(1u,d.mipCount);
     for(unsigned l=0;l<levels;l++)total+=aligned_native_bytes(std::max(1u,d.width>>l),std::max(1u,d.height>>l),bpp);
 #if AURORA_VITA_RUNTIME_MIPMAP_GENERATION
@@ -151,7 +153,39 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
   e.gl=e.handle;
 #endif
   const auto* base=static_cast<const uint8_t*>(d.data);size_t encodedOffset=0;const unsigned levels=std::max<unsigned>(1,d.mipCount);unsigned uploadedLevels=0;
+#if defined(__vita__)
+  const bool explicitLinearMips=levels>1 && !(AURORA_VITA_NATIVE_CMPR && d.format==TextureFormat::CMPR) &&
+      (d.width&(d.width-1u))==0 && (d.height&(d.height-1u))==0;
+  if(explicitLinearMips) {
+    // vitaGL generates uncompressed levels instead of honoring supplied bytes.
+    // Keep GL ownership via public backing-store interop, and share the bounded
+    // linear mip layout with the native backend (including rectangular tails).
+    auto desc=d;desc.generateMipmaps=false;
+    if(!desc.dataSize)desc.dataSize=encoded_mip_chain_size(d.width,d.height,d.format,d.mipCount);
+    auto chain=gxm::prepare_linear_texture(desc);
+    auto level0=desc;level0.mipCount=1;
+    if(chain.ok() && decode_texture_rgba8(level0,rgbaDecodeScratch_)) {
+      glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,d.width,d.height,0,GL_RGBA,GL_UNSIGNED_BYTE,rgbaDecodeScratch_.data());
+      auto* native=vglGetGxmTexture(GL_TEXTURE_2D);
+      void* old=vglGetTexDataPointer(GL_TEXTURE_2D);
+      void* storage=old?vglMemalign(SCE_GXM_TEXTURE_ALIGNMENT,chain.pixels.size()):nullptr;
+      if(storage && native) {
+        std::memcpy(storage,chain.pixels.data(),chain.pixels.size());
+        auto descriptor=*native;
+        if(sceGxmTextureSetData(&descriptor,storage)>=0 && sceGxmTextureSetMipmapCount(&descriptor,chain.mipCount)>=0) {
+          *native=descriptor;
+          vglOverloadTexDataPointer(GL_TEXTURE_2D,storage);
+          vglFree(old); // Cold texture: no draw or transfer has referenced it.
+          e.explicitMipCount=static_cast<uint8_t>(chain.mipCount);
+          uploadedLevels=chain.mipCount;
+        } else vglFree(storage);
+      } else if(storage) vglFree(storage);
+    }
+  }
+  for(unsigned level=0;!explicitLinearMips && level<levels;level++){
+#else
   for(unsigned level=0;level<levels;level++){
+#endif
     TextureDesc ld=d;ld.width=std::max(1u,d.width>>level);ld.height=std::max(1u,d.height>>level);ld.data=base+encodedOffset;ld.mipCount=1;ld.generateMipmaps=false;const size_t encoded=encoded_texture_size(ld.width,ld.height,ld.format);if(d.dataSize&&encodedOffset+encoded>d.dataSize)break;ld.dataSize=encoded;
 #if defined(__vita__)
 #if AURORA_VITA_NATIVE_GX_TEXTURES
@@ -238,7 +272,13 @@ void TextureCache::bind(Handle h,unsigned unit,const SamplerDesc&s) noexcept {au
   if(!e.samplerValid||old.wrapT!=s.wrapT)glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,wrap(s.wrapT));
   if(!e.samplerValid||old.minFilter!=s.minFilter){const Filter minFilter=!e.hasMipmaps&&mip_filter(s.minFilter)?without_mips(s.minFilter):s.minFilter;glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,filt(minFilter));}
   if(!e.samplerValid||old.magFilter!=s.magFilter)glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,filt(s.magFilter));
-  if(!e.samplerValid||old.lodBias!=s.lodBias)glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_LOD_BIAS,s.lodBias);
+  if(!e.samplerValid||old.lodBias!=s.lodBias)glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_LOD_BIAS,vitagl_lod_bias(s.lodBias));
+  if(e.explicitMipCount) {
+    // GL setters consult their base-level allocation metadata. Reapply the
+    // real count after them, only for Aurora-owned explicit mip backing.
+    if(auto* native=vglGetGxmTexture(GL_TEXTURE_2D))
+      sceGxmTextureSetMipmapCount(native,mip_filter(s.minFilter)?e.explicitMipCount:1);
+  }
   e.sampler=s;e.samplerValid=true;
 #else
   (void)unit;(void)s;

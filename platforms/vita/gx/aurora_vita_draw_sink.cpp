@@ -55,7 +55,8 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
     return false;
   }
   initialized_ = true;
-  if(config.staticGeometryBudget)staticGeometry_=std::make_unique<gfx::StaticGeometryCache>(renderer,config.staticGeometryBudget);
+  if(config.staticGeometryBudget && renderer.supports_fixed_vertex())
+    staticGeometry_=std::make_unique<gfx::StaticGeometryCache>(renderer,config.staticGeometryBudget);
   return true;
 }
 
@@ -123,6 +124,10 @@ void DrawSink::flush() noexcept {
   // bindings once per chunk; pipeline/fixed/viewport state stays hot across flushes.
   renderer_->invalidate_resource_bindings();
   { gfx::ScopedTelemetryPhase phase(telemetry_, gfx::TelemetryPhase::Submit); renderer_->execute(stream_); }
+  if(renderer_->failed()) {
+    if(telemetry_) telemetry_->unsupported();
+    strictFailed_=true;
+  }
   if(arena_->vertex_used()||arena_->index_used())arena_->mark_current_submitted();
   stream_.reset();
   fixedVertexUniforms_.clear();
@@ -497,7 +502,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       const size_t used=arena_->vertex_used();
       const size_t rem=used%gpuStride;
       const size_t aligned=rem?used+(gpuStride-rem):used;
-      if(aligned/gpuStride+required.vertexCount>static_cast<size_t>(std::numeric_limits<uint16_t>::max())+1u)return false;
+      if(aligned/gpuStride+required.vertexCount>renderer_->max_indexed_vertices())return false;
     }
     return true;
   };
@@ -588,7 +593,10 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       coverage_->observe(integration::FeatureClass::TextureFormat, texKey, "sampled GX texture format");
     }
     if (translated.dynamicCopy) {
-      const auto ptr = reinterpret_cast<uintptr_t>(aurora::gx::g_gxState.textures[slot].texObj.data);
+      // Match translate_texture(): the native frontend populates loadedTextures,
+      // not Dawn's resolved TextureBind table. Reading that table loses the
+      // guest destination identity and turns a valid EFB copy into white fallback.
+      const auto ptr = reinterpret_cast<uintptr_t>(aurora::gx::g_gxState.loadedTextures[slot].data);
       const auto ci = copyTextures_.find(ptr);
       if (ci != copyTextures_.end() && ci->second.handle) {
         bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb};

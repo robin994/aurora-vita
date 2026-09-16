@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#if defined(__vita__)
+#if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
 #include <vitaGL.h>
 #endif
 
@@ -98,12 +98,9 @@ bool StreamingArena::acquire_slot(uint32_t preferred) noexcept {
     if (!inFlight_[index]) return activate_slot(index);
   }
 
-  // With no per-buffer fence exposed by vitaGL, the safe fallback is one global
-  // drain after the whole ring has been consumed. This is much cheaper than a
-  // glFinish for every 4 MiB streaming chunk while still preventing overwrite of
-  // VBO/IBO storage that the GPU may reference.
+  // Completion is owned by the selected hardware backend, not the allocator.
 #if defined(__vita__)
-  glFinish();
+  pool_.wait_idle();
   ++gpuSyncs_;
 #endif
   std::fill(inFlight_.begin(), inFlight_.end(), 0);

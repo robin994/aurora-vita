@@ -12,7 +12,8 @@
         "AURORA_ENABLE_VITA_BACKEND": "ON",
         "AURORA_VITA_BACKEND_ONLY": "ON",
         "AURORA_ENABLE_GX": "OFF",
-        "AURORA_VITA_WITH_GX_FRONTEND": "OFF",
+        "AURORA_VITA_WITH_GX_FRONTEND": "ON",
+        "AURORA_VITA_PORT_ABI": "SDK",
         "AURORA_VITA_WITH_UPSTREAM_GX": "OFF",
         "AURORA_VITA_SDL3_NATIVE": "OFF",
         "AURORA_VITA_BUILD_SDL3_PROBE": "OFF",
@@ -22,14 +23,14 @@
     },
     {
       "name": "vita-vitagl",
-      "displayName": "Vita - vitaGL renderer and probe",
+      "displayName": "Vita - shared GX frontend with vitaGL",
       "inherits": "vita-standalone-base",
       "binaryDir": "${sourceDir}/build/vita-vitagl",
       "cacheVariables": { "AURORA_VITA_RENDERER": "VITAGL" }
     },
     {
       "name": "vita-gxm",
-      "displayName": "Vita - native SceGxm renderer and probe (GX game adapter pending)",
+      "displayName": "Vita - shared GX frontend with native SceGxm",
       "inherits": "vita-standalone-base",
       "binaryDir": "${sourceDir}/build/vita-gxm",
       "cacheVariables": { "AURORA_VITA_RENDERER": "GXM" }

@@ -3,6 +3,9 @@
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_vertex_pipeline.hpp"
+#include "gfx/vita_efb_copy.hpp"
+#include "gfx/vita_sampler_units.hpp"
+#include "gxm/gxm_texture_layout.hpp"
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -142,14 +145,14 @@ void rejection_tests() {
     REQUIRE(!source.ok()); REQUIRE(!source.error.empty());
     REQUIRE(source.vertex.empty() && source.fragment.empty());
   };
-  auto d = basic(); d.fogMode = FogMode::Linear; reject(d);
-  d = basic(); d.fogRangeEnabled = true; reject(d);
+  auto d = basic(); d.fogMode = FogMode(255); reject(d);
+  d = basic(); d.tev.indirectStageCount = 5; reject(d);
   d = basic(); d.fixedVertexOnGpu = true; reject(d);
   d = basic(); d.polygonOffset = true; reject(d);
-  d = basic(); d.blendMode = BlendMode::Logic; reject(d);
+  d = basic(); d.blendMode = BlendMode::Logic; d.logicOp=LogicOp::Xor; reject(d);
   d = basic(); d.primitive = Primitive::Lines; reject(d);
   d = basic(); d.tev.stages[0].indirectEnabled = true; reject(d);
-  d = basic(); d.tev.stages[0].rasterSource = RasterSource::AlphaBump; reject(d);
+  d = basic(); d.tev.stages[0].rasterSource = RasterSource(255); reject(d);
   d = basic(); d.tev.stageCount = 0; reject(d);
   d = basic(); d.tev.stageCount = 17; reject(d);
   d = basic(); d.tev.stages[0].texture = 8; reject(d);
@@ -246,9 +249,73 @@ void keys_and_defaults() {
   REQUIRE(d.layout.attributes[0].stride == sizeof(GpuVertex));
   REQUIRE(d.layout.attributes[1].offset == offsetof(GpuVertex, color0));
 }
+void native_extended_contract() {
+  REQUIRE(native_lod_bias(0.f)==31);
+  REQUIRE(native_lod_bias(1.f)==39);
+  REQUIRE(native_lod_bias(-1.f)==23);
+  REQUIRE(native_lod_bias(.125f)==32);
+  REQUIRE(native_lod_bias(20.f)==63);
+  REQUIRE(native_lod_bias(-20.f)==0);
+  REQUIRE(vitagl_lod_bias(1.f)==8.f);
+  for(unsigned fog=0;fog<=unsigned(FogMode::RevExp2);++fog) for(bool range:{false,true}) {
+    auto d=basic();d.fogMode=FogMode(fog);d.fogRangeEnabled=range;
+    const auto s=gxm::build_tev_cg(d);no_undeclared_inputs(s);
+    if(fog)REQUIRE(s.fragment.find("result.rgb=lerp(result.rgb,u_fog_color.rgb")!=std::string::npos);
+  }
+  for(unsigned matrix=0;matrix<=unsigned(IndirectMatrix::T2);++matrix)
+    for(unsigned format=0;format<4;++format) for(unsigned bias=0;bias<8;++bias) {
+      auto d=basic();d.tev.indirectStageCount=1;d.tev.indirectStages[0]={3,5,1,2};
+      auto& s=d.tev.stages[0];s.indirectEnabled=true;s.indirectMatrix=IndirectMatrix(matrix);
+      s.indirectFormat=IndirectFormat(format);s.indirectBias=IndirectBias(bias);
+      s.indirectAlpha=IndirectAlphaSel::T;s.rasterSource=RasterSource::AlphaBumpN;
+      s.texCoord=2;s.texture=1;s.color.d=TevColorArg::TexColor;s.indirectAddPrev=true;
+      const auto result=gxm::build_tev_cg(d);no_undeclared_inputs(result);
+      REQUIRE(result.textureMask==((1u<<1)|(1u<<5)));
+      REQUIRE(result.fragment.find("prev_ind_uv+=base_texel+ind_off")!=std::string::npos);
+    }
+  std::array<uint8_t,84> source{};
+  // Explicit RGBA8 4x4, 2x2 and 1x1 levels must survive padding unchanged.
+  std::fill(source.begin(),source.begin()+64,17);
+  std::fill(source.begin()+64,source.begin()+80,93);
+  std::fill(source.begin()+80,source.end(),201);
+  TextureDesc d{};d.width=d.height=4;d.format=TextureFormat::RGBA8888;
+  d.data=source.data();d.dataSize=source.size();d.mipCount=3;
+  auto native=gxm::prepare_linear_texture(d);
+  REQUIRE(native.ok());REQUIRE(native.mipCount==3);REQUIRE(native.pixels.size()==224);
+  REQUIRE(native.pixels[0]==17);REQUIRE(native.pixels[128]==93);REQUIRE(native.pixels[192]==201);
+  d.dataSize=83;REQUIRE(!gxm::prepare_linear_texture(d).ok());
+  d.mipCount=1;d.dataSize=64;d.generateMipmaps=true;
+  native=gxm::prepare_linear_texture(d);REQUIRE(native.ok());REQUIRE(native.pixels[192]==17);
+  d.width=3;REQUIRE(!gxm::prepare_linear_texture(d).ok());
+  std::array<uint8_t,92> rectangular{};
+  std::fill(rectangular.begin(),rectangular.begin()+64,11);
+  std::fill(rectangular.begin()+64,rectangular.begin()+80,33);
+  std::fill(rectangular.begin()+80,rectangular.begin()+88,77);
+  std::fill(rectangular.begin()+88,rectangular.end(),155);
+  d.width=8;d.height=2;d.mipCount=4;d.generateMipmaps=false;
+  d.data=rectangular.data();d.dataSize=rectangular.size();
+  native=gxm::prepare_linear_texture(d);
+  REQUIRE(native.ok());REQUIRE(native.pixels.size()==160);
+  REQUIRE(native.pixels[64]==33);REQUIRE(native.pixels[96]==77);REQUIRE(native.pixels[128]==155);
+
+  const uint8_t rgba[]{255,0,0,255, 0,255,0,255, 0,0,255,128, 255,255,255,64};
+  std::vector<uint8_t> copy;
+  const Scissor all{0,0,2,2};
+  REQUIRE(copy_efb_rgba8(rgba,2,2,all,2,2,EfbCopyFormat::Passthrough,false,false,copy));
+  REQUIRE(copy==std::vector<uint8_t>(rgba,rgba+16));
+  REQUIRE(copy_efb_rgba8(rgba,2,2,all,2,2,EfbCopyFormat::Passthrough,true,true,copy));
+  REQUIRE(std::memcmp(copy.data(),rgba+12,4)==0);REQUIRE(std::memcmp(copy.data()+12,rgba,4)==0);
+  REQUIRE(!copy_efb_rgba8(rgba,2,2,{-1,0,2,2},2,2,EfbCopyFormat::Passthrough,false,false,copy));
+  REQUIRE(!copy_efb_rgba8(rgba,2,2,all,2,2,EfbCopyFormat::DepthZ16,false,false,copy));
+  for(unsigned fmt=0;fmt<=unsigned(EfbCopyFormat::GB8);++fmt)
+    REQUIRE(copy_efb_rgba8(rgba,2,2,all,3,5,EfbCopyFormat(fmt),false,false,copy));
+  REQUIRE(copy_efb_rgba8(rgba,2,2,all,2,2,EfbCopyFormat::RG8,false,false,copy));
+  REQUIRE(copy[0]==255 && copy[1]==255 && copy[2]==255 && copy[3]==0);
+}
 } // namespace
 int main() {
   shader_masks(); shader_operations(); rejection_tests(); projection_contract(); common_decode_contract(); keys_and_defaults();
+  native_extended_contract();
   std::printf("PASS: %u checks, 1024 input-mask combinations; native Cg generation and shared CPU contracts (not GPU execution).\n", checks);
   return 0;
 }

@@ -7,13 +7,39 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <memory>
 namespace aurora::vita::gfx {
-struct RendererConfig { uint32_t width=960,height=544;size_t textureBudget=24*1024*1024;size_t pipelineBudget=512; };
+struct RendererConfig {
+  uint32_t width=960,height=544;
+  size_t textureBudget=24*1024*1024;
+  size_t pipelineBudget=512;
+  uint32_t displayBuffers=3;
+  bool waitVblank=true;
+  size_t nativeResourceBudget=64*1024*1024;
+};
 class Renderer {
 public:
   explicit Renderer(const RendererConfig& cfg={});~Renderer();
   Renderer(const Renderer&)=delete;Renderer&operator=(const Renderer&)=delete;
   bool initialize() noexcept;void shutdown() noexcept;void begin_frame() noexcept;void end_frame() noexcept;
+  bool present(bool display=true) noexcept;
+  bool readback_rgba8(std::vector<uint8_t>& pixels) noexcept;
+  const char* last_error() const noexcept;
+  bool failed() const noexcept { return failed_; }
+  static constexpr bool supports_fixed_vertex() noexcept {
+#if defined(AURORA_VITA_RENDERER_GXM)
+    return false;
+#else
+    return true;
+#endif
+  }
+  static constexpr uint32_t max_indexed_vertices() noexcept {
+#if defined(AURORA_VITA_RENDERER_GXM)
+    return 64000;
+#else
+    return 65536;
+#endif
+  }
   uint64_t create_pipeline(const PipelineDesc& d) noexcept;
   Handle create_texture(const TextureDesc& d) noexcept;
   size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept;
@@ -23,7 +49,8 @@ public:
   Handle create_efb(uint32_t w,uint32_t h,bool depth=true) noexcept;
   bool bind_efb(Handle h) noexcept;void bind_default() noexcept;
   bool blit_efb(Handle h) noexcept;
-  // GPU-resident framebuffer copy. Source coordinates are top-left Aurora/GX coordinates.
+  // Framebuffer copy. Source coordinates are top-left Aurora/GX coordinates.
+  // Backends own synchronization and may use a conservative CPU conversion path.
   // flipX/flipY rotate only the sampled copy, leaving the display path untouched.
   Handle capture_current(Handle existing,const Scissor& src,uint32_t dstWidth,uint32_t dstHeight,
                          EfbCopyFormat format=EfbCopyFormat::Passthrough,bool flipX=false,bool flipY=false) noexcept;
@@ -43,6 +70,12 @@ private:
   void invalidate_texture_bindings() noexcept;
   void invalidate_buffer_bindings() noexcept;
   RendererConfig cfg_{};uint32_t targetWidth_=960,targetHeight_=544;Handle boundEfb_=InvalidHandle;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  // Declared before the resource facades: the native device outlives them.
+  std::unique_ptr<gxm::Renderer> native_;
+#endif
+  bool failed_=false;
+  Handle maskedClearVertices_=InvalidHandle,maskedClearIndices_=InvalidHandle;
   PipelineCache pipelines_{};TextureCache textures_;BufferPool buffers_{};EfbManager efb_{};FrameStats stats_{};uint64_t frame_=0;bool initialized_=false;
 #if defined(__vita__)
   bool viewportValid_=false,scissorValid_=false,scissorEnabled_=false,vertexStateValid_=false,indexStateValid_=false;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #if defined(__vita__)
 #include <vitaGL.h>
+#include <psp2/display.h>
 #endif
 namespace aurora::vita::gfx {
 namespace {
@@ -17,9 +18,34 @@ bool same_texture_binding(const TextureBinding&a,const TextureBinding&b) noexcep
 }
 Renderer::Renderer(const RendererConfig&cfg):cfg_(cfg),pipelines_(cfg.pipelineBudget),textures_(cfg.textureBudget){}Renderer::~Renderer(){shutdown();}
 bool Renderer::initialize() noexcept {targetWidth_=cfg_.width;targetHeight_=cfg_.height;initialized_=true;return true;}
-void Renderer::shutdown() noexcept {if(!initialized_)return;pipelines_.clear();textures_.clear();buffers_.clear();efb_.clear();invalidate_draw_state();initialized_=false;}
+void Renderer::shutdown() noexcept {if(!initialized_)return;pipelines_.clear();textures_.clear();buffers_.clear();efb_.clear();maskedClearVertices_=maskedClearIndices_=InvalidHandle;invalidate_draw_state();initialized_=false;}
 void Renderer::begin_frame() noexcept {pipelines_.clear_pins();pipelines_.trim_to_budget();stats_={};invalidate_draw_state();}
 void Renderer::end_frame() noexcept {textures_.trim(frame_);frame_++;}
+const char* Renderer::last_error() const noexcept { return ""; }
+bool Renderer::present(bool display) noexcept {
+#if defined(__vita__)
+  if(display) vglSwapBuffers(GL_FALSE);
+#else
+  (void)display;
+#endif
+  return true;
+}
+bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) noexcept {
+#if defined(__vita__)
+  glFinish();
+  sceGxmDisplayQueueFinish();
+  SceDisplayFrameBuf fb{}; fb.size=sizeof(fb);
+  if(sceDisplayGetFrameBuf(&fb,SCE_DISPLAY_SETBUF_IMMEDIATE)<0 || !fb.base ||
+     fb.width!=cfg_.width || fb.height!=cfg_.height || fb.pitch<fb.width || fb.pixelformat!=0) return false;
+  pixels.resize(size_t(fb.width)*fb.height*4);
+  for(uint32_t y=0;y<fb.height;++y)
+    std::memcpy(pixels.data()+size_t(y)*fb.width*4,
+                static_cast<const uint8_t*>(fb.base)+size_t(y)*fb.pitch*4,size_t(fb.width)*4);
+  return true;
+#else
+  (void)pixels; return false;
+#endif
+}
 uint64_t Renderer::create_pipeline(const PipelineDesc&d) noexcept {auto*p=pipelines_.get_or_create(d,&stats_);if(!p)return 0;pipelines_.pin(p->key);return p->key;}
 Handle Renderer::create_texture(const TextureDesc&d) noexcept {
   const uint32_t missesBefore=stats_.textureMisses;
@@ -78,28 +104,48 @@ Handle Renderer::capture_current(Handle existing,const Scissor& src,uint32_t dst
 Handle Renderer::upload_efb_rgba(Handle existing,uint32_t width,uint32_t height,const void* rgba) noexcept {Handle out=efb_.upload_rgba(existing,width,height,rgba);invalidate_texture_bindings();return out;}
 void Renderer::clear_current(const Color& color,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept {
 #if defined(__vita__)
-  glColorMask(clearRgb?GL_TRUE:GL_FALSE,clearRgb?GL_TRUE:GL_FALSE,clearRgb?GL_TRUE:GL_FALSE,clearAlpha?GL_TRUE:GL_FALSE);glDepthMask(clearDepth?GL_TRUE:GL_FALSE);glClearColor(color.r,color.g,color.b,color.a);glClearDepth(depth);GLbitfield mask=0;if(clearRgb||clearAlpha)mask|=GL_COLOR_BUFFER_BIT;if(clearDepth)mask|=GL_DEPTH_BUFFER_BIT;if(mask)glClear(mask);pipelines_.invalidate_bound();
+  if(!clearRgb&&!clearAlpha&&!clearDepth)return;
+  // A GX copy clear covers the target, not the preceding draw's scissor.
+  glDisable(GL_SCISSOR_TEST);scissorEnabled_=false;scissorValid_=false;
+  if(clearRgb!=clearAlpha) {
+    // vitaGL's glClear color path does not preserve glColorMask on hardware.
+    // A normal draw does: use a constant-color triangle for partial clears.
+    if(!maskedClearVertices_) {
+      const float vertices[]{-1,-1,0,1, 3,-1,0,1, -1,3,0,1};
+      maskedClearVertices_=create_vertex_buffer(vertices,sizeof(vertices));
+    }
+    if(!maskedClearIndices_) {
+      const uint16_t indices[]{0,1,2};
+      maskedClearIndices_=create_index_buffer(indices,sizeof(indices));
+    }
+    PipelineDesc desc{};
+    desc.cull=CullMode::None;desc.reversedZ=false;
+    desc.depthTest=clearDepth;desc.depthWrite=clearDepth;desc.depthFunc=Compare::Always;
+    desc.colorWrite=clearRgb;desc.alphaWrite=clearAlpha;
+    desc.layout.count=1;desc.layout.attributes[0]={0,4,VertexScalar::F32,false,16,0};
+    desc.tev.stages[0].color.d=TevColorArg::Konst;desc.tev.stages[0].konstColor=KonstColorSel::K0;
+    desc.tev.stages[0].alpha.d=TevAlphaArg::Konst;desc.tev.stages[0].konstAlpha=KonstAlphaSel::K0A;
+    const auto key=create_pipeline(desc);
+    if(!key||!maskedClearVertices_||!maskedClearIndices_) {failed_=true;return;}
+    DrawPacket packet{};packet.pipelineKey=key;
+    packet.vertices={maskedClearVertices_,0,48};packet.indices={maskedClearIndices_,0,6};
+    packet.vertexCount=3;packet.indexCount=3;
+    packet.viewport.width=float(targetWidth_);packet.viewport.height=float(targetHeight_);
+    packet.scissor.width=targetWidth_;packet.scissor.height=targetHeight_;
+    packet.uniforms.kcolor[0]={color.r,color.g,color.b,color.a};packet.uniforms.mvp[14]=depth-1.f;
+    draw(packet);
+  } else {
+    glColorMask(clearRgb?GL_TRUE:GL_FALSE,clearRgb?GL_TRUE:GL_FALSE,clearRgb?GL_TRUE:GL_FALSE,clearAlpha?GL_TRUE:GL_FALSE);
+    glDepthMask(clearDepth?GL_TRUE:GL_FALSE);glClearColor(color.r,color.g,color.b,color.a);glClearDepth(depth);
+    const GLbitfield mask=(clearRgb?GL_COLOR_BUFFER_BIT:0)|(clearDepth?GL_DEPTH_BUFFER_BIT:0);
+    glClear(mask);pipelines_.invalidate_bound();
+  }
 #else
   (void)color;(void)depth;(void)clearRgb;(void)clearAlpha;(void)clearDepth;
 #endif
 }
 void Renderer::execute(const CommandStream&s) noexcept {for(const auto&c:s.commands())switch(c.type){case CommandType::Clear:
-#if defined(__vita__)
-  if(c.clear.colorEnable) glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
-  if(c.clear.depthEnable) glDepthMask(GL_TRUE);
-  glClearColor(c.clear.color.r,c.clear.color.g,c.clear.color.b,c.clear.color.a);
-  glClearDepth(c.clear.depth);
-  {
-    GLbitfield m=0;
-    if(c.clear.colorEnable) m|=GL_COLOR_BUFFER_BIT;
-    if(c.clear.depthEnable) m|=GL_DEPTH_BUFFER_BIT;
-    if(m) glClear(m);
-  }
-  pipelines_.invalidate_bound();
-  break;
-#else
-  break;
-#endif
+  clear_current(c.clear.color,c.clear.depth,c.clear.colorEnable,c.clear.colorEnable,c.clear.depthEnable);break;
 case CommandType::Draw:draw(c.draw);break;case CommandType::SetRenderTarget:if(c.target.target)bind_efb(c.target.target);else bind_default();break;case CommandType::CopyEfb:if(c.copy.destination)blit_efb(c.copy.destination);break;case CommandType::Barrier:
 #if defined(__vita__)
   glFlush();

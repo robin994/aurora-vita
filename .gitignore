@@ -9,3 +9,5 @@ cmake-build-*/
 CMakeUserPresets.json
 out/
 build-*/
+__pycache__/
+*.pyc

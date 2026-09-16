@@ -1,8 +1,10 @@
 #include "gxm_renderer.hpp"
 #include "gxm_memory.hpp"
 #include "gxm_shader_gen.hpp"
+#include "gxm_texture_layout.hpp"
 #include "gfx/vita_pipeline_key.hpp"
 #include "gfx/vita_texture_decode.hpp"
+#include "gfx/vita_sampler_units.hpp"
 #include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
 #include <vitashark.h>
@@ -85,6 +87,12 @@ SceGxmBlendInfo blend_info(const PipelineDesc& d) {
   } else if (d.blendMode == BlendMode::Subtract) {
     b.colorFunc = b.alphaFunc = SCE_GXM_BLEND_FUNC_REVERSE_SUBTRACT;
     b.colorDst = b.alphaDst = SCE_GXM_BLEND_FACTOR_ONE;
+  } else if(d.blendMode==BlendMode::Logic) {
+    if(d.logicOp==LogicOp::Clear) b.colorSrc=b.alphaSrc=SCE_GXM_BLEND_FACTOR_ZERO;
+    if(d.logicOp==LogicOp::Noop) {
+      b.colorSrc=b.alphaSrc=SCE_GXM_BLEND_FACTOR_ZERO;
+      b.colorDst=b.alphaDst=SCE_GXM_BLEND_FACTOR_ONE;
+    }
   }
   if (d.dstAlpha >= 0 && d.alphaWrite) {
     b.alphaFunc = SCE_GXM_BLEND_FUNC_ADD;
@@ -99,8 +107,22 @@ bool is_slice_valid(const BufferSlice& s, size_t capacity) {
 
 struct Renderer::Impl {
   struct Surface { MemoryBlock memory; SceGxmColorSurface color{}; SceGxmSyncObject* sync = nullptr; };
-  struct Buffer { MemoryBlock memory; size_t bytes = 0; };
-  struct Texture { MemoryBlock memory; SceGxmTexture descriptor{}; };
+  struct Buffer { MemoryBlock memory; size_t bytes = 0; bool inFlight = false; };
+  struct Texture {
+    MemoryBlock memory, depth;
+    SceGxmTexture descriptor{};
+    SceGxmColorSurface color{};
+    SceGxmDepthStencilSurface depthSurface{};
+    SceGxmRenderTarget* target = nullptr;
+    SceGxmSyncObject* sync = nullptr;
+    uint32_t width = 0, height = 0, stride = 0;
+    uint32_t mipCount = 1;
+    bool inFlight = false, depthValid = false;
+    ~Texture() {
+      if (sync) sceGxmSyncObjectDestroy(sync);
+      if (target) sceGxmDestroyRenderTarget(target);
+    }
+  };
   struct Pipeline {
     PipelineDesc desc{};
     std::vector<uint32_t> vertexCode, fragmentCode;
@@ -108,7 +130,10 @@ struct Renderer::Impl {
     SceGxmVertexProgram* vertex = nullptr;
     SceGxmFragmentProgram* fragment = nullptr;
     const SceGxmProgramParameter *mvp = nullptr, *kcolor = nullptr, *tevreg = nullptr, *clip = nullptr;
+    const SceGxmProgramParameter *fogColor=nullptr,*fogParams=nullptr,*fogRange=nullptr,*viewportWidth=nullptr;
+    const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr;
     uint8_t textureMask = 0;
+    bool inFlight = false;
   };
   Config config{};
   SceGxmContext* context = nullptr;
@@ -120,7 +145,7 @@ struct Renderer::Impl {
   std::array<Surface, 3> surfaces;
   std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> pipelines;
   std::unordered_map<Handle, Buffer> buffers;
-  std::unordered_map<Handle, Texture> textures;
+  std::unordered_map<Handle, std::unique_ptr<Texture>> textures;
   std::unordered_map<uint64_t, Handle> textureCache;
   FrameStats stats{};
   std::string error;
@@ -128,9 +153,46 @@ struct Renderer::Impl {
   size_t resourceBytes = 0;
   Handle nextHandle = 1;
   Handle clearVertices = 0, clearIndices = 0;
+  Handle boundTarget = 0, blitVertices = 0;
   uint64_t clearPipeline = 0, frameStarted = 0;
   uint32_t stride = 0, front = 0, back = 1;
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
+  bool frameActive = false, depthValid = false;
+
+  uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
+  uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
+  bool end_scene() {
+    if (!inScene) return true;
+    const int result = sceGxmEndScene(context, nullptr, nullptr);
+    inScene = false;
+    if (boundTarget) textures.at(boundTarget)->depthValid = true;
+    else depthValid = true;
+    return check(result, "end native scene");
+  }
+  bool ensure_scene() {
+    if (inScene) return true;
+    if (!frameActive) return fail("draw outside a frame");
+    auto* ds = &depthSurface;
+    auto* cs = &surfaces[back].color;
+    auto* rt = target;
+    auto* sync = surfaces[back].sync;
+    bool loadDepth = depthValid;
+    if (boundTarget) {
+      auto& t = *textures.at(boundTarget);
+      ds = t.depth.data() ? &t.depthSurface : nullptr;
+      cs = &t.color; rt = t.target; sync = t.sync;
+      loadDepth = t.depthValid;
+      t.inFlight = true;
+    }
+    if (ds) {
+      sceGxmDepthStencilSurfaceSetForceLoadMode(ds, loadDepth ?
+          SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
+      sceGxmDepthStencilSurfaceSetForceStoreMode(ds, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+    }
+    if (!check(sceGxmBeginScene(context, 0, rt, nullptr, nullptr, sync, cs, ds), "begin native scene")) return false;
+    inScene = true;
+    return true;
+  }
 
   bool fail(const char* operation, int code = 0) {
     char text[384];
@@ -259,7 +321,7 @@ bool Renderer::initialize(const Config& config) {
 
 uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   auto& d = *impl_;
-  if (!d.initialized || d.inScene) { d.fail("create pipelines between scenes"); return 0; }
+  if (!d.initialized) { d.fail("create pipeline before initialization"); return 0; }
   const uint64_t key = pipeline_key(desc);
   if (d.pipelines.find(key) != d.pipelines.end()) { ++d.stats.pipelineHits; return key; }
   if (d.pipelines.size() >= d.config.maxPipelines) { d.fail("native pipeline budget exhausted"); return 0; }
@@ -304,6 +366,13 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.kcolor = sceGxmProgramFindParameterByName(fp, "u_kcolor");
   p.tevreg = sceGxmProgramFindParameterByName(fp, "u_tevreg");
   p.clip = sceGxmProgramFindParameterByName(fp, "u_clip_rect");
+  p.fogColor=sceGxmProgramFindParameterByName(fp,"u_fog_color");
+  p.fogParams=sceGxmProgramFindParameterByName(fp,"u_fog_params");
+  p.fogRange=sceGxmProgramFindParameterByName(fp,"u_fog_range_k");
+  p.viewportWidth=sceGxmProgramFindParameterByName(fp,"u_render_viewport_width");
+  p.indirectMatrices=sceGxmProgramFindParameterByName(fp,"u_ind_mtx");
+  p.texcoordScale=sceGxmProgramFindParameterByName(fp,"u_texcoord_scale");
+  p.textureSizeBias=sceGxmProgramFindParameterByName(fp,"u_texture_size_bias");
   d.pipelines.emplace(key, std::move(pipeline));
   ++d.stats.pipelineMisses;
   return key;
@@ -311,13 +380,14 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
 
 Handle Renderer::create_buffer(const void* data, size_t bytes) {
   auto& d = *impl_;
-  if (!d.initialized || d.inScene || !data || !bytes || bytes > UINT32_MAX || !d.nextHandle || !d.has_budget(bytes)) {
+  if (!d.initialized || !bytes || bytes > UINT32_MAX || !d.nextHandle || !d.has_budget(bytes)) {
     d.fail("invalid buffer upload or resource budget exhausted"); return 0;
   }
   Impl::Buffer buffer;
   if (!d.alloc(buffer.memory, bytes, MemoryKind::CpuGpu)) return 0;
   buffer.bytes = bytes;
-  std::memcpy(buffer.memory.data(), data, bytes);
+  if (data) std::memcpy(buffer.memory.data(), data, bytes);
+  else std::memset(buffer.memory.data(), 0, bytes);
   d.resourceBytes += buffer.memory.size();
   const Handle handle = d.nextHandle++;
   d.buffers.emplace(handle, std::move(buffer));
@@ -326,9 +396,8 @@ Handle Renderer::create_buffer(const void* data, size_t bytes) {
 
 Handle Renderer::create_texture(const TextureDesc& desc) {
   auto& d = *impl_;
-  if (!d.initialized || d.inScene || !desc.data || !desc.width || desc.width > 4096 || !desc.height || desc.height > 4096 ||
-      desc.mipCount != 1 || desc.generateMipmaps || !d.nextHandle) {
-    d.fail("texture upload requires a bounded single-mip image between scenes"); return 0;
+  if (!d.initialized || !desc.data || !desc.width || desc.width > 4096 || !desc.height || desc.height > 4096 || !d.nextHandle) {
+    d.fail("texture upload requires a bounded image"); return 0;
   }
   const size_t encoded = encoded_texture_size(desc.width, desc.height, desc.format);
   if (!encoded || desc.dataSize < encoded) { d.fail("truncated encoded texture"); return 0; }
@@ -337,56 +406,131 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
     const auto it = d.textureCache.find(key);
     if (it != d.textureCache.end()) { ++d.stats.textureHits; return it->second; }
   }
+  auto pixels=prepare_linear_texture(desc);
+  if(!pixels.ok()) {d.fail(pixels.error.c_str());return 0;}
   const uint32_t rowBytes = ((desc.width + 7u) & ~7u) * 4u;
-  const size_t bytes = size_t(rowBytes) * desc.height;
+  const size_t bytes=pixels.pixels.size();
   if (!d.has_budget(bytes)) { d.fail("native texture budget exhausted"); return 0; }
-  auto pixels = decode_texture_rgba8(desc);
-  if (!pixels.ok) { d.fail("common GX texture decode failed"); return 0; }
-  Impl::Texture texture;
+  auto owned = std::make_unique<Impl::Texture>();
+  auto& texture = *owned;
+  texture.width=desc.width; texture.height=desc.height; texture.stride=rowBytes/4;
+  texture.mipCount=pixels.mipCount;
   if (!d.alloc(texture.memory, bytes, MemoryKind::CpuGpu)) return 0;
-  std::memset(texture.memory.data(), 0, bytes);
-  for (uint32_t y = 0; y < desc.height; ++y)
-    std::memcpy(static_cast<uint8_t*>(texture.memory.data()) + size_t(y) * rowBytes,
-        pixels.rgba.data() + size_t(y) * desc.width * 4, desc.width * 4);
+  std::memcpy(texture.memory.data(),pixels.pixels.data(),bytes);
   // Ordinary linear textures permit sampler filter changes. LINEAR_STRIDED
   // rejects them with SCE_GXM_ERROR_UNSUPPORTED on hardware. The native linear
   // RGBA8 layout has the same eight-texel row padding used above.
   if (!d.check(sceGxmTextureInitLinear(&texture.descriptor, texture.memory.data(),
-      SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, desc.width, desc.height, 0), "initialize native texture")) return 0;
+      SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, desc.width, desc.height, texture.mipCount), "initialize native texture")) return 0;
   d.resourceBytes += texture.memory.size();
   const Handle handle = d.nextHandle++;
-  d.textures.emplace(handle, std::move(texture));
+  d.textures.emplace(handle, std::move(owned));
   if (desc.cacheable) d.textureCache.emplace(key, handle);
   ++d.stats.textureMisses; ++d.stats.textureUploads;
   return handle;
 }
 
-bool Renderer::begin_frame(const Color& color, float clearDepth) {
+bool Renderer::begin_frame() {
   auto& d = *impl_;
-  if (!d.initialized || d.inScene || !std::isfinite(clearDepth) || clearDepth < 0.f || clearDepth > 1.f)
+  if (!d.initialized || d.frameActive)
     return d.fail("invalid begin_frame");
   const int displayError = d.displayError.load(std::memory_order_relaxed);
   if (displayError < 0) return d.fail("display callback failed", displayError);
   d.stats = {}; d.frameStarted = sceKernelGetProcessTimeWide();
-  auto& surface = d.surfaces[d.back];
-  if (!d.check(sceGxmBeginScene(d.context, 0, d.target, nullptr, nullptr, surface.sync,
-      &surface.color, &d.depthSurface), "begin scene")) return false;
-  d.inScene = true;
-  DrawPacket clear{};
-  clear.pipelineKey = d.clearPipeline;
-  clear.vertices = {d.clearVertices, 0, 48}; clear.indices = {d.clearIndices, 0, 6};
-  clear.vertexCount = 3; clear.indexCount = 3;
-  clear.viewport.width = float(d.config.width); clear.viewport.height = float(d.config.height);
-  clear.scissor.width = d.config.width; clear.scissor.height = d.config.height;
-  clear.uniforms.kcolor[0] = {color.r, color.g, color.b, color.a};
-  clear.uniforms.mvp[14] = clearDepth - 1.f;
-  if (!draw(clear)) { sceGxmEndScene(d.context, nullptr, nullptr); d.inScene = false; return false; }
+  d.frameActive = true; d.boundTarget = 0;
+  return true;
+}
+
+bool Renderer::begin_frame(const Color& color, float depth) {
+  return begin_frame() && clear(color, depth);
+}
+
+bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool writeDepth) {
+  auto& d = *impl_;
+  if (!d.initialized || !d.frameActive) return d.fail("clear outside a frame");
+  if (!std::isfinite(depth) || depth<0.f || depth>1.f) return d.fail("invalid clear depth");
+  if (!rgb && !alpha && !writeDepth) return true;
+  auto desc=d.pipelines.at(d.clearPipeline)->desc;
+  desc.colorWrite=rgb; desc.alphaWrite=alpha; desc.depthWrite=writeDepth;
+  const auto key=create_pipeline(desc);
+  if (!key) return false;
+  DrawPacket packet{};
+  packet.pipelineKey=key;
+  packet.vertices={d.clearVertices,0,48}; packet.indices={d.clearIndices,0,6};
+  packet.vertexCount=3; packet.indexCount=3;
+  packet.viewport.width=float(d.width()); packet.viewport.height=float(d.height());
+  packet.scissor.width=d.width(); packet.scissor.height=d.height();
+  packet.uniforms.kcolor[0]={color.r,color.g,color.b,color.a};
+  packet.uniforms.mvp[14]=depth-1.f;
+  return draw(packet);
+}
+
+bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s) {
+  auto& d=*impl_;
+  const auto it=d.textures.find(handle);
+  if(unit>=MaxTextures || it==d.textures.end() || handle==d.boundTarget ||
+      s.minFilter>Filter::LinearMipmapLinear || s.magFilter>Filter::Linear ||
+      s.wrapS>WrapMode::Mirror || s.wrapT>WrapMode::Mirror ||
+      !std::isfinite(s.lodBias) || !std::isfinite(s.minLod) || !std::isfinite(s.maxLod) ||
+      s.minLod<0 || s.maxLod<s.minLod) return d.fail("invalid native texture binding");
+  if(!d.ensure_scene()) return false;
+  auto texture=it->second->descriptor;
+  const bool point=s.minFilter==Filter::Nearest || s.minFilter==Filter::NearestMipmapNearest || s.minFilter==Filter::NearestMipmapLinear;
+  const bool useMips=s.minFilter>Filter::Linear && it->second->mipCount>1;
+  const bool trilinear=s.minFilter==Filter::NearestMipmapLinear || s.minFilter==Filter::LinearMipmapLinear;
+  const unsigned mips=useMips?std::min(it->second->mipCount,unsigned(std::min(std::floor(s.maxLod),12.f))+1u):1u;
+  const unsigned bias=native_lod_bias(s.lodBias);
+  if(!d.check(sceGxmTextureSetMinFilter(&texture,point?SCE_GXM_TEXTURE_FILTER_POINT:SCE_GXM_TEXTURE_FILTER_LINEAR),"texture min filter") ||
+     !d.check(sceGxmTextureSetMagFilter(&texture,s.magFilter==Filter::Nearest?SCE_GXM_TEXTURE_FILTER_POINT:SCE_GXM_TEXTURE_FILTER_LINEAR),"texture mag filter") ||
+     !d.check(sceGxmTextureSetUAddrMode(&texture,address_mode(s.wrapS)),"texture U wrap") ||
+     !d.check(sceGxmTextureSetVAddrMode(&texture,address_mode(s.wrapT)),"texture V wrap") ||
+     !d.check(sceGxmTextureSetMipmapCount(&texture,mips),"texture mip count") ||
+     !d.check(sceGxmTextureSetMipFilter(&texture,useMips&&trilinear?SCE_GXM_TEXTURE_MIP_FILTER_ENABLED:SCE_GXM_TEXTURE_MIP_FILTER_DISABLED),"texture mip filter") ||
+     !d.check(sceGxmTextureSetLodBias(&texture,bias),"texture LOD bias") ||
+     !d.check(sceGxmSetFragmentTexture(d.context,unit,&texture),"bind fragment texture")) return false;
+  it->second->inFlight=true;
+  return true;
+}
+
+bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor& scissor) {
+  auto& d=*impl_;
+  const auto it=d.pipelines.find(key);
+  if(it==d.pipelines.end()) return d.fail("unknown native pipeline");
+  if(!d.ensure_scene()) return false;
+  auto& p=*it->second;
+  const auto& pipeline=p.desc;
+  sceGxmSetVertexProgram(d.context,p.vertex);
+  sceGxmSetFragmentProgram(d.context,p.fragment);
+  const auto compare=pipeline.depthTest?depth_func(pipeline.depthFunc):SCE_GXM_DEPTH_FUNC_ALWAYS;
+  const auto write=pipeline.depthTest&&pipeline.depthWrite?SCE_GXM_DEPTH_WRITE_ENABLED:SCE_GXM_DEPTH_WRITE_DISABLED;
+  sceGxmSetFrontDepthFunc(d.context,compare);sceGxmSetBackDepthFunc(d.context,compare);
+  sceGxmSetFrontDepthWriteEnable(d.context,write);sceGxmSetBackDepthWriteEnable(d.context,write);
+  sceGxmSetCullMode(d.context,pipeline.cull==CullMode::None?SCE_GXM_CULL_NONE:
+      pipeline.cull==CullMode::Back?SCE_GXM_CULL_CCW:SCE_GXM_CULL_CW);
+  const float clip[]{float(scissor.x),float(scissor.y),float(int64_t(scissor.x)+scissor.width),float(int64_t(scissor.y)+scissor.height)};
+  void* vertex=nullptr;
+  if(p.mvp && (!d.check(sceGxmReserveVertexDefaultUniformBuffer(d.context,&vertex),"reserve vertex uniforms") ||
+      !d.check(sceGxmSetUniformDataF(vertex,p.mvp,0,16,u.mvp.data()),"upload projection"))) return false;
+  void* fragment=nullptr;
+  if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
+  const auto upload=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
+    if(!param) return true;
+    count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
+    return d.check(sceGxmSetUniformDataF(fragment,param,0,count,data),"upload fragment uniform");
+  };
+  if(!upload(p.kcolor,16,u.kcolor[0].data()) || !upload(p.tevreg,16,u.tevreg[0].data()) || !upload(p.clip,4,clip)) return false;
+  if(!upload(p.fogColor,4,u.fogColor.data()) || !upload(p.fogParams,4,u.fogParams.data()) ||
+     !upload(p.fogRange,10,u.fogRangeK.data()) || !upload(p.viewportWidth,1,&u.renderViewportWidth) ||
+     !upload(p.indirectMatrices,MaxIndMatrices*8,u.indirectMatrices[0].data()) ||
+     !upload(p.texcoordScale,MaxTextures*4,u.texcoordScale[0].data()) ||
+     !upload(p.textureSizeBias,MaxTextures*4,u.textureSizeBias[0].data()))return false;
+  p.inFlight=true;
   return true;
 }
 
 bool Renderer::draw(const DrawPacket& packet) {
   auto& d = *impl_;
-  if (!d.inScene) return d.fail("draw outside a scene");
+  if (!d.ensure_scene()) return false;
   const auto pi = d.pipelines.find(packet.pipelineKey);
   const auto vi = d.buffers.find(packet.vertices.buffer), ii = d.buffers.find(packet.indices.buffer);
   if (pi == d.pipelines.end() || vi == d.buffers.end() || ii == d.buffers.end()) return d.fail("unknown pipeline or buffer handle");
@@ -413,58 +557,20 @@ bool Renderer::draw(const DrawPacket& packet) {
       return d.fail("vertex index outside the supplied slice or GXM range");
   }
   if (pipeline.cull == CullMode::All || packet.scissor.width <= 0 || packet.scissor.height <= 0) return true;
-  // Bind a descriptor copy per unit: sampling one image with two samplers must
-  // never mutate another unit's state or queued resource metadata.
-  std::array<SceGxmTexture, MaxTextures> boundTextures{};
-  for (unsigned i = 0; i < MaxTextures; ++i) if (p.textureMask & (1u << i)) {
-    const auto& binding = packet.textures[i];
-    const auto ti = d.textures.find(binding.texture);
-    const auto& s = binding.sampler;
-    if (binding.source != TextureSource::Cache || ti == d.textures.end() ||
-        s.minFilter > Filter::Linear || s.magFilter > Filter::Linear || s.wrapS > WrapMode::Mirror || s.wrapT > WrapMode::Mirror ||
-        !std::isfinite(s.lodBias) || !std::isfinite(s.minLod) || !std::isfinite(s.maxLod) || s.minLod > 0 || s.maxLod < 0)
-      return d.fail("missing texture or unsupported sampler/EFB texture");
-    auto& native = boundTextures[i]; native = ti->second.descriptor;
-    if (!d.check(sceGxmTextureSetMinFilter(&native, s.minFilter == Filter::Nearest ? SCE_GXM_TEXTURE_FILTER_POINT : SCE_GXM_TEXTURE_FILTER_LINEAR), "set min filter") ||
-        !d.check(sceGxmTextureSetMagFilter(&native, s.magFilter == Filter::Nearest ? SCE_GXM_TEXTURE_FILTER_POINT : SCE_GXM_TEXTURE_FILTER_LINEAR), "set mag filter") ||
-        !d.check(sceGxmTextureSetUAddrMode(&native, address_mode(s.wrapS)), "set U wrap") ||
-        !d.check(sceGxmTextureSetVAddrMode(&native, address_mode(s.wrapT)), "set V wrap")) return false;
-  }
-  sceGxmSetVertexProgram(d.context, p.vertex);
-  sceGxmSetFragmentProgram(d.context, p.fragment);
-  const auto compare = pipeline.depthTest ? depth_func(pipeline.depthFunc) : SCE_GXM_DEPTH_FUNC_ALWAYS;
-  const auto write = pipeline.depthTest && pipeline.depthWrite ? SCE_GXM_DEPTH_WRITE_ENABLED : SCE_GXM_DEPTH_WRITE_DISABLED;
-  sceGxmSetFrontDepthFunc(d.context, compare); sceGxmSetBackDepthFunc(d.context, compare);
-  sceGxmSetFrontDepthWriteEnable(d.context, write); sceGxmSetBackDepthWriteEnable(d.context, write);
-  sceGxmSetCullMode(d.context, pipeline.cull == CullMode::None ? SCE_GXM_CULL_NONE :
-      pipeline.cull == CullMode::Back ? SCE_GXM_CULL_CCW : SCE_GXM_CULL_CW);
+  if(!bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor)) return false;
+  for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
+    if(!bind_texture(packet.textures[i].texture,i,packet.textures[i].sampler)) return false;
   const float low = std::min(vp.znear, vp.zfar), high = std::max(vp.znear, vp.zfar);
   sceGxmSetViewport(d.context, vp.x + vp.width * .5f, vp.width * .5f,
       vp.y + vp.height * .5f, -vp.height * .5f, (low + high) * .5f, (high - low) * .5f);
-  // Pixel-exact scissor is emitted into Cg; GXM region clipping alone is tile based.
-  const float clip[]{float(packet.scissor.x), float(packet.scissor.y),
-      float(int64_t(packet.scissor.x) + packet.scissor.width), float(int64_t(packet.scissor.y) + packet.scissor.height)};
-  void* vertexUniforms = nullptr;
-  if (p.mvp) {
-    if (!d.check(sceGxmReserveVertexDefaultUniformBuffer(d.context, &vertexUniforms), "reserve vertex uniforms") ||
-        !d.check(sceGxmSetUniformDataF(vertexUniforms, p.mvp, 0, 16, packet.uniforms.mvp.data()), "upload projection")) return false;
-  }
-  void* fragmentUniforms = nullptr;
-  if (!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context, &fragmentUniforms), "reserve fragment uniforms")) return false;
-  const auto upload = [&](const SceGxmProgramParameter* parameter, unsigned count, const float* source) {
-    // Reflection can shrink unused tails of uniform arrays.
-    if (!parameter) return true;
-    count = std::min(count, sceGxmProgramParameterGetComponentCount(parameter) * sceGxmProgramParameterGetArraySize(parameter));
-    return d.check(sceGxmSetUniformDataF(fragmentUniforms, parameter, 0, count, source), "upload fragment uniform");
-  };
-  if (!upload(p.kcolor, 16, packet.uniforms.kcolor[0].data()) ||
-      !upload(p.tevreg, 16, packet.uniforms.tevreg[0].data()) || !upload(p.clip, 4, clip)) return false;
-  for (unsigned i = 0; i < MaxTextures; ++i) if (p.textureMask & (1u << i))
-    if (!d.check(sceGxmSetFragmentTexture(d.context, i, &boundTextures[i]), "bind native texture")) return false;
   if (!d.check(sceGxmSetVertexStream(d.context, 0, static_cast<uint8_t*>(vi->second.memory.data()) + base), "bind native vertex stream")) return false;
   const auto primitive = pipeline.primitive == Primitive::Triangles ? SCE_GXM_PRIMITIVE_TRIANGLES :
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
   if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;
+  pi->second->inFlight = true;
+  vi->second.inFlight = true; ii->second.inFlight = true;
+  for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
+    d.textures.at(packet.textures[i].texture)->inFlight=true;
   ++d.stats.drawCalls;
   d.stats.triangles += pipeline.primitive == Primitive::Triangles ? packet.indexCount / 3 : packet.indexCount - 2;
   return true;
@@ -472,10 +578,9 @@ bool Renderer::draw(const DrawPacket& packet) {
 
 bool Renderer::end_frame(bool present) {
   auto& d = *impl_;
-  if (!d.inScene) return d.fail("end_frame outside a scene");
-  const int error = sceGxmEndScene(d.context, nullptr, nullptr);
-  d.inScene = false;
-  if (!d.check(error, "end scene")) return false;
+  if (!d.frameActive) return d.fail("end_frame outside a frame");
+  if (!d.end_scene()) return false;
+  d.frameActive = false;
   auto& surface = d.surfaces[d.back];
   if (present) {
     if (!d.check(sceGxmPadHeartbeat(&surface.color, surface.sync), "display heartbeat")) return false;
@@ -485,7 +590,7 @@ bool Renderer::end_frame(bool present) {
   } else {
     // Discarded presents retain the current display; complete writes before the
     // same offscreen surface can become the next scene's target.
-    sceGxmFinish(d.context);
+    if(!finish()) return false;
   }
   d.stats.cpuFrameUs = sceKernelGetProcessTimeWide() - d.frameStarted;
   return true;
@@ -494,13 +599,189 @@ bool Renderer::end_frame(bool present) {
 bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) {
   auto& d = *impl_;
   if (!d.initialized || d.inScene || !d.displayed) return d.fail("readback requires a completed presented frame");
-  sceGxmFinish(d.context);
+  if(!finish()) return false;
   pixels.resize(size_t(d.config.width) * d.config.height * 4);
   const auto* source = static_cast<const uint8_t*>(d.surfaces[d.front].memory.data());
   for (uint32_t y = 0; y < d.config.height; ++y)
     std::memcpy(pixels.data() + size_t(y) * d.config.width * 4,
         source + size_t(y) * d.stride * 4, size_t(d.config.width) * 4);
   return true;
+}
+
+bool Renderer::finish() {
+  auto& d=*impl_;
+  if(!d.context) return true;
+  if(!d.end_scene()) return false;
+  sceGxmFinish(d.context);
+  for(auto& [_,b]:d.buffers) b.inFlight=false;
+  for(auto& [_,t]:d.textures) t->inFlight=false;
+  for(auto& [_,p]:d.pipelines) p->inFlight=false;
+  return true;
+}
+
+bool Renderer::update_buffer(Handle handle,const void* data,size_t bytes,size_t offset) {
+  auto& d=*impl_;
+  auto it=d.buffers.find(handle);
+  if(it==d.buffers.end() || offset>it->second.bytes || bytes>it->second.bytes-offset || (!data&&bytes))
+    return d.fail("invalid buffer update");
+  if(!bytes) return true;
+  if(it->second.inFlight && !finish()) return false;
+  std::memcpy(static_cast<uint8_t*>(it->second.memory.data())+offset,data,bytes);
+  return true;
+}
+
+void Renderer::destroy_buffer(Handle handle) {
+  auto& d=*impl_;
+  auto it=d.buffers.find(handle);
+  if(it==d.buffers.end()) return;
+  if(it->second.inFlight && !finish()) return;
+  d.resourceBytes-=it->second.memory.size();
+  d.buffers.erase(it);
+}
+
+void Renderer::destroy_pipeline(uint64_t key) {
+  auto& d=*impl_;
+  auto it=d.pipelines.find(key);
+  if(it==d.pipelines.end() || key==d.clearPipeline) return;
+  if(it->second->inFlight && !finish()) return;
+  d.destroy_pipeline(*it->second);
+  d.pipelines.erase(it);
+}
+
+size_t Renderer::texture_bytes(Handle handle) const noexcept {
+  const auto& d=*impl_;
+  const auto it=d.textures.find(handle);
+  return it==d.textures.end()?0:it->second->memory.size()+it->second->depth.size();
+}
+
+void Renderer::destroy_texture(Handle handle) {
+  auto& d=*impl_;
+  auto it=d.textures.find(handle);
+  if(it==d.textures.end()) return;
+  if((it->second->inFlight || handle==d.boundTarget) && !finish()) return;
+  if(handle==d.boundTarget) d.boundTarget=0;
+  d.resourceBytes-=it->second->memory.size()+it->second->depth.size();
+  for(auto c=d.textureCache.begin();c!=d.textureCache.end();)
+    if(c->second==handle) c=d.textureCache.erase(c); else ++c;
+  d.textures.erase(it);
+}
+
+Handle Renderer::create_target(uint32_t width,uint32_t height,bool useDepth) {
+  auto& d=*impl_;
+  if(!d.initialized || !width || !height || width>4096 || height>4096 || !d.nextHandle) {
+    d.fail("invalid render target size"); return 0;
+  }
+  const uint32_t stride=(width+7u)&~7u;
+  const uint32_t dw=(width+31u)&~31u,dh=(height+31u)&~31u;
+  const size_t colorBytes=(size_t(stride)*height*4+4095u)&~size_t(4095u);
+  const size_t depthBytes=useDepth?((size_t(dw)*dh*4+4095u)&~size_t(4095u)):0;
+  if(!d.has_budget(colorBytes+depthBytes)) {d.fail("render target budget exhausted");return 0;}
+  auto texture=std::make_unique<Impl::Texture>();
+  auto& t=*texture;
+  t.width=width;t.height=height;t.stride=stride;
+  if(!d.alloc(t.memory,colorBytes,MemoryKind::CpuGpu)) return 0;
+  std::memset(t.memory.data(),0,t.memory.size());
+  if(!d.check(sceGxmTextureInitLinear(&t.descriptor,t.memory.data(),SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,
+          width,height,0),"initialize target texture") ||
+     !d.check(sceGxmColorSurfaceInit(&t.color,SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR,
+          SCE_GXM_COLOR_SURFACE_LINEAR,SCE_GXM_COLOR_SURFACE_SCALE_NONE,SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
+          width,height,stride,t.memory.data()),"initialize target color surface")) return 0;
+  if(useDepth) {
+    if(!d.alloc(t.depth,depthBytes,MemoryKind::CpuGpu) ||
+       !d.check(sceGxmDepthStencilSurfaceInit(&t.depthSurface,SCE_GXM_DEPTH_STENCIL_FORMAT_DF32,
+          SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,dw,t.depth.data(),nullptr),"initialize target depth")) return 0;
+    sceGxmDepthStencilSurfaceSetBackgroundDepth(&t.depthSurface,1.f);
+  }
+  SceGxmRenderTargetParams params{};
+  params.width=width;params.height=height;params.scenesPerFrame=1;
+  params.multisampleMode=SCE_GXM_MULTISAMPLE_NONE;params.driverMemBlock=-1;
+  if(!d.check(sceGxmCreateRenderTarget(&params,&t.target),"create offscreen render target") ||
+     !d.check(sceGxmSyncObjectCreate(&t.sync),"create offscreen sync")) return 0;
+  const Handle h=d.nextHandle++;
+  d.resourceBytes+=t.memory.size()+t.depth.size();
+  d.textures.emplace(h,std::move(texture));
+  return h;
+}
+
+bool Renderer::bind_target(Handle handle) {
+  auto& d=*impl_;
+  if(!d.initialized) return d.fail("bind target before initialization");
+  const auto it=d.textures.find(handle);
+  if(handle && (it==d.textures.end() || !it->second->target)) return d.fail("unknown render target");
+  if(handle==d.boundTarget) return true;
+  // Correctness-first scene dependency: stores depth and completes writes before
+  // an EFB can be sampled or re-entered. Replace with per-scene fences separately.
+  if(!finish()) return false;
+  d.boundTarget=handle;
+  return true;
+}
+
+bool Renderer::read_target(Handle handle,std::vector<uint8_t>& pixels) {
+  auto& d=*impl_;
+  const auto it=d.textures.find(handle);
+  if(it==d.textures.end()) return d.fail("unknown readback texture");
+  if(!finish()) return false;
+  const auto& t=*it->second;
+  pixels.resize(size_t(t.width)*t.height*4);
+  for(uint32_t y=0;y<t.height;++y)
+    std::memcpy(pixels.data()+size_t(y)*t.width*4,
+        static_cast<const uint8_t*>(t.memory.data())+size_t(y)*t.stride*4,size_t(t.width)*4);
+  return true;
+}
+
+bool Renderer::read_current(std::vector<uint8_t>& pixels,uint32_t& width,uint32_t& height) {
+  auto& d=*impl_;
+  if(!d.initialized || !d.frameActive) return d.fail("read current requires an active frame");
+  width=d.width();height=d.height();
+  if(d.boundTarget) return read_target(d.boundTarget,pixels);
+  if(!finish()) return false;
+  pixels.resize(size_t(width)*height*4);
+  const auto* source=static_cast<const uint8_t*>(d.surfaces[d.back].memory.data());
+  for(uint32_t y=0;y<height;++y)
+    std::memcpy(pixels.data()+size_t(y)*width*4,source+size_t(y)*d.stride*4,size_t(width)*4);
+  return true;
+}
+
+bool Renderer::upload_target(Handle handle,const void* rgba,uint32_t width,uint32_t height) {
+  auto& d=*impl_;
+  const auto it=d.textures.find(handle);
+  if(!rgba || it==d.textures.end() || it->second->width!=width || it->second->height!=height)
+    return d.fail("invalid EFB upload");
+  auto& t=*it->second;
+  if((t.inFlight || handle==d.boundTarget) && !finish()) return false;
+  for(uint32_t y=0;y<height;++y)
+    std::memcpy(static_cast<uint8_t*>(t.memory.data())+size_t(y)*t.stride*4,
+      static_cast<const uint8_t*>(rgba)+size_t(y)*width*4,size_t(width)*4);
+  return true;
+}
+
+bool Renderer::blit_to_default(Handle handle) {
+  auto& d=*impl_;
+  if(d.textures.find(handle)==d.textures.end()) return d.fail("unknown blit texture");
+  if(!bind_target(0)) return false;
+  PipelineDesc p{};
+  p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
+  p.layout.count=2;
+  p.layout.attributes[0]={0,4,VertexScalar::F32,false,28,0};
+  p.layout.attributes[1]={3,3,VertexScalar::F32,false,28,16};
+  p.tev.stages[0].texture=0;p.tev.stages[0].texCoord=0;
+  p.tev.stages[0].color.d=TevColorArg::TexColor;p.tev.stages[0].alpha.d=TevAlphaArg::TexAlpha;
+  const auto key=create_pipeline(p);
+  if(!key) return false;
+  if(!d.blitVertices) {
+    const float vertices[]{-1,-1,-.5f,1, 0,1,1, 3,-1,-.5f,1, 2,1,1, -1,3,-.5f,1, 0,-1,1};
+    d.blitVertices=create_buffer(vertices,sizeof(vertices));
+  }
+  if(!d.blitVertices) return false;
+  DrawPacket packet{};
+  packet.pipelineKey=key;
+  packet.vertices={d.blitVertices,0,84};packet.indices={d.clearIndices,0,6};
+  packet.vertexCount=packet.indexCount=3;
+  packet.viewport.width=float(d.config.width);packet.viewport.height=float(d.config.height);
+  packet.scissor.width=d.config.width;packet.scissor.height=d.config.height;
+  packet.textures[0].texture=handle;
+  packet.textures[0].sampler.wrapS=packet.textures[0].sampler.wrapT=WrapMode::Clamp;
+  return draw(packet);
 }
 
 void Renderer::shutdown() noexcept {
@@ -522,6 +803,7 @@ void Renderer::shutdown() noexcept {
   std::free(d.hostMemory); d.hostMemory = nullptr;
   if (d.ownsGxm) { sceGxmTerminate(); d.ownsGxm = false; }
   d.initialized = false; d.displayed = false; d.resourceBytes = 0;
+  d.frameActive=false;d.depthValid=false;d.boundTarget=0;d.blitVertices=0;
   d.clearVertices = d.clearIndices = 0; d.clearPipeline = 0;
   d.front = 0; d.back = 1;
 }

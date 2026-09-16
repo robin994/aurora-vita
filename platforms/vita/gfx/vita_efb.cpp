@@ -1,5 +1,6 @@
 #include "vita_efb.hpp"
 #include "vita_gl_util.hpp"
+#include "vita_sampler_units.hpp"
 #include <algorithm>
 #include <cstddef>
 #include <memory>
@@ -469,7 +470,7 @@ bool EfbManager::bind_texture(Handle h, unsigned unit, const SamplerDesc& s) noe
   if(!it->second.samplerValid||old.wrapT!=s.wrapT)glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode(s.wrapT));
   if(!it->second.samplerValid||old.minFilter!=s.minFilter)glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter_mode(s.minFilter));
   if(!it->second.samplerValid||old.magFilter!=s.magFilter)glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter_mode(s.magFilter));
-  if(!it->second.samplerValid||old.lodBias!=s.lodBias)glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, s.lodBias);
+  if(!it->second.samplerValid||old.lodBias!=s.lodBias)glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, vitagl_lod_bias(s.lodBias));
   it->second.sampler=s;
   it->second.samplerValid=true;
 #else

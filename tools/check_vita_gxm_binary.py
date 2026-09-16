@@ -9,6 +9,16 @@ import subprocess
 import sys
 
 
+def executable_symbols(nm_output: str) -> set[str]:
+    """Inspect code/weak/IFUNC symbols, not unrelated engine data named glFoo."""
+    result: set[str] = set()
+    for line in nm_output.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[-2] in {"T", "t", "W", "w", "I", "i"}:
+            result.add(fields[-1].lstrip("_"))
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("elf", type=Path, help="Unstripped native Vita ELF, not SELF/VPK")
@@ -24,7 +34,7 @@ def main() -> int:
     except (OSError, subprocess.SubprocessError) as error:
         print(f"FAIL: could not inspect native build: {error}", file=sys.stderr)
         return 2
-    symbols = {line.split()[-1].lstrip("_") for line in result.stdout.splitlines() if line.split()}
+    symbols = executable_symbols(result.stdout)
     forbidden = sorted(s for s in symbols if re.match(r"(?:gl[A-Z]|vgl[A-Za-z]|vita2d_)", s))
     forbidden_archives = re.findall(r"[^\s()]*lib(?:vitaGL|vita2d|GL|GLES\w*)\.(?:a|so)[^\s()]*", map_text, re.I)
     required = {"sceGxmInitialize", "sceGxmDraw", "sceGxmSetVertexProgram", "sceGxmSetFragmentProgram",
@@ -32,11 +42,11 @@ def main() -> int:
     missing = sorted(required - symbols)
     if forbidden or forbidden_archives or missing:
         print("FAIL: native graphics isolation check", file=sys.stderr)
-        for label, values in (("GL symbols", forbidden), ("GL libraries", forbidden_archives), ("Missing GXM symbols", missing)):
+        for label, values in (("GL entry points", forbidden), ("GL libraries", forbidden_archives), ("Missing GXM symbols", missing)):
             if values:
                 print(f"  {label}: {', '.join(values)}", file=sys.stderr)
         return 1
-    print(f"PASS: {len(symbols)} defined symbols inspected; native GXM draw/present found; no GL/vgl/vita2d symbols or libraries.")
+    print(f"PASS: {len(symbols)} executable symbols inspected; native GXM draw/present found; no GL/vgl/vita2d entry points or libraries.")
     return 0
 
 

@@ -77,7 +77,8 @@ public:
                       size_t rawBytes, uint32_t vertexCount,
                       const uint16_t* rawIndices = nullptr, uint32_t indexCount = 0) noexcept;
   // GXCopyTex integration. Call after the source EFB has been rendered and before
-  // a texture object backed by dest is sampled. The copy stays on the GPU.
+  // a texture object backed by dest is sampled. The backend owns the copied image;
+  // native GXM currently uses a synchronized CPU conversion for color copies.
   bool copy_tex(const void* dest, bool clear) noexcept;
   void evict_copy_tex(const void* dest) noexcept;
   void clear_copy_textures() noexcept;

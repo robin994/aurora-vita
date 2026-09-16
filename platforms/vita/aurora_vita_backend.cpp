@@ -3,7 +3,9 @@
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_texture_decode.hpp"
+#if !defined(AURORA_VITA_RENDERER_GXM)
 #include "gfx/vita_gl_util.hpp"
+#endif
 #include "gx/aurora_vita_draw_sink.hpp"
 #include <cstdio>
 #include <cstring>
@@ -19,7 +21,9 @@
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
+#if !defined(AURORA_VITA_RENDERER_GXM)
 #include <vitaGL.h>
+#endif
 #else
 #include <chrono>
 #endif
@@ -94,7 +98,7 @@ bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
   gfx::set_texture_decode_diagnostics(c.texture_decode_diagnostics);
-#if defined(__vita__)
+#if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   gfx::configure_program_binary_cache(c.program_binary_cache_path);
 #endif
   g_telemetryEnabled=c.diagnostics||c.telemetry_log_path;
@@ -103,7 +107,7 @@ bool initialize(const BackendConfig& c) noexcept {
   g_diagnosticsEnabled=g_telemetryEnabled||g_coverageEnabled||g_traceEnabled;
   g_initFailure=InitFailure::None;
   g_initFailureDetail[0]='\0';
-#if defined(__vita__)
+#if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   // The vitaGL archive shipped by the currently supported VitaSDK probes
   // ur0:data/external/libshacccg.suprx, while vitaShaRK's canonical default
   // remains ur0:/data/libshacccg.suprx. Accept both layouts. If only the
@@ -184,10 +188,15 @@ bool initialize(const BackendConfig& c) noexcept {
   glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glClearDepth(1.0f);
 #endif
   gfx::RendererConfig rc{}; rc.width=c.width; rc.height=c.height; rc.textureBudget=c.texture_cache_budget;
+  rc.displayBuffers=c.vgl_display_buffer_count;
+  rc.waitVblank=c.wait_vblank;
+  // The native budget covers persistent streaming buffers as well as textures.
+  rc.nativeResourceBudget=c.texture_cache_budget+
+      (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
   g_renderer=std::make_unique<gfx::Renderer>(rc);
   if(!g_renderer->initialize()) {
     g_initFailure=InitFailure::RendererInitFailed;
-    std::snprintf(g_initFailureDetail,sizeof(g_initFailureDetail),"Renderer::initialize failed");
+    std::snprintf(g_initFailureDetail,sizeof(g_initFailureDetail),"Renderer::initialize failed: %s",g_renderer->last_error());
     g_renderer.reset();
     return false;
   }
@@ -239,6 +248,7 @@ bool begin_frame() noexcept {
   g_start=now_us();
   if (g_telemetryEnabled) g_telemetry.begin_frame(g_frame);
   g_renderer->begin_frame();
+  if(g_renderer->failed()) return false;
   if (g_pendingDisplayClear.pending) {
     g_renderer->clear_current(g_pendingDisplayClear.color,g_pendingDisplayClear.depth,
                               g_pendingDisplayClear.clearRgb,g_pendingDisplayClear.clearAlpha,
@@ -272,9 +282,7 @@ void end_frame() noexcept {
   if(!g_initialized) return;
   g_drawSink->flush(); g_renderer->end_frame();
   const uint64_t presentStart = now_us();
-#if defined(__vita__)
-  if(!g_discardPresent) vglSwapBuffers(GL_FALSE);
-#endif
+  g_renderer->present(!g_discardPresent);
   const uint64_t end = now_us();
   g_last=end-g_start;
   if (g_telemetryEnabled) {
