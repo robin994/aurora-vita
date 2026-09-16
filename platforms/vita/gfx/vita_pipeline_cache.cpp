@@ -183,6 +183,7 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& d,Frame
   p.lastUsed=++useSequence_;
   p.desc=d;
   p.uTex.fill(-1);
+  p.uGxTexture.fill(-1);p.uGxPost.fill(-1);
 #if defined(__vita__)
   auto src=build_tev_glsl(d);
   std::string shaderDiagnostics;
@@ -198,6 +199,16 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& d,Frame
   p.uIndMtx=glGetUniformLocation(p.program,"u_ind_mtx");
   p.uTexcoordScale=glGetUniformLocation(p.program,"u_texcoord_scale");
   p.uTextureSizeBias=glGetUniformLocation(p.program,"u_texture_size_bias");
+  if(d.fixedVertexOnGpu){
+    p.uGxPosition=glGetUniformLocation(p.program,"u_gx_position");
+    p.uGxMaterial=glGetUniformLocation(p.program,"u_gx_material");
+    for(unsigned i=0;i<MaxTextures;++i){
+      char name[32];std::snprintf(name,sizeof(name),"u_gx_texture%u",i);
+      p.uGxTexture[i]=glGetUniformLocation(p.program,name);
+      std::snprintf(name,sizeof(name),"u_gx_post%u",i);
+      p.uGxPost[i]=glGetUniformLocation(p.program,name);
+    }
+  }
   glUseProgram(p.program);
   for(unsigned i=0;i<MaxTextures;i++){
     char n[16];std::snprintf(n,sizeof(n),"u_tex%u",i);
@@ -224,7 +235,7 @@ const CompiledPipeline* PipelineCache::find(uint64_t key) noexcept {
   return &it->second;
 }
 
-void PipelineCache::bind(const CompiledPipeline&p,const GpuDrawUniforms&u,FrameStats*st) noexcept {
+void PipelineCache::bind(const CompiledPipeline&p,const GpuDrawUniforms&u,FrameStats*st,const FixedVertexUniforms*fv) noexcept {
 #if defined(__vita__)
   if(bound_!=p.key){glUseProgram(p.program);fixed(p.desc,fixedStateValid_?&fixedState_:nullptr);fixedState_=snapshot_fixed(p.desc);fixedStateValid_=true;bound_=p.key;boundPipeline_=const_cast<CompiledPipeline*>(&p);if(st)st->stateChanges++;}
   auto changed=[&](uint16_t bit,const void* a,const void* b,size_t n) noexcept {
@@ -234,6 +245,22 @@ void PipelineCache::bind(const CompiledPipeline&p,const GpuDrawUniforms&u,FrameS
     std::memcpy(dst,src,n);
     p.uniformValidMask|=bit;
   };
+  if(fv&&p.desc.fixedVertexOnGpu){
+    auto upload=[&](int location,const float* src,float* cached,size_t floats){
+      if(location<0)return;
+      if(!p.fixedVertexValid||std::memcmp(src,cached,floats*sizeof(float))!=0){
+        glUniform4fv(location,static_cast<GLsizei>(floats/4),src);
+        std::memcpy(cached,src,floats*sizeof(float));
+      }
+    };
+    upload(p.uGxPosition,fv->position.data(),p.cachedFixedVertex.position.data(),12);
+    upload(p.uGxMaterial,fv->material[0].data(),p.cachedFixedVertex.material[0].data(),16);
+    for(unsigned i=0;i<MaxTextures;++i){
+      upload(p.uGxTexture[i],fv->texture[i].data(),p.cachedFixedVertex.texture[i].data(),12);
+      upload(p.uGxPost[i],fv->post[i].data(),p.cachedFixedVertex.post[i].data(),12);
+    }
+    p.fixedVertexValid=true;
+  }
   if(p.uMvp>=0 && changed(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp))){glUniformMatrix4fv(p.uMvp,1,GL_FALSE,u.mvp.data());uploaded(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp));}
   if(p.uKColor>=0 && changed(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor))){glUniform4fv(p.uKColor,4,u.kcolor[0].data());uploaded(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor));}
   if(p.uTevReg>=0 && changed(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg))){glUniform4fv(p.uTevReg,4,u.tevreg[0].data());uploaded(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg));}
@@ -246,6 +273,7 @@ void PipelineCache::bind(const CompiledPipeline&p,const GpuDrawUniforms&u,FrameS
   if(p.uTextureSizeBias>=0 && changed(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias))){glUniform4fv(p.uTextureSizeBias,MaxTextures,u.textureSizeBias[0].data());uploaded(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias));}
 #else
   (void)u;
+  (void)fv;
   if(bound_!=p.key){bound_=p.key;boundPipeline_=const_cast<CompiledPipeline*>(&p);if(st)st->stateChanges++;}
 #endif
 }

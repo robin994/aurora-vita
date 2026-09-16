@@ -1,9 +1,28 @@
 #include "vita_texture_decode.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdio>
 
 namespace aurora::vita::gfx {
 namespace {
+bool textureDiagnostics=false;
+unsigned textureReports=0;
+void report_texture_colors(const TextureDesc& d,const std::vector<uint8_t>& rgba) noexcept {
+  if(!textureDiagnostics||textureReports>=32)return;
+  size_t magenta=0,transparentMagenta=0,transparent=0;
+  for(size_t i=0;i+3<rgba.size();i+=4){
+    if(rgba[i+3]<128)++transparent;
+    if(rgba[i]>230&&rgba[i+1]<30&&rgba[i+2]>230){
+      ++magenta;if(rgba[i+3]<128)++transparentMagenta;
+    }
+  }
+  if(!magenta)return;
+  ++textureReports;
+  std::fprintf(stderr,"[aurora-vita] texture_colors source=%llx fmt=%u size=%ux%u magenta=%u transparent_magenta=%u transparent=%u pixels=%u\n",
+    static_cast<unsigned long long>(d.sourceId),static_cast<unsigned>(d.format),d.width,d.height,
+    static_cast<unsigned>(magenta),static_cast<unsigned>(transparentMagenta),
+    static_cast<unsigned>(transparent),static_cast<unsigned>(rgba.size()/4));
+}
 inline uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
 inline uint8_t expand4(uint8_t v) { return static_cast<uint8_t>((v << 4) | v); }
 inline uint8_t expand5(uint8_t v) { return static_cast<uint8_t>((v << 3) | (v >> 2)); }
@@ -17,7 +36,22 @@ RGBA decode_rgb5a3(uint16_t v) {
 }
 RGBA palette_color(const TextureDesc& d, uint32_t idx) {
   const auto* p = static_cast<const uint8_t*>(d.palette);
-  if (!p || idx*2+1 >= d.paletteSize) return {255,0,255,255};
+  if (!p || idx*2+1 >= d.paletteSize) {
+#if defined(__vita__)
+    // Report malformed palette metadata once per sampled source, not once per
+    // texel. Preserve the diagnostic color rather than hide missing GX data.
+    static unsigned reported=0;
+    static uint64_t lastSource=~uint64_t{0};
+    if(reported<8&&lastSource!=d.sourceId){
+      lastSource=d.sourceId;++reported;
+      std::fprintf(stderr,"[aurora-vita] palette_oob source=%llx palette=%llx fmt=%u size=%ux%u entries=%u index=%u palette_format=%u\n",
+        static_cast<unsigned long long>(d.sourceId),static_cast<unsigned long long>(d.paletteSourceId),
+        static_cast<unsigned>(d.format),d.width,d.height,static_cast<unsigned>(d.paletteSize/2),idx,
+        static_cast<unsigned>(d.paletteFormat));
+    }
+#endif
+    return {255,0,255,255};
+  }
   const uint16_t v = be16(p + idx*2);
   switch (d.paletteFormat) {
   case PaletteFormat::IA8: return {static_cast<uint8_t>(v&255),static_cast<uint8_t>(v&255),static_cast<uint8_t>(v&255),static_cast<uint8_t>(v>>8)};
@@ -54,6 +88,8 @@ void cmpr_block(const uint8_t* src, std::vector<uint8_t>& out, uint32_t w, uint3
   }
 }
 }
+
+void set_texture_decode_diagnostics(bool enabled) noexcept {textureDiagnostics=enabled;textureReports=0;}
 
 size_t encoded_texture_size(uint32_t w,uint32_t h,TextureFormat f) noexcept {
   switch(f){
@@ -164,7 +200,7 @@ bool decode_texture_rgba8(const TextureDesc& d,std::vector<uint8_t>& out) noexce
   if(d.dataSize && d.dataSize<need) return false;
   out.assign(static_cast<size_t>(d.width)*d.height*4,0);
   const auto* s=static_cast<const uint8_t*>(d.data); size_t off=0;
-  if(d.format==TextureFormat::RGBA8888){ std::copy_n(s,need,out.data()); return true; }
+  if(d.format==TextureFormat::RGBA8888){ std::copy_n(s,need,out.data()); report_texture_colors(d,out); return true; }
   auto tile=[&](uint32_t bw,uint32_t bh,auto fn){
     for(uint32_t by=0;by<d.height;by+=bh) for(uint32_t bx=0;bx<d.width;bx+=bw) fn(bx,by);
   };
@@ -182,6 +218,7 @@ bool decode_texture_rgba8(const TextureDesc& d,std::vector<uint8_t>& out) noexce
   case TextureFormat::CMPR: tile(8,8,[&](uint32_t bx,uint32_t by){cmpr_block(s+off,out,d.width,d.height,bx,by);cmpr_block(s+off+8,out,d.width,d.height,bx+4,by);cmpr_block(s+off+16,out,d.width,d.height,bx,by+4);cmpr_block(s+off+24,out,d.width,d.height,bx+4,by+4);off+=32;});break;
   case TextureFormat::RGBA8888: break;
   }
+  report_texture_colors(d,out);
   return true;
 }
 

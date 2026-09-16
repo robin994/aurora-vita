@@ -15,6 +15,14 @@ enum class TelemetryPhase : uint8_t {
   Submit,
   EfbCopy,
   Present,
+  BufferUpload,
+  StreamWait,
+  VertexPack,
+  GeometryCache,
+  DrawFrontend,
+  StateTranslate,
+  GeometryKey,
+  GeometryValidate,
   Count,
 };
 
@@ -26,6 +34,7 @@ struct TelemetryCounters {
   uint64_t triangles = 0;
   uint64_t vertexDedupInput = 0;
   uint64_t vertexDedupUnique = 0;
+  uint64_t gpuGeometryHits=0,gpuGeometryMisses=0,gpuVertices=0;
   uint64_t pipelineHits = 0;
   uint64_t pipelineMisses = 0;
   uint64_t textureHits = 0;
@@ -53,6 +62,9 @@ public:
   void add_time(TelemetryPhase phase, uint64_t us) noexcept;
   void add_draw(uint32_t vertices, uint32_t indices, uint32_t triangles) noexcept;
   void vertex_dedup(uint32_t inputVertices,uint32_t uniqueVertices) noexcept;
+  void gpu_geometry(bool hit,uint32_t vertices) noexcept;
+  void set_split_vertex_phases(bool enabled) noexcept { splitVertexPhases_ = enabled; }
+  bool split_vertex_phases() const noexcept { return splitVertexPhases_; }
   void pipeline(bool hit) noexcept;
   void texture(bool hit, bool uploaded, uint64_t uploadBytes = 0) noexcept;
   void fallback_texture(uint32_t count = 1) noexcept;
@@ -69,6 +81,7 @@ public:
 private:
   FrameTelemetry frame_{};
   TelemetryCounters lifetime_{};
+  bool splitVertexPhases_ = false;
 };
 
 class ScopedTelemetryPhase {

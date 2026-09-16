@@ -1,5 +1,6 @@
 #include "vita_shader_gen.hpp"
 #include "vita_pipeline_key.hpp"
+#include "vita_fixed_vertex.hpp"
 
 #include <algorithm>
 #include <array>
@@ -252,6 +253,81 @@ std::string raster_base(RasterSource source) {
   return "v_color0";
 }
 
+std::string fixed_vertex_source(TexGenSource source) {
+  switch(source) {
+    case TexGenSource::Position:return "vec4(a_position.xyz,1.0)";
+    case TexGenSource::Normal:return "vec4(a_normal,1.0)";
+    case TexGenSource::Binormal:return "vec4(a_binormal,1.0)";
+    case TexGenSource::Tangent:return "vec4(a_tangent,1.0)";
+    case TexGenSource::Color0:return "a_color0";
+    case TexGenSource::Color1:return "a_color1";
+    default: {
+      const unsigned i=static_cast<unsigned>(source)-static_cast<unsigned>(TexGenSource::Tex0);
+      return i<MaxTextures?"vec4(a_tex"+std::to_string(i)+".xy,1.0,1.0)":"vec4(0.0,0.0,1.0,1.0)";
+    }
+  }
+}
+
+std::string fixed_vertex_shader(const PipelineDesc& desc) {
+  std::ostringstream out;
+  const auto inputs=fixed_vertex_gpu_inputs(desc);
+  const auto colors=pipeline_raster_color_mask(desc);
+  const auto outputs=pipeline_texcoord_mask(desc);
+  out<<"precision highp float;\nattribute vec4 a_position;\nuniform mat4 u_mvp;\n"
+        "uniform vec4 u_gx_position[3];\nuniform vec4 u_gx_material[4];\n"
+        "vec3 gx_quantize(vec3 c){vec3 b=clamp(c*255.0,0.0,255.0);vec3 i=floor(b);return (i+step(vec3(0.5),b-i))/255.0;}\n"
+        "float gx_quantize1(float c){float b=clamp(c*255.0,0.0,255.0);float i=floor(b);return (i+step(0.5,b-i))/255.0;}\n";
+  for(unsigned i=0;i<2;++i) {
+    if(inputs&vertex_semantic_bit(i?VertexSemantic::Color1:VertexSemantic::Color0))out<<"attribute vec4 a_color"<<i<<";\n";
+    if(colors&(1u<<i))out<<"varying vec4 v_color"<<i<<";\n";
+  }
+  if(inputs&vertex_semantic_bit(VertexSemantic::Normal))out<<"attribute vec3 a_normal;\n";
+  if(inputs&vertex_semantic_bit(VertexSemantic::Binormal))out<<"attribute vec3 a_binormal;\n";
+  if(inputs&vertex_semantic_bit(VertexSemantic::Tangent))out<<"attribute vec3 a_tangent;\n";
+  for(unsigned i=0;i<MaxTextures;++i) {
+    if(inputs&vertex_semantic_bit(static_cast<VertexSemantic>(static_cast<unsigned>(VertexSemantic::Tex0)+i)))
+      out<<"attribute vec3 a_tex"<<i<<";\n";
+    if(!(outputs&(1u<<i)))continue;
+    out<<"varying vec3 v_tex"<<i<<";\n";
+    if(i<desc.texgenCount) {
+      const auto& t=desc.texgens[i];
+      if(t.matrix>=0&&t.type!=TexGenType::SRTG)out<<"uniform vec4 u_gx_texture"<<i<<"[3];\n";
+      if(t.postMatrix>=0)out<<"uniform vec4 u_gx_post"<<i<<"[3];\n";
+    }
+  }
+  // Separate model/view from projection. The previous folded-matrix experiment
+  // mixed coordinate conventions and must not be reused here.
+  out<<"void main(){vec4 object_pos=vec4(a_position.xyz,1.0);\n"
+        "vec3 mv=vec3(dot(u_gx_position[0],object_pos),dot(u_gx_position[1],object_pos),dot(u_gx_position[2],object_pos));\n"
+        "gl_Position=u_mvp*vec4(mv,a_position.w);\n";
+  if(desc.reversedZ)out<<"gl_Position.z=-gl_Position.z;\n";
+  else out<<"gl_Position.z+=gl_Position.w;\n";
+  out<<"gl_Position.z=2.0*gl_Position.z-gl_Position.w;\n";
+  for(unsigned i=0;i<2;++i)if(colors&(1u<<i)) {
+    out<<"v_color"<<i<<".rgb=";
+    if(desc.colorChannels[i].materialSource==ColorSource::Vertex)out<<"a_color"<<i<<".rgb;\n";
+    else out<<"gx_quantize(u_gx_material["<<i<<"].rgb);\n";
+    out<<"v_color"<<i<<".a=";
+    if(desc.colorChannels[i+2].materialSource==ColorSource::Vertex)out<<"a_color"<<i<<".a;\n";
+    else out<<"gx_quantize1(u_gx_material["<<i+2<<"].a);\n";
+  }
+  for(unsigned i=0;i<MaxTextures;++i)if(outputs&(1u<<i)) {
+    if(i>=desc.texgenCount) {out<<"v_tex"<<i<<"=a_tex"<<i<<";\n";continue;}
+    const auto& t=desc.texgens[i];
+    out<<"{vec4 src="<<fixed_vertex_source(t.source)<<";vec3 tc;\n";
+    if(t.type==TexGenType::SRTG)out<<"tc=vec3(src.xy,1.0);\n";
+    else if(t.matrix<0)out<<"tc=src.xyz;\n";
+    else out<<"tc=vec3(dot(u_gx_texture"<<i<<"[0],src),dot(u_gx_texture"<<i<<"[1],src),dot(u_gx_texture"<<i<<"[2],src));\n";
+    if(t.type==TexGenType::Matrix2x4)out<<"tc.z=1.0;\n";
+    if(t.normalize)out<<"float len=sqrt(dot(tc,tc));tc=len>0.0000000001?tc/len:vec3(0.0);\n";
+    if(t.postMatrix>=0)out<<"vec4 pt=vec4(tc,1.0);tc=vec3(dot(u_gx_post"<<i<<"[0],pt),dot(u_gx_post"<<i<<"[1],pt),dot(u_gx_post"<<i<<"[2],pt));\n";
+    if(t.type!=TexGenType::Matrix3x4)out<<"tc.z=1.0;\n";
+    out<<"v_tex"<<i<<"=tc;}\n";
+  }
+  out<<"}\n";
+  return out.str();
+}
+
 } // namespace
 
 ShaderSources build_tev_glsl(const PipelineDesc& desc) noexcept {
@@ -278,7 +354,7 @@ ShaderSources build_tev_glsl(const PipelineDesc& desc) noexcept {
   if(rasterColorMask&2u)vs << "v_color1=a_color1;";
   for (unsigned i = 0; i < MaxTextures; i++) if(texcoordMask&(1u<<i))vs << "v_tex" << i << "=a_tex" << i << ";";
   vs << "}\n";
-  out.vertex = vs.str();
+  out.vertex = desc.fixedVertexOnGpu ? fixed_vertex_shader(desc) : vs.str();
 
   std::ostringstream fs;
   fs << "precision highp float;\n";

@@ -23,6 +23,8 @@ size_t dxt1_texture_size(uint32_t width, uint32_t height) noexcept;
 uint8_t native_texture_bytes_per_pixel(TextureFormat format) noexcept;
 bool transcode_texture_native(const TextureDesc& desc, NativeTextureFormat& format, std::vector<uint8_t>& out) noexcept;
 bool transcode_cmpr_to_dxt1(const TextureDesc& desc, std::vector<uint8_t>& out) noexcept;
+// Cold-upload diagnostics only; disabled during ordinary rendering.
+void set_texture_decode_diagnostics(bool enabled) noexcept;
 bool decode_texture_rgba8(const TextureDesc& desc, std::vector<uint8_t>& out) noexcept;
 DecodeResult decode_texture_rgba8(const TextureDesc& desc) noexcept;
 } // namespace aurora::vita::gfx

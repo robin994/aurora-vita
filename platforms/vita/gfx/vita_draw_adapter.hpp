@@ -67,6 +67,7 @@ struct StreamedDraw {
 
 DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t vertexCount,uint32_t explicitIndexCount=0,
                                       size_t vertexStride=sizeof(GpuVertex)) noexcept;
+void pack_gpu_vertex_bytes(uint8_t* dst,const CanonicalVertex& vertex,const VertexLayout& layout) noexcept;
 
 PreparedDraw prepare_draw(const uint8_t* rawVertices,size_t rawBytes,uint32_t vertexCount,SourcePrimitive source,
                           const VertexDecodeLayout& layout,const PipelineDesc& pipeline,

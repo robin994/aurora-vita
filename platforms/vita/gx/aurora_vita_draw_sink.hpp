@@ -5,10 +5,12 @@
 #include "../gfx/vita_streaming_arena.hpp"
 #include "../gfx/vita_telemetry.hpp"
 #include "../gfx/vita_memory_budget.hpp"
+#include "../gfx/vita_static_geometry.hpp"
 #include "../integration/vita_feature_coverage.hpp"
 #include "../integration/vita_frame_trace.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <unordered_map>
 
@@ -48,6 +50,8 @@ struct DrawSinkConfig {
   // structured telemetry/coverage so profiling does not perturb the hot path.
   bool verboseGeometryDiagnostics = false;
   bool strictUnsupported = false;
+  size_t staticGeometryBudget = 0; // Zero keeps the established CPU vertex path.
+  uint32_t diagnosticDrawLimit = 0;
 };
 
 class DrawSink {
@@ -61,7 +65,7 @@ public:
   void shutdown() noexcept;
   void begin_frame(uint64_t frame) noexcept;
   void flush() noexcept;
-  void reset_commands() noexcept { stream_.reset(); reset_pipeline_run_cache(); }
+  void reset_commands() noexcept { stream_.reset(); fixedVertexUniforms_.clear(); reset_pipeline_run_cache(); }
   void invalidate_texture_resolve_cache() noexcept {
 #if defined(AURORA_VITA_UPSTREAM)
     resolvedTextureBindingsValid_ = false;
@@ -96,6 +100,10 @@ private:
   std::unique_ptr<gfx::StreamingArena> arena_{};
   gfx::CommandStream stream_{};
   gfx::PreparedDraw preparedScratch_{};
+  std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
+  std::deque<gfx::FixedVertexUniforms> fixedVertexUniforms_{};
+  gfx::PipelineDesc translatedGpuPipeline_{};
+  std::unordered_map<uint64_t,uint64_t> fixedPipelineKeys_{};
   gfx::VertexTransformState translatedVertexState_{};
   gfx::DrawUniforms translatedUniforms_{};
   bool translatedVertexStateValid_ = false;
@@ -131,6 +139,8 @@ private:
   bool verboseGeometryDiagnostics_ = false;
   bool strictUnsupported_ = false;
   bool strictFailed_ = false;
+  uint32_t diagnosticDrawLimit_ = 0;
+  uint32_t frameDrawIndex_ = 0;
   struct CopyTextureEntry { gfx::Handle handle=gfx::InvalidHandle; uint32_t width=0,height=0; uint32_t revision=0; };
   std::unordered_map<uintptr_t,CopyTextureEntry> copyTextures_{};
   bool initialized_ = false;

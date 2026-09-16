@@ -2,6 +2,8 @@
 #include "gfx/vita_cpu_workers.hpp"
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
+#include "gfx/vita_texture_decode.hpp"
+#include "gfx/vita_gl_util.hpp"
 #include "gx/aurora_vita_draw_sink.hpp"
 #include <cstdio>
 #include <cstring>
@@ -91,6 +93,10 @@ void emit_periodic_diagnostics() noexcept {
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
+  gfx::set_texture_decode_diagnostics(c.texture_decode_diagnostics);
+#if defined(__vita__)
+  gfx::configure_program_binary_cache(c.program_binary_cache_path);
+#endif
   g_telemetryEnabled=c.diagnostics||c.telemetry_log_path;
   g_coverageEnabled=c.diagnostics||c.coverage_log_path;
   g_traceEnabled=c.diagnostics||c.trace_log_path;
@@ -196,6 +202,7 @@ bool initialize(const BackendConfig& c) noexcept {
                static_cast<unsigned long long>(c.stream_vertex_bytes),
                static_cast<unsigned long long>(c.stream_index_bytes),c.stream_slots);
   g_telemetry.reset(); g_coverage.reset(); g_trace=std::make_unique<integration::FrameTrace>(c.trace_capacity);
+  g_telemetry.set_split_vertex_phases(c.profile_split_vertex_phases);
   gxbridge::DrawSinkConfig dc{};
   dc.streaming.vertexBytes=c.stream_vertex_bytes;
   dc.streaming.indexBytes=c.stream_index_bytes;
@@ -206,6 +213,8 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.trace=g_traceEnabled ? g_trace.get() : nullptr;
   dc.verboseGeometryDiagnostics=c.diagnostics;
   dc.strictUnsupported=c.strict_unsupported;
+  dc.staticGeometryBudget=c.static_geometry_budget;
+  dc.diagnosticDrawLimit=c.diagnostic_draw_limit;
   g_drawSink=std::make_unique<gxbridge::DrawSink>();
   if(!g_drawSink->initialize(*g_renderer,dc)){
     g_initFailure=InitFailure::DrawSinkInitFailed;

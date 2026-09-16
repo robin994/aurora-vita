@@ -337,18 +337,56 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
   return out;
 }
 
-void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms) noexcept {
+void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms,
+                            const gfx::PipelineDesc& pipeline,
+                            const gfx::VertexDecodeLayout& layout) noexcept {
   const auto& g = aurora::gx::g_gxState;
-  for (unsigned i = 0; i < aurora::gx::MaxPnMtx; ++i) {
-    copy_matrix(state.postexMatrices[i], g.pnMtx[i].pos);
-    copy_matrix(state.normalMatrices[i], g.pnMtx[i].nrm);
-  }
-  for (unsigned i = 0; i < aurora::gx::MaxTexMtx; ++i) copy_matrix(state.postexMatrices[10 + i], g.texMtxs[i]);
-  for (unsigned i = 0; i < aurora::gx::MaxPTTexMtx; ++i) copy_matrix(state.postMatrices[i], g.ptTexMtxs[i]);
-  // The fixed current matrix index addresses the shared XF post-transform
-  // region. Upstream Aurora intentionally permits slots 10..19 here (texture
-  // matrix rows); only dynamic per-vertex PNMTXIDX is restricted to 0..9.
   state.currentPnMatrix = static_cast<uint8_t>(std::min<u32>(g.currentPnMtx, state.postexMatrices.size() - 1));
+
+  bool indexedPnMatrix=false,indexedTexMatrix=false;
+  for(unsigned i=0;i<layout.count&&i<layout.attributes.size();++i) {
+    const auto& a=layout.attributes[i];
+    if(a.source==gfx::VertexSource::None)continue;
+    indexedPnMatrix=indexedPnMatrix||a.semantic==gfx::VertexSemantic::PnMatrixIndex;
+    indexedTexMatrix=indexedTexMatrix||
+      (a.semantic>=gfx::VertexSemantic::TexMatrixIndex0&&a.semantic<=gfx::VertexSemantic::TexMatrixIndex7);
+  }
+  const auto requirements=gfx::vertex_pipeline_requirements(pipeline);
+  const bool needNormals=requirements.needNormal||requirements.needBumpBasis;
+  const auto copyPn=[&](unsigned i) noexcept {
+    copy_matrix(state.postexMatrices[i],g.pnMtx[i].pos);
+    if(needNormals)copy_matrix(state.normalMatrices[i],g.pnMtx[i].nrm);
+  };
+  const auto copyTex=[&](unsigned i) noexcept { copy_matrix(state.postexMatrices[10+i],g.texMtxs[i]); };
+
+  // Dynamic matrix selectors can address the whole corresponding palette. Most
+  // fixed stadium draws have neither selector, so only copy the current PN
+  // matrix and the texture matrices actually referenced by live texgens.
+  if(indexedPnMatrix||indexedTexMatrix) {
+    for(unsigned i=0;i<aurora::gx::MaxPnMtx;++i)copyPn(i);
+  } else if(state.currentPnMatrix<aurora::gx::MaxPnMtx) {
+    copyPn(state.currentPnMatrix);
+  } else {
+    copyTex(state.currentPnMatrix-aurora::gx::MaxPnMtx);
+    if(needNormals)copy_matrix(state.normalMatrices.back(),g.pnMtx.back().nrm);
+  }
+
+  const uint8_t texgenMask=gfx::pipeline_texgen_compute_mask(pipeline);
+  if(indexedTexMatrix) {
+    for(unsigned i=0;i<aurora::gx::MaxTexMtx;++i)copyTex(i);
+  } else {
+    for(unsigned i=0;i<pipeline.texgenCount&&i<gfx::MaxTextures;++i) {
+      if((texgenMask&(1u<<i))==0)continue;
+      const auto& t=pipeline.texgens[i];
+      if(t.matrix>=0&&static_cast<unsigned>(t.matrix)<aurora::gx::MaxTexMtx)copyTex(static_cast<unsigned>(t.matrix));
+    }
+  }
+  for(unsigned i=0;i<pipeline.texgenCount&&i<gfx::MaxTextures;++i) {
+    if((texgenMask&(1u<<i))==0)continue;
+    const int post=pipeline.texgens[i].postMatrix;
+    if(post>=0&&static_cast<unsigned>(post)<aurora::gx::MaxPTTexMtx)
+      copy_matrix(state.postMatrices[static_cast<unsigned>(post)],g.ptTexMtxs[static_cast<unsigned>(post)]);
+  }
 
   const auto proj = aurora::gx::effective_projection_for_depth_range(
       g.proj, g.renderViewport.znear, g.renderViewport.zfar);
@@ -358,7 +396,11 @@ void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms&
   std::memcpy(state.projection.data(), &glProj, sizeof(glProj));
   uniforms.mvp = state.projection;
 
+  uint32_t requiredLights=0;
+  const uint8_t colorMask=requirements.colorMask;
   for (unsigned ch = 0; ch < 4; ++ch) {
+    const unsigned base=ch&1u;
+    if((colorMask&(1u<<base))==0)continue;
     state.channelAmbient[ch] = copy_vec4(g.colorChannelState[ch].ambColor);
     state.channelMaterial[ch] = copy_vec4(g.colorChannelState[ch].matColor);
     uniforms.channelAmbient[ch] = state.channelAmbient[ch];
@@ -368,8 +410,15 @@ void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms&
       state.lightEnabled[ch][li] = (mask & (1ul << li)) ? 1 : 0;
       uniforms.lightEnabled[ch][li] = state.lightEnabled[ch][li] ? 1.f : 0.f;
     }
+    if(pipeline.colorChannels[ch].lightingEnabled)requiredLights|=static_cast<uint32_t>(mask);
+  }
+  for(unsigned i=0;i<pipeline.texgenCount&&i<gfx::MaxTextures;++i)if(texgenMask&(1u<<i)) {
+    const auto type=pipeline.texgens[i].type;
+    if(gfx::texgen_type_is_bump(type))requiredLights|=1u<<std::min<unsigned>(
+      static_cast<unsigned>(type)-static_cast<unsigned>(gfx::TexGenType::Bump0),gfx::MaxLights-1);
   }
   for (unsigned i = 0; i < gfx::MaxLights; ++i) {
+    if((requiredLights&(1u<<i))==0)continue;
     const auto& s = g.lights[i]; auto& d = state.lights[i];
     d.position = copy_vec4(s.pos); d.direction = copy_vec4(s.dir); d.color = copy_vec4(s.color);
     d.cosAtt = copy_vec4(s.cosAtt); d.distAtt = copy_vec4(s.distAtt); uniforms.lights[i] = d;

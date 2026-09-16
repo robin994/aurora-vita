@@ -1,5 +1,6 @@
 #include "vita_draw_adapter.hpp"
 #include "vita_cpu_workers.hpp"
+#include "vita_fixed_vertex.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -137,6 +138,9 @@ void pack_gpu_vertex(uint8_t* dst,const CanonicalVertex& src,const VertexLayout&
     else if(a.location==1)std::memcpy(dst+a.offset,src.color0,sizeof(src.color0));
     else if(a.location==2)std::memcpy(dst+a.offset,src.color1,sizeof(src.color1));
     else if(a.location>=3&&a.location<3+MaxTextures)std::memcpy(dst+a.offset,src.texcoord[a.location-3],sizeof(src.texcoord[0]));
+    else if(a.location==11)std::memcpy(dst+a.offset,src.normal,sizeof(src.normal));
+    else if(a.location==12)std::memcpy(dst+a.offset,src.binormal,sizeof(src.binormal));
+    else if(a.location==13)std::memcpy(dst+a.offset,src.tangent,sizeof(src.tangent));
   }
 }
 
@@ -149,6 +153,28 @@ bool decode_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) 
       ctx.error[lane]=1;return false;
     }
     if(!transform_vertex_for_pipeline(v,*ctx.pipeline,*ctx.state,ctx.requirements)){
+      ctx.error[lane]=2;return false;
+    }
+  }
+  return true;
+}
+
+bool profile_decode_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
+  auto& ctx=*static_cast<FusedVertexContext*>(opaque);
+  if(lane>=ctx.error.size())return false;
+  for(size_t i=begin;i<end;++i){
+    if(!decode_vertex_into(ctx.raw,ctx.rawBytes,static_cast<uint32_t>(i),*ctx.layout,ctx.vertices[i],ctx.decodeSemantics)){
+      ctx.error[lane]=1;return false;
+    }
+  }
+  return true;
+}
+
+bool profile_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
+  auto& ctx=*static_cast<FusedVertexContext*>(opaque);
+  if(lane>=ctx.error.size())return false;
+  for(size_t i=begin;i<end;++i){
+    if(!transform_vertex_for_pipeline(ctx.vertices[i],*ctx.pipeline,*ctx.state,ctx.requirements)){
       ctx.error[lane]=2;return false;
     }
   }
@@ -249,6 +275,9 @@ DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint
   f.indexBytes=static_cast<size_t>(indices)*sizeof(uint16_t);
   f.valid=true;return f;
 }
+void pack_gpu_vertex_bytes(uint8_t* dst,const CanonicalVertex& vertex,const VertexLayout& layout) noexcept {
+  pack_gpu_vertex(dst,vertex,layout);
+}
 bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry,bool deduplicateTriangles) noexcept {
   out.error=PrepareDrawError::None;out.vertices.clear();out.indices.clear();out.scratch.clear();out.rawScratch.clear();out.dedupTable.clear();out.primitive=Primitive::Triangles;out.positionIsClipSpace=false;
   if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return false;}
@@ -278,15 +307,22 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
   transformed.resize(decodeCount);
   const auto requirements=vertex_pipeline_requirements(pipeline);
   FusedVertexContext fused{decodeRaw,decodeBytes,&layout,&pipeline,&state,requirements,
-                           decode_semantics_for_pipeline(pipeline,requirements),transformed.data()};
+                           pipeline.fixedVertexOnGpu?fixed_vertex_gpu_inputs(pipeline):decode_semantics_for_pipeline(pipeline,requirements),transformed.data()};
   // Decode and GX vertex processing used to dispatch the worker pool twice and
   // walk the 168-byte canonical array twice. Fusing them keeps each vertex hot
   // in cache and makes medium-sized Strikers draws worth parallelizing.
+  const bool splitPhases=telemetry&&telemetry->split_vertex_phases();
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
-    if(!cpu_parallel_for(decodeCount,decode_transform_range,&fused)){
+    if(!cpu_parallel_for(decodeCount,(splitPhases||pipeline.fixedVertexOnGpu)?profile_decode_range:decode_transform_range,&fused)){
       bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;
       out.error=transformFailed?PrepareDrawError::VertexTransformFailed:PrepareDrawError::VertexDecodeFailed;
       return false;
+    }
+  }
+  if(splitPhases&&!pipeline.fixedVertexOnGpu){
+    ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexTransform);
+    if(!cpu_parallel_for(decodeCount,profile_transform_range,&fused)){
+      out.error=PrepareDrawError::VertexTransformFailed;return false;
     }
   }
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
@@ -367,7 +403,7 @@ uint64_t resolve_draw_pipeline(Renderer&renderer,Primitive primitive,bool positi
   auto desc=pipeline;
   desc.primitive=primitive;
   desc.positionIsClipSpace=positionIsClipSpace;
-  desc.layout=gpu_vertex_layout(pipeline_texcoord_mask(desc),pipeline_raster_color_mask(desc));
+  desc.layout=effective_gpu_vertex_layout(desc);
   ScopedTelemetryPhase phase(telemetry,TelemetryPhase::PipelineResolve);
   return renderer.create_pipeline(desc);
 }
@@ -378,14 +414,16 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
     // Only stream attributes consumed by the generated Vita shader. The CPU-only
     // normal/tangent/matrix fields in CanonicalVertex have already done their job.
-    const VertexLayout gpuLayout=gpu_vertex_layout(pipeline_texcoord_mask(pipeline),pipeline_raster_color_mask(pipeline));
+    const VertexLayout gpuLayout=effective_gpu_vertex_layout(pipeline);
     if(gpuLayout.count<1||gpuLayout.attributes[0].stride==0)return fail(PrepareDrawError::InvalidInput);
     const size_t gpuStride=gpuLayout.attributes[0].stride;
     void* vertexDst=nullptr;
     vb=arena.reserve_vertices(prepared.vertices.size()*gpuStride,gpuStride,&vertexDst);if(!vb.buffer||!vertexDst)return fail(PrepareDrawError::StreamingOverflow);
     auto* gpu=static_cast<uint8_t*>(vertexDst);
-    for(size_t i=0;i<prepared.vertices.size();++i){
-      pack_gpu_vertex(gpu+i*gpuStride,prepared.vertices[i],gpuLayout);
+    { ScopedTelemetryPhase packPhase(telemetry,TelemetryPhase::VertexPack);
+      for(size_t i=0;i<prepared.vertices.size();++i){
+        pack_gpu_vertex(gpu+i*gpuStride,prepared.vertices[i],gpuLayout);
+      }
     }
     if(!prepared.indices.empty()){
       if(vb.offset%gpuStride!=0)return fail(PrepareDrawError::StreamingOverflow);

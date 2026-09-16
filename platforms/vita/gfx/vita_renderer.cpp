@@ -105,7 +105,7 @@ case CommandType::Draw:draw(c.draw);break;case CommandType::SetRenderTarget:if(c
   glFlush();
 #endif
   break;}pipelines_.clear_pins();pipelines_.trim_to_budget();}
-void Renderer::draw(const DrawPacket&d) noexcept {const auto*p=pipelines_.find(d.pipelineKey);if(!p)return;pipelines_.bind(*p,d.uniforms,&stats_);
+void Renderer::draw(const DrawPacket&d) noexcept {const auto*p=pipelines_.find(d.pipelineKey);if(!p)return;if(p->desc.fixedVertexOnGpu&&!d.fixedVertexUniforms)return;pipelines_.bind(*p,d.uniforms,&stats_,d.fixedVertexUniforms);
 #if defined(__vita__)
   if(!viewportValid_||!same_viewport(cachedViewport_,d.viewport)){const GLint vy=static_cast<GLint>(targetHeight_)-static_cast<GLint>(d.viewport.y+d.viewport.height);glViewport((GLint)d.viewport.x,vy,(GLsizei)d.viewport.width,(GLsizei)d.viewport.height);const float minDepth=std::clamp(std::min(d.viewport.znear,d.viewport.zfar),0.0f,1.0f);const float maxDepth=std::clamp(std::max(d.viewport.znear,d.viewport.zfar),0.0f,1.0f);glDepthRangef(minDepth,maxDepth);cachedViewport_=d.viewport;viewportValid_=true;}
   if(!scissorEnabled_){glEnable(GL_SCISSOR_TEST);scissorEnabled_=true;}

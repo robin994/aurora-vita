@@ -50,9 +50,17 @@ if (AURORA_ENABLE_GX)
     ../platforms/vita/gfx/vita_cpu_workers.cpp
     ../platforms/vita/gfx/vita_vertex_decode.cpp
     ../platforms/vita/gfx/vita_vertex_pipeline.cpp
+    ../platforms/vita/gfx/vita_buffer_pool.cpp
+    ../platforms/vita/gfx/vita_draw_adapter.cpp
+    ../platforms/vita/gfx/vita_renderer.cpp
+    ../platforms/vita/gfx/vita_pipeline_cache.cpp
+    ../platforms/vita/gfx/vita_streaming_arena.cpp
+    ../platforms/vita/gfx/vita_efb.cpp
+    ../platforms/vita/gfx/vita_telemetry.cpp
     vita_shader_depth_test.cpp
     vita_texture_decode_test.cpp
     vita_vertex_pipeline_test.cpp
+    vita_fixed_vertex_test.cpp
   )
 
   target_include_directories(gx_fifo_tests PRIVATE

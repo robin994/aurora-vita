@@ -37,7 +37,9 @@ gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noe
 gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept;
 gfx::SourcePrimitive translate_source_primitive(uint8_t primitive) noexcept;
 uint8_t translate_line_mode(uint8_t primitive) noexcept;
-void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms) noexcept;
+void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms,
+                            const gfx::PipelineDesc& pipeline,
+                            const gfx::VertexDecodeLayout& layout) noexcept;
 TextureTranslation translate_texture(unsigned slot) noexcept;
 gfx::PrimitiveExpansionState translate_primitive_expansion(uint8_t lineMode) noexcept;
 gfx::Viewport translate_viewport() noexcept;

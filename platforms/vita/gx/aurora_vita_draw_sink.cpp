@@ -14,12 +14,17 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#if defined(__vita__)
+#include <psp2/kernel/sysmem.h>
+#endif
 
 namespace aurora::vita::gxbridge {
 
 gfx::MemoryBudgetSnapshot DrawSink::memory_budget() const noexcept {
   if (!renderer_ || !arena_) return {};
-  return gfx::capture_memory_budget(*arena_, renderer_->textures(), renderer_->pipelines(), &renderer_->efb());
+  auto result=gfx::capture_memory_budget(*arena_, renderer_->textures(), renderer_->pipelines(), &renderer_->efb());
+  if(staticGeometry_){result.staticGeometryBytes=staticGeometry_->bytes();result.staticGeometryEntries=staticGeometry_->size();}
+  return result;
 }
 
 DrawSink::~DrawSink() { shutdown(); }
@@ -39,6 +44,8 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   trace_ = config.trace;
   verboseGeometryDiagnostics_ = config.verboseGeometryDiagnostics;
   strictUnsupported_ = config.strictUnsupported;
+  diagnosticDrawLimit_ = config.diagnosticDrawLimit;
+  frameDrawIndex_ = 0;
   strictFailed_ = false;
   whiteTexture_ = white_texture();
   if (!whiteTexture_) {
@@ -48,6 +55,7 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
     return false;
   }
   initialized_ = true;
+  if(config.staticGeometryBudget)staticGeometry_=std::make_unique<gfx::StaticGeometryCache>(renderer,config.staticGeometryBudget);
   return true;
 }
 
@@ -55,6 +63,7 @@ void DrawSink::shutdown() noexcept {
   if (!initialized_ && !arena_) return;
   stream_.reset();
   preparedScratch_=gfx::PreparedDraw{};
+  fixedVertexUniforms_.clear();staticGeometry_.reset();fixedPipelineKeys_.clear();
   translatedVertexStateValid_=false;
 #if defined(AURORA_VITA_UPSTREAM)
   translatedStateValid_=false;
@@ -79,26 +88,33 @@ void DrawSink::shutdown() noexcept {
   verboseGeometryDiagnostics_ = false;
   strictUnsupported_ = false;
   strictFailed_ = false;
+  diagnosticDrawLimit_ = 0;
+  frameDrawIndex_ = 0;
   initialized_ = false;
 }
 
 void DrawSink::begin_frame(uint64_t frame) noexcept {
   if (!initialized_ || !arena_) return;
   stream_.reset();
+  frameDrawIndex_ = 0;
+  fixedVertexUniforms_.clear();
   reset_pipeline_run_cache();
 #if defined(AURORA_VITA_UPSTREAM)
   resolvedTextureBindingsValid_=false;
 #endif
-  arena_->begin_frame(frame);
+  { gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StreamWait); arena_->begin_frame(frame); }
   if (trace_) trace_->begin_frame(frame);
 }
 
 void DrawSink::flush() noexcept {
   if (!initialized_ || !renderer_ || stream_.size() == 0) return;
-  if (!arena_ || !arena_->flush()) {
+  bool uploaded=false;
+  { gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::BufferUpload); uploaded=arena_&&arena_->flush(); }
+  if (!uploaded) {
     if (telemetry_) telemetry_->arena_overflow();
     if (strictUnsupported_) strictFailed_ = true;
     stream_.reset();
+    fixedVertexUniforms_.clear();
     reset_pipeline_run_cache();
     return;
   }
@@ -107,8 +123,9 @@ void DrawSink::flush() noexcept {
   // bindings once per chunk; pipeline/fixed/viewport state stays hot across flushes.
   renderer_->invalidate_resource_bindings();
   { gfx::ScopedTelemetryPhase phase(telemetry_, gfx::TelemetryPhase::Submit); renderer_->execute(stream_); }
-  arena_->mark_current_submitted();
+  if(arena_->vertex_used()||arena_->index_used())arena_->mark_current_submitted();
   stream_.reset();
+  fixedVertexUniforms_.clear();
   reset_pipeline_run_cache();
 }
 
@@ -323,9 +340,17 @@ void DrawSink::clear_copy_textures() noexcept {
 SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* rawVertices,
                               size_t rawBytes, uint32_t vertexCount,
                               const uint16_t* rawIndices, uint32_t indexCount) noexcept {
+  gfx::ScopedTelemetryPhase drawTimer(telemetry_,gfx::TelemetryPhase::DrawFrontend);
   SubmitResult result{};
   if (!initialized_ || !renderer_ || !arena_ || !rawVertices || vertexCount == 0) {
     result.drawError = gfx::PrepareDrawError::InvalidInput;
+    return result;
+  }
+  const uint32_t drawIndex=++frameDrawIndex_;
+  if(diagnosticDrawLimit_!=0&&drawIndex>diagnosticDrawLimit_) {
+    // The FIFO decoder expects a successful sink submission before it clears
+    // transient dirty state. This debug gate skips only the actual rendering.
+    result.ok=true;
     return result;
   }
 
@@ -337,9 +362,15 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const bool translatedCacheHit = translatedStateValid_ && translatedStateGeneration_ == stateGeneration &&
                                   translatedPrimitive_ == primitive && translatedFmt_ == fmt;
   if (!translatedCacheHit) {
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     translatedPipeline_ = translate_current_pipeline(primitive, fmt);
     translatedLayout_ = translate_current_vertex_layout(fmt);
     translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
+    if(staticGeometry_){
+      translatedGpuPipeline_=translatedPipeline_;
+      translatedGpuPipeline_.fixedVertexOnGpu=true;
+      translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
+    }
     translatedTextureMask_=gfx::pipeline_sampled_texture_mask(translatedPipeline_);
     translatedUsesOrigLod_=false;
     translatedHasIndirect_=translatedPipeline_.tev.indirectStageCount!=0;
@@ -357,6 +388,22 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
   const auto& pipeline = translatedPipeline_;
   const auto& layout = translatedLayout_;
+#if defined(__vita__)
+  static bool memoryProfileLogged=false;
+  if(!memoryProfileLogged&&telemetry_&&telemetry_->split_vertex_phases()&&vertexCount>=100) {
+    memoryProfileLogged=true;
+    const void* sourceArray=nullptr;
+    for(unsigned i=0;i<layout.count;++i)if(layout.attributes[i].array.data){sourceArray=layout.attributes[i].array.data;break;}
+    const void* addresses[]={this,&aurora::gx::g_gxState,rawVertices,sourceArray};
+    const char* labels[]={"heap","gx_state","fifo","source_array"};
+    for(unsigned i=0;i<4;++i)if(addresses[i]){
+      SceKernelMemBlockInfo info{};info.size=sizeof(info);
+      const int rc=sceKernelGetMemBlockInfoByAddr(const_cast<void*>(addresses[i]),&info);
+      std::fprintf(stderr,"[aurora-vita] memory_profile object=%s address=%p rc=%d type=0x%08x memory_type=0x%x\n",
+        labels[i],addresses[i],rc,static_cast<unsigned>(info.type),info.memoryType);
+    }
+  }
+#endif
   const uint64_t translatedPipelineKey = translatedPipelineKey_;
   if (pipeline.blendMode == gfx::BlendMode::Logic && pipeline.logicOp != gfx::LogicOp::Clear &&
       pipeline.logicOp != gfx::LogicOp::Copy && pipeline.logicOp != gfx::LogicOp::Noop) {
@@ -389,12 +436,46 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // g_gxState.stateDirty on every relevant write and clears it after a successful
   // submission, so this is a reliable zero-hash reuse gate.
   if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty){
-    translate_vertex_state(translatedVertexState_,translatedUniforms_);
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
+    translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
     translatedVertexStateValid_=true;
   }
   const auto& vertexState=translatedVertexState_;
   auto& uniforms=translatedUniforms_;
   const auto source = translate_source_primitive(primitive);
+  const gfx::StaticGeometryCache::Entry* gpuGeometry=nullptr;
+  uint64_t fixedPipelineKey=0;
+  if(staticGeometry_&&vertexCount>=48&&rawIndices==nullptr&&indexCount==0&&
+     source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&source!=gfx::SourcePrimitive::Points&&
+     gfx::supports_fixed_vertex_gpu(pipeline,layout,vertexState)){
+#if defined(__vita__)
+    static unsigned debugGpuDraws=0;
+    const bool debugGpu=telemetry_&&telemetry_->split_vertex_phases()&&debugGpuDraws++<4;
+    if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe begin count=%u primitive=%u key=%llx\n",vertexCount,primitive,static_cast<unsigned long long>(translatedPipelineKey));
+#endif
+    auto key=fixedPipelineKeys_.find(translatedPipelineKey);
+    if(key!=fixedPipelineKeys_.end()&&renderer_->pipelines().find(key->second))fixedPipelineKey=key->second;
+    else{
+      gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::PipelineResolve);
+      fixedPipelineKey=renderer_->create_pipeline(translatedGpuPipeline_);
+      if(fixedPipelineKey)fixedPipelineKeys_[translatedPipelineKey]=fixedPipelineKey;
+    }
+#if defined(__vita__)
+    if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe pipeline=%llx\n",static_cast<unsigned long long>(fixedPipelineKey));
+#endif
+    if(fixedPipelineKey){
+      // A warm geometry hit still queues a reference to this program. Protect
+      // it from cache eviction until the current command batch is executed.
+      renderer_->pipelines().pin(fixedPipelineKey);
+      gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::GeometryCache);
+      const auto before=staticGeometry_->hits();
+      gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,translatedGpuPipeline_,vertexState,telemetry_);
+#if defined(__vita__)
+      if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe geometry=%p entries=%u\n",static_cast<const void*>(gpuGeometry),static_cast<unsigned>(staticGeometry_->size()));
+#endif
+      if(gpuGeometry&&telemetry_)telemetry_->gpu_geometry(staticGeometry_->hits()!=before,gpuGeometry->vertexCount);
+    }
+  }
   const auto expansion = translate_primitive_expansion(translate_line_mode(primitive));
   const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
@@ -423,7 +504,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto ensureArena=[&](const gfx::DrawFootprint& required) noexcept {
     if(arenaCanFit(required))return true;
     flush();
-    if(!arena_->recycle_current()||
+    bool recycled=false;
+    { gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StreamWait); recycled=arena_->recycle_current(); }
+    if(!recycled||
        !arenaCanFit(required)){
       result.drawError=gfx::PrepareDrawError::StreamingOverflow;
       if(telemetry_)telemetry_->arena_overflow();
@@ -446,9 +529,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // Exact triangle-record deduplication can shrink the VBO substantially, so
   // defer rollover until the real unique-vertex count is known. Other paths
   // keep the early guard that avoids preparing a draw which cannot fit.
-  if(!exactTriangleDedup&&!ensureArena(footprint))return result;
+  if(!gpuGeometry&&!exactTriangleDedup&&!ensureArena(footprint))return result;
   auto& prepared=preparedScratch_;
-  (void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
+  if(!gpuGeometry)(void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
                               pipeline,vertexState,&uniforms,expansion,telemetry_,exactTriangleDedup);
   if (prepared.ok() && rawIndices && indexCount) {
     prepared.indices.assign(rawIndices, rawIndices + indexCount);
@@ -462,7 +545,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       }
     }
   }
-  if (!prepared.ok()) {
+  if (!gpuGeometry && !prepared.ok()) {
     result.drawError = prepared.error;
     if (coverage_) coverage_->unsupported(static_cast<uint64_t>(prepared.error), "prepare_draw failed");
     if (telemetry_) telemetry_->unsupported();
@@ -470,7 +553,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     return result;
   }
 
-  if(exactTriangleDedup){
+  if(!gpuGeometry&&exactTriangleDedup){
     gfx::DrawFootprint compactFootprint{};
     compactFootprint.vertexCount=static_cast<uint32_t>(prepared.vertices.size());
     compactFootprint.indexCount=static_cast<uint32_t>(prepared.indices.size());
@@ -481,7 +564,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
 
 #if defined(__vita__)
-  if(verboseGeometryDiagnostics_)log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
+  if(verboseGeometryDiagnostics_&&!gpuGeometry)log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
 #endif
 
   std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
@@ -554,14 +637,16 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
 
   if (trace_) {
     trace_->record(translatedPipelineKey, integration::trace_hash_bytes(rawVertices, rawBytes),
-                   static_cast<uint32_t>(rawBytes), vertexCount, static_cast<uint32_t>(prepared.indices.size()),
+                   static_cast<uint32_t>(rawBytes), vertexCount, gpuGeometry?gpuGeometry->indexCount:static_cast<uint32_t>(prepared.indices.size()),
                    primitive, fmt, result.fallbackTextureMask, static_cast<uint8_t>(result.warnings));
   }
 
   gfx::PrepareDrawError error = gfx::PrepareDrawError::None;
   const auto statsBeforeEnqueue = renderer_->stats();
   uint64_t resolvedPipelineKey = 0;
-  if (queuedPipelineValid_ && translatedPipelineKey == queuedTranslatedPipelineKey_ &&
+  if(gpuGeometry){
+    resolvedPipelineKey=fixedPipelineKey;
+  }else if (queuedPipelineValid_ && translatedPipelineKey == queuedTranslatedPipelineKey_ &&
       prepared.primitive == queuedPrimitive_ &&
       prepared.positionIsClipSpace == queuedPositionIsClipSpace_) {
     resolvedPipelineKey = queuedResolvedPipelineKey_;
@@ -575,9 +660,21 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       queuedPipelineValid_ = true;
     }
   }
-  if (!gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipeline, uniforms,
+  bool enqueued=false;
+  if(gpuGeometry){
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
+    fixedVertexUniforms_.push_back(gfx::fixed_vertex_uniforms(pipeline,vertexState));
+    gfx::DrawPacket packet{};
+    packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
+    packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
+    packet.textures=bindings;packet.uniforms=uniforms;packet.viewport=translate_viewport();packet.scissor=translate_scissor();
+    packet.fixedVertexUniforms=&fixedVertexUniforms_.back();
+    stream_.draw(packet);enqueued=true;
+    queuedPipelineValid_=false;
+  }else enqueued=gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipeline, uniforms,
                          translate_viewport(), translate_scissor(), bindings, &error, telemetry_,
-                         resolvedPipelineKey)) {
+                         resolvedPipelineKey);
+  if(!enqueued) {
     result.drawError = error;
     if (coverage_) coverage_->unsupported(static_cast<uint64_t>(error), "enqueue_draw failed");
     if (telemetry_) { telemetry_->arena_overflow(); telemetry_->unsupported(); }
@@ -592,7 +689,10 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     for (uint32_t i = 0; i < missDelta; ++i) telemetry_->pipeline(false);
   }
   ++submittedDraws_;
-  if (telemetry_) telemetry_->add_draw(static_cast<uint32_t>(prepared.vertices.size()), static_cast<uint32_t>(prepared.indices.size()), static_cast<uint32_t>(prepared.indices.empty() ? prepared.vertices.size() / 3 : prepared.indices.size() / 3));
+  if (telemetry_) {
+    if(gpuGeometry)telemetry_->add_draw(gpuGeometry->vertexCount,gpuGeometry->indexCount,gpuGeometry->indexCount/3);
+    else telemetry_->add_draw(static_cast<uint32_t>(prepared.vertices.size()), static_cast<uint32_t>(prepared.indices.size()), static_cast<uint32_t>(prepared.indices.empty() ? prepared.vertices.size() / 3 : prepared.indices.size() / 3));
+  }
   result.ok = true;
   result.drawError = gfx::PrepareDrawError::None;
   return result;

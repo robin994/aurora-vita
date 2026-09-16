@@ -208,6 +208,7 @@ struct PipelineDesc {
   bool fogOrthographic = false;
   bool fogRangeEnabled = false;
   bool positionIsClipSpace = false; // CPU-expanded GX lines/points already contain clip-space xyzw.
+  bool fixedVertexOnGpu = false; // Raw object-space inputs; fixed PN/unlit GX transform in the shader.
   VertexLayout layout{};
   std::array<TexGenDesc, MaxTextures> texgens{};
   uint8_t texgenCount = 0;
@@ -386,6 +387,12 @@ struct TextureBinding {
 };
 
 struct BufferSlice { Handle buffer=InvalidHandle; uint32_t offset=0; uint32_t size=0; };
+struct FixedVertexUniforms {
+  std::array<float,12> position{{1,0,0,0, 0,1,0,0, 0,0,1,0}};
+  std::array<std::array<float,12>,MaxTextures> texture{};
+  std::array<std::array<float,12>,MaxTextures> post{};
+  std::array<std::array<float,4>,4> material{};
+};
 struct DrawUniforms {
   std::array<float, 16> mvp{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
   std::array<std::array<float,4>,4> kcolor{{{{1,1,1,1}},{{1,1,1,1}},{{1,1,1,1}},{{1,1,1,1}}}};
@@ -443,6 +450,9 @@ struct DrawPacket {
   bool absoluteVertexIndices = false;
   std::array<TextureBinding, MaxTextures> textures{};
   GpuDrawUniforms uniforms{};
+  // Optional immutable snapshot owned by the submitting command batch. Never
+  // points at live GX state; the owner retains it until execute() has returned.
+  const FixedVertexUniforms* fixedVertexUniforms = nullptr;
   Viewport viewport{};
   Scissor scissor{};
 };

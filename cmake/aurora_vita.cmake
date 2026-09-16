@@ -124,8 +124,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
         -mtune=cortex-a9 -mfpu=neon -ffast-math -fsigned-char
     )
     target_link_options(aurora_vita_backend PRIVATE -Wl,--gc-sections -Wl,-q)
+    include("${CMAKE_CURRENT_LIST_DIR}/AuroraVitaProgramCache.cmake")
+    aurora_vita_bind_vitagl(aurora_vita_backend)
     target_link_libraries(aurora_vita_backend PUBLIC
-        vitaGL vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
+        vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
         SceGxm_stub SceDisplay_stub SceCtrl_stub SceAppMgr_stub SceCommonDialog_stub
         SceKernelDmacMgr_stub SceSysmodule_stub SceLibKernel_stub
         mathneon pthread m

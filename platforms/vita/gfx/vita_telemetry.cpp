@@ -26,6 +26,14 @@ const char* telemetry_phase_name(TelemetryPhase phase) noexcept {
     case TelemetryPhase::Submit: return "submit";
     case TelemetryPhase::EfbCopy: return "efb_copy";
     case TelemetryPhase::Present: return "present";
+    case TelemetryPhase::BufferUpload: return "buffer_upload";
+    case TelemetryPhase::StreamWait: return "stream_wait";
+    case TelemetryPhase::VertexPack: return "vertex_pack";
+    case TelemetryPhase::GeometryCache: return "geometry_cache";
+    case TelemetryPhase::DrawFrontend: return "draw_frontend";
+    case TelemetryPhase::StateTranslate: return "state_translate";
+    case TelemetryPhase::GeometryKey: return "geometry_key";
+    case TelemetryPhase::GeometryValidate: return "geometry_validate";
     case TelemetryPhase::Count: break;
   }
   return "unknown";
@@ -47,6 +55,11 @@ void Telemetry::add_draw(uint32_t vertices, uint32_t indices, uint32_t triangles
 void Telemetry::vertex_dedup(uint32_t inputVertices,uint32_t uniqueVertices) noexcept {
   frame_.counters.vertexDedupInput+=inputVertices;lifetime_.vertexDedupInput+=inputVertices;
   frame_.counters.vertexDedupUnique+=uniqueVertices;lifetime_.vertexDedupUnique+=uniqueVertices;
+}
+void Telemetry::gpu_geometry(bool hit,uint32_t vertices) noexcept {
+  if(hit){++frame_.counters.gpuGeometryHits;++lifetime_.gpuGeometryHits;}
+  else {++frame_.counters.gpuGeometryMisses;++lifetime_.gpuGeometryMisses;}
+  frame_.counters.gpuVertices+=vertices;lifetime_.gpuVertices+=vertices;
 }
 void Telemetry::pipeline(bool hit) noexcept {
   if (hit) { ++frame_.counters.pipelineHits; ++lifetime_.pipelineHits; }
@@ -75,6 +88,9 @@ std::string Telemetry::format_frame() const {
       << " triangles=" << frame_.counters.triangles
       << " dedup_in=" << frame_.counters.vertexDedupInput
       << " dedup_unique=" << frame_.counters.vertexDedupUnique
+      << " gpu_geometry_hit=" << frame_.counters.gpuGeometryHits
+      << " gpu_geometry_miss=" << frame_.counters.gpuGeometryMisses
+      << " gpu_vertices=" << frame_.counters.gpuVertices
       << " pipeline_hit=" << frame_.counters.pipelineHits
       << " pipeline_miss=" << frame_.counters.pipelineMisses
       << " texture_hit=" << frame_.counters.textureHits

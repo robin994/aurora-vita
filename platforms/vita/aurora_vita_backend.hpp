@@ -49,6 +49,15 @@ struct BackendConfig {
   // Expensive per-draw coverage/trace instrumentation is opt-in for shipping
   // ports. Supplying any diagnostic output path still enables it automatically.
   bool diagnostics=false;
+  // Profiling only: separate CPU decode and transform passes. Leave disabled for
+  // normal fused execution; enabling it changes cache locality and worker wakes.
+  bool profile_split_vertex_phases=false;
+  bool texture_decode_diagnostics=false;
+  size_t static_geometry_budget=0; // Opt-in fixed-PN GPU transform and verified immutable geometry cache.
+  const char* program_binary_cache_path=nullptr;
+  // Diagnostic only: submit at most this many GX draw packets per frame. Zero
+  // disables the limit. Useful for framebuffer bisection of rendering faults.
+  uint32_t diagnostic_draw_limit=0;
   bool strict_unsupported=false;
   uint32_t diagnostics_period_frames=300;
   const char* telemetry_log_path=nullptr;

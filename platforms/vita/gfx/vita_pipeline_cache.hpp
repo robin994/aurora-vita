@@ -16,6 +16,10 @@ struct CompiledPipeline {
   std::array<int,MaxTextures> uTex{};
   mutable GpuDrawUniforms cachedUniforms{};
   mutable uint16_t uniformValidMask=0;
+  int uGxPosition=-1,uGxMaterial=-1;
+  std::array<int,MaxTextures> uGxTexture{},uGxPost{};
+  mutable FixedVertexUniforms cachedFixedVertex{};
+  mutable bool fixedVertexValid=false;
 };
 
 // Only the subset that maps to vitaGL fixed-function state. Keeping this small
@@ -37,7 +41,8 @@ public:
   ~PipelineCache();
   const CompiledPipeline* get_or_create(const PipelineDesc& desc,FrameStats* stats=nullptr) noexcept;
   const CompiledPipeline* find(uint64_t key) noexcept;
-  void bind(const CompiledPipeline& p,const GpuDrawUniforms& u,FrameStats* stats=nullptr) noexcept;
+  void bind(const CompiledPipeline& p,const GpuDrawUniforms& u,FrameStats* stats=nullptr,
+            const FixedVertexUniforms* fixedVertex=nullptr) noexcept;
   void clear() noexcept;
   void invalidate_bound() noexcept{bound_=0;boundPipeline_=nullptr;fixedStateValid_=false;}
   void set_max_entries(size_t maxEntries) noexcept;
