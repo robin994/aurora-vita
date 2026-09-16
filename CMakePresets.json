@@ -1,0 +1,69 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "vita-standalone-base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "toolchainFile": "$env{VITASDK}/share/vita.toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AURORA_ENABLE_VITA_BACKEND": "ON",
+        "AURORA_VITA_BACKEND_ONLY": "ON",
+        "AURORA_ENABLE_GX": "OFF",
+        "AURORA_VITA_WITH_GX_FRONTEND": "OFF",
+        "AURORA_VITA_WITH_UPSTREAM_GX": "OFF",
+        "AURORA_VITA_SDL3_NATIVE": "OFF",
+        "AURORA_VITA_BUILD_SDL3_PROBE": "OFF",
+        "AURORA_VITA_BUILD_PROBE": "ON",
+        "AURORA_VITA_BUILD_BACKEND_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "vita-vitagl",
+      "displayName": "Vita - vitaGL renderer and probe",
+      "inherits": "vita-standalone-base",
+      "binaryDir": "${sourceDir}/build/vita-vitagl",
+      "cacheVariables": { "AURORA_VITA_RENDERER": "VITAGL" }
+    },
+    {
+      "name": "vita-gxm",
+      "displayName": "Vita - native SceGxm renderer and probe (GX game adapter pending)",
+      "inherits": "vita-standalone-base",
+      "binaryDir": "${sourceDir}/build/vita-gxm",
+      "cacheVariables": { "AURORA_VITA_RENDERER": "GXM" }
+    },
+    {
+      "name": "vita-host-tests",
+      "displayName": "Vita - host shader and shared CPU contract tests",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/vita-host-tests",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AURORA_ENABLE_VITA_BACKEND": "ON",
+        "AURORA_VITA_BACKEND_ONLY": "ON",
+        "AURORA_ENABLE_GX": "OFF",
+        "AURORA_VITA_WITH_GX_FRONTEND": "OFF",
+        "AURORA_VITA_WITH_UPSTREAM_GX": "OFF",
+        "AURORA_VITA_SDL3_NATIVE": "OFF",
+        "AURORA_VITA_RENDERER": "VITAGL",
+        "AURORA_VITA_BUILD_PROBE": "OFF",
+        "AURORA_VITA_BUILD_SDL3_PROBE": "OFF",
+        "AURORA_VITA_BUILD_BACKEND_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "vita-vitagl", "configurePreset": "vita-vitagl" },
+    { "name": "vita-gxm", "configurePreset": "vita-gxm" },
+    { "name": "vita-host-tests", "configurePreset": "vita-host-tests" }
+  ],
+  "testPresets": [
+    {
+      "name": "vita-host-tests",
+      "configurePreset": "vita-host-tests",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
