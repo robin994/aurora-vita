@@ -365,7 +365,8 @@ void DrawSink::clear_copy_textures() noexcept {
 
 SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* rawVertices,
                               size_t rawBytes, uint32_t vertexCount,
-                              const uint16_t* rawIndices, uint32_t indexCount) noexcept {
+                              const uint16_t* rawIndices, uint32_t indexCount,
+                              const uint8_t* stableSource) noexcept {
   gfx::ScopedTelemetryPhase drawTimer(telemetry_,gfx::TelemetryPhase::DrawFrontend);
   SubmitResult result{};
   if (!initialized_ || !renderer_ || !arena_ || !rawVertices || vertexCount == 0) {
@@ -495,7 +496,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       renderer_->pipelines().pin(fixedPipelineKey);
       gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::GeometryCache);
       const auto before=staticGeometry_->hits();
-      gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,translatedGpuPipeline_,vertexState,telemetry_);
+      gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,translatedGpuPipeline_,vertexState,telemetry_,stableSource);
 #if defined(__vita__)
       if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe geometry=%p entries=%u\n",static_cast<const void*>(gpuGeometry),static_cast<unsigned>(staticGeometry_->size()));
 #endif

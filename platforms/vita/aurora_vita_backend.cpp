@@ -1,5 +1,6 @@
 #include "aurora_vita_backend.hpp"
 #include "gfx/vita_cpu_workers.hpp"
+#include "gfx/vita_memory_revision.hpp"
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_texture_decode.hpp"
@@ -92,6 +93,10 @@ void emit_periodic_diagnostics() noexcept {
     if (fp) { std::fwrite(memLine.data(),1,memLine.size(),fp); std::fwrite("\n",1,1,fp); std::fclose(fp); }
   }
 }
+}
+
+extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes) noexcept {
+  aurora::vita::gfx::note_memory_write(address,bytes);
 }
 
 bool initialize(const BackendConfig& c) noexcept {

@@ -1,5 +1,6 @@
 add_library(aurora_vita_common STATIC
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_cpu_workers.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_memory_revision.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_vertex_decode.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_vertex_pipeline.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_texture_decode.cpp

@@ -68,7 +68,7 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
   // game's permanent display lists live in CDRAM, which is a poor CPU decode
   // source; copying them into the normal FIFO buffer also mirrors the ordering
   // used by Aurora's producer path before the Vita backend was split out.
-  aurora::gx::fifo::write_data(data, nbytes);
+  aurora::gx::fifo::write_stable_data(data, nbytes);
   aurora::gx::fifo::drain();
 }
 

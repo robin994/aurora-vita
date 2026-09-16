@@ -2,6 +2,7 @@
 #include "vita_draw_adapter.hpp"
 #include "vita_fixed_vertex.hpp"
 #include "vita_byte_compare.hpp"
+#include "vita_memory_revision.hpp"
 #include <memory>
 #include <unordered_map>
 
@@ -16,6 +17,9 @@ public:
   struct Snapshot {
     const uint8_t* source=nullptr;
     std::vector<uint8_t> bytes{};
+    size_t size=0;
+    uint64_t revision=0;
+    bool revisionTracked=false;
   };
   struct Entry {
     BufferSlice vertices{},indices{};
@@ -24,6 +28,9 @@ public:
     VertexLayout gpuLayout{};
     std::vector<uint8_t> raw{};
     std::vector<Snapshot> snapshots{};
+    const uint8_t* stableSource=nullptr;
+    size_t stableSourceBytes=0;
+    uint64_t stableSourceRevision=0;
     bool volatileSource=false;
   };
 
@@ -39,7 +46,8 @@ public:
 
   const Entry* get(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
                    const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
-                   const VertexTransformState& state,Telemetry* telemetry) noexcept {
+                   const VertexTransformState& state,Telemetry* telemetry,
+                   const uint8_t* stableSource=nullptr) noexcept {
     if(!raw||!count||!layout.streamStride||layout.count>layout.attributes.size()||
        count>bytes/layout.streamStride||!pipeline.fixedVertexOnGpu)return nullptr;
     bytes=static_cast<size_t>(count)*layout.streamStride;
@@ -47,7 +55,8 @@ public:
     uint64_t key=0;
     auto* detailed=telemetry&&telemetry->split_vertex_phases()?telemetry:nullptr;
     { ScopedTelemetryPhase phase(detailed,TelemetryPhase::GeometryKey);
-      key=make_key(raw,bytes,count,primitive,layout,gpuLayout);
+      key=stableSource?make_stable_key(stableSource,count,primitive,layout,gpuLayout):
+                       make_key(raw,bytes,count,primitive,layout,gpuLayout);
     }
     auto it=entries_.find(key);
     if(it!=entries_.end()) {
@@ -56,10 +65,19 @@ public:
       if(e.volatileSource)return nullptr;
       // Hashes select a candidate only. Every byte that could influence a
       // decoded attribute is checked before an immutable GPU buffer is reused.
-      if(!same_layout(layout,e.sourceLayout)||!same_gpu_layout(gpuLayout,e.gpuLayout)||
-         e.raw.size()!=bytes||!byte_spans_equal(raw,e.raw.data(),bytes))return nullptr;
+      if(!same_layout(layout,e.sourceLayout)||!same_gpu_layout(gpuLayout,e.gpuLayout))return nullptr;
+      if(stableSource) {
+        if(e.stableSource!=stableSource||e.stableSourceBytes!=bytes||
+           memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
+          e.volatileSource=true;
+          return nullptr;
+        }
+      } else if(e.raw.size()!=bytes||!byte_spans_equal(raw,e.raw.data(),bytes)) return nullptr;
       for(const auto& s:e.snapshots) {
-        if(!byte_spans_equal(s.source,s.bytes.data(),s.bytes.size())) {
+        const bool changed=s.revisionTracked?
+          memory_range_revision(s.source,s.size)!=s.revision:
+          !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
+        if(changed) {
           e.volatileSource=true;
           return nullptr;
         }
@@ -71,9 +89,11 @@ public:
     if(entries_.size()>=1024||bytes_>=budget_)return nullptr;
     auto entry=std::make_unique<Entry>();
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
-    if(!snapshot_sources(raw,bytes,count,layout,fixed_vertex_gpu_inputs(pipeline),entry->snapshots))return nullptr;
-    size_t storedBytes=bytes;
-    for(const auto& s:entry->snapshots)storedBytes+=s.bytes.size();
+    entry->stableSource=stableSource;entry->stableSourceBytes=stableSource?bytes:0;
+    entry->stableSourceRevision=stableSource?memory_range_revision(stableSource,bytes):0;
+    if(!snapshot_sources(raw,bytes,count,layout,fixed_vertex_gpu_inputs(pipeline),entry->snapshots,stableSource!=nullptr))return nullptr;
+    size_t storedBytes=stableSource?0:bytes;
+    for(const auto& s:entry->snapshots)storedBytes+=s.revisionTracked?0:s.bytes.size();
     if(storedBytes>budget_-bytes_)return nullptr;
     if(!prepare_draw_into(scratch_,raw,bytes,count,primitive,layout,pipeline,state,nullptr,{},telemetry,true))return nullptr;
     if(scratch_.vertices.empty()||scratch_.indices.empty())return nullptr;
@@ -92,7 +112,7 @@ public:
     entry->indices={ib,0,static_cast<uint32_t>(indexBytes)};
     entry->vertexCount=static_cast<uint32_t>(scratch_.vertices.size());
     entry->indexCount=static_cast<uint32_t>(scratch_.indices.size());
-    entry->raw.assign(raw,raw+bytes);
+    if(!stableSource)entry->raw.assign(raw,raw+bytes);
     bytes_+=storedBytes+vertexBytes+indexBytes;
     auto* result=entry.get();
     entries_.emplace(key,std::move(entry));
@@ -121,7 +141,7 @@ public:
 
   static bool snapshot_sources(const uint8_t* raw,size_t bytes,uint32_t count,
                                const VertexDecodeLayout& layout,VertexSemanticMask used,
-                               std::vector<Snapshot>& output) noexcept {
+                               std::vector<Snapshot>& output,bool revisionTracked=false) noexcept {
     output.clear();
     if(!raw||!count||!layout.streamStride||layout.count>layout.attributes.size()||count>bytes/layout.streamStride)return false;
     size_t total=0;
@@ -150,7 +170,9 @@ public:
       total+=end-start;
       if(total>4u*1024u*1024u)return false;
       Snapshot s{};s.source=a.array.data+start;
-      s.bytes.assign(s.source,s.source+(end-start));
+      s.size=end-start;s.revisionTracked=revisionTracked;
+      if(revisionTracked)s.revision=memory_range_revision(s.source,s.size);
+      else s.bytes.assign(s.source,s.source+s.size);
       output.push_back(std::move(s));
     }
     return true;
@@ -195,6 +217,22 @@ private:
     add(gpu.count);
     for(unsigned i=0;i<gpu.count;++i) {const auto& a=gpu.attributes[i];add(a.location);add(a.components);add(static_cast<uint8_t>(a.scalar));add(a.normalized);add(a.offset);add(a.stride);}
     return (static_cast<uint64_t>(h)<<32)|hash_bytes(raw,bytes);
+  }
+  static uint64_t make_stable_key(const uint8_t* stable,uint32_t count,SourcePrimitive primitive,
+                                  const VertexDecodeLayout& layout,const VertexLayout& gpu) noexcept {
+    uint32_t h=2166136261u;
+    const auto add=[&](uint64_t x){h=(h^static_cast<uint32_t>(x))*16777619u;h=(h^static_cast<uint32_t>(x>>32))*16777619u;};
+    add(reinterpret_cast<uintptr_t>(stable));add(count);add(static_cast<uint8_t>(primitive));
+    add(layout.count);add(layout.streamStride);add(layout.streamLittleEndian);
+    for(unsigned i=0;i<layout.count;++i) {
+      const auto& a=layout.attributes[i];
+      add(static_cast<uint8_t>(a.semantic));add(static_cast<uint8_t>(a.source));add(static_cast<uint8_t>(a.component));
+      add(a.components);add(a.frac);add(a.streamOffset);add(a.valueOffset);
+      add(reinterpret_cast<uintptr_t>(a.array.data));add(a.array.size);add(a.array.stride);add(a.array.littleEndian);
+    }
+    add(gpu.count);
+    for(unsigned i=0;i<gpu.count;++i) {const auto& a=gpu.attributes[i];add(a.location);add(a.components);add(static_cast<uint8_t>(a.scalar));add(a.normalized);add(a.offset);add(a.stride);}
+    return (static_cast<uint64_t>(h)<<32) ^ static_cast<uint64_t>(reinterpret_cast<uintptr_t>(stable));
   }
   Renderer& renderer_;
   size_t budget_=0,bytes_=0;

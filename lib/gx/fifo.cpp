@@ -25,6 +25,9 @@ bool sInDisplayList = false;
 uint8_t* sDlBuffer = nullptr;
 uint32_t sDlSize = 0;
 uint32_t sDlWritePos = 0;
+uint32_t sStableSourceOffset = 0;
+uint32_t sStableSourceBytes = 0;
+const uint8_t* sStableSource = nullptr;
 } // namespace detail
 
 void init() {
@@ -38,6 +41,9 @@ void init() {
   detail::sDlBuffer = nullptr;
   detail::sDlSize = 0;
   detail::sDlWritePos = 0;
+  detail::sStableSourceOffset = 0;
+  detail::sStableSourceBytes = 0;
+  detail::sStableSource = nullptr;
 }
 
 void write_data_grow(const void* data, uint32_t length) {
@@ -90,12 +96,23 @@ void drain() {
   }
   process(detail::sBufferData, detail::sBufferSize, true);
   detail::sBufferSize = 0;
+  detail::sStableSourceOffset = detail::sStableSourceBytes = 0;
+  detail::sStableSource = nullptr;
 }
 
 const uint8_t* get_buffer_data() { return detail::sBufferData; }
 uint32_t get_buffer_size() { return detail::sBufferSize; }
+const uint8_t* stable_source_for(const uint8_t* data,size_t bytes) {
+  if(!data||!detail::sStableSource||!detail::sStableSourceBytes)return nullptr;
+  const auto* begin=detail::sBufferData+detail::sStableSourceOffset;
+  const auto* end=begin+detail::sStableSourceBytes;
+  if(data<begin||data>end||bytes>static_cast<size_t>(end-data))return nullptr;
+  return detail::sStableSource+(data-begin);
+}
 void clear_buffer() {
   detail::sBufferSize = 0;
+  detail::sStableSourceOffset = detail::sStableSourceBytes = 0;
+  detail::sStableSource = nullptr;
 }
 
 } // namespace aurora::gx::fifo

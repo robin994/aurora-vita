@@ -2,6 +2,9 @@
 
 #include <cstddef>
 #include <cstring>
+#if defined(MKW_TARGET_VITA)
+#include "../../../platforms/vita/gfx/vita_memory_revision.hpp"
+#endif
 
 namespace {
 alignas(32) u8 s_lcData[16 * 1024];
@@ -17,13 +20,22 @@ u32 copy_data(void* dest, const void* src, u32 nBytes) {
 
 extern "C" {
 void DCInvalidateRange(void*, u32) {}
-void DCFlushRange(void*, u32) {}
-void DCStoreRange(void*, u32) {}
-void DCFlushRangeNoSync(void*, u32) {}
-void DCStoreRangeNoSync(void*, u32) {}
+void DCFlushRange(void* addr, u32 nBytes) {
+#if defined(MKW_TARGET_VITA)
+  aurora::vita::gfx::note_memory_write(addr,nBytes);
+#else
+  (void)addr;(void)nBytes;
+#endif
+}
+void DCStoreRange(void* addr, u32 nBytes) { DCFlushRange(addr,nBytes); }
+void DCFlushRangeNoSync(void* addr, u32 nBytes) { DCFlushRange(addr,nBytes); }
+void DCStoreRangeNoSync(void* addr, u32 nBytes) { DCFlushRange(addr,nBytes); }
 void DCZeroRange(void* addr, u32 nBytes) {
   if (nBytes != 0) {
     std::memset(addr, 0, nBytes);
+#if defined(MKW_TARGET_VITA)
+    aurora::vita::gfx::note_memory_write(addr,nBytes);
+#endif
   }
 }
 void DCTouchRange(void*, u32) {}

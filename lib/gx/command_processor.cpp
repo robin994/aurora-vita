@@ -1908,8 +1908,10 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
 
   const uint8_t* vertices = data + pos;
   pos += totalVtxBytes;
+  const uint8_t* stableSource=fifo::stable_source_for(vertices,totalVtxBytes);
   const auto result = aurora::vita::draw_sink().submit(
-      static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), vertices, totalVtxBytes, vtxCount);
+      static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), vertices, totalVtxBytes, vtxCount,
+      nullptr,0,stableSource);
 #if defined(MKW_TARGET_VITA)
   if (vtxCount >= 128) {
     static uint32_t largeDrawLogCount = 0;

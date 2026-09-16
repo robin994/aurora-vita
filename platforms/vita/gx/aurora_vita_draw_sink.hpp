@@ -75,7 +75,8 @@ public:
 #if defined(AURORA_VITA_UPSTREAM)
   SubmitResult submit(uint8_t primitive, uint8_t fmt, const uint8_t* rawVertices,
                       size_t rawBytes, uint32_t vertexCount,
-                      const uint16_t* rawIndices = nullptr, uint32_t indexCount = 0) noexcept;
+                      const uint16_t* rawIndices = nullptr, uint32_t indexCount = 0,
+                      const uint8_t* stableSource = nullptr) noexcept;
   // GXCopyTex integration. Call after the source EFB has been rendered and before
   // a texture object backed by dest is sampled. The backend owns the copied image;
   // native GXM currently uses a synchronized CPU conversion for color copies.
