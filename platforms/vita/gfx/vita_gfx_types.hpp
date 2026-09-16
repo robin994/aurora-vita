@@ -384,6 +384,12 @@ struct TextureBinding {
   Handle texture = InvalidHandle;
   SamplerDesc sampler{};
   TextureSource source = TextureSource::Cache;
+  // Native EFB copies can preserve their GPU storage orientation and express
+  // the GX image convention at sampling time instead of physically mirroring
+  // half a megabyte of uncached memory on the CPU.
+  bool flipX = false;
+  bool flipY = false;
+  bool forceOpaque = false;
 };
 
 struct BufferSlice { Handle buffer=InvalidHandle; uint32_t offset=0; uint32_t size=0; };

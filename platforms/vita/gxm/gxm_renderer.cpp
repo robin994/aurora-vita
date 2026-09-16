@@ -139,7 +139,7 @@ struct Renderer::Impl {
     SceGxmFragmentProgram* fragment = nullptr;
     const SceGxmProgramParameter *mvp = nullptr, *kcolor = nullptr, *tevreg = nullptr, *clip = nullptr;
     const SceGxmProgramParameter *fogColor=nullptr,*fogParams=nullptr,*fogRange=nullptr,*viewportWidth=nullptr;
-    const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr;
+    const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr,*textureTransform=nullptr,*textureForceOpaque=nullptr;
     const SceGxmProgramParameter *gxPosition=nullptr,*gxMaterial=nullptr;
     std::array<const SceGxmProgramParameter*,MaxTextures> gxTexture{};
     std::array<const SceGxmProgramParameter*,MaxTextures> gxPost{};
@@ -171,6 +171,7 @@ struct Renderer::Impl {
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
   bool frameActive = false, depthValid = false;
   SceGxmSyncObject* pendingVertexDependency = nullptr;
+  bool pendingFragmentTransferSync = false;
   Scissor displayCopySource{};
   bool displayCopySourceValid = false;
   Scissor efbCopySource{};
@@ -215,8 +216,10 @@ struct Renderer::Impl {
     unsigned flags = sync ? SCE_GXM_SCENE_FRAGMENT_SET_DEPENDENCY : 0u;
     SceGxmSyncObject* vertexDependency = pendingVertexDependency;
     if (vertexDependency) flags |= SCE_GXM_SCENE_VERTEX_WAIT_FOR_DEPENDENCY;
+    if (pendingFragmentTransferSync) flags |= SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC;
     if (!check(sceGxmBeginScene(context, flags, rt, nullptr, vertexDependency, sync, cs, ds), "begin native scene")) return false;
     pendingVertexDependency = nullptr;
+    pendingFragmentTransferSync = false;
     inScene = true;
     return true;
   }
@@ -433,6 +436,8 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.indirectMatrices=sceGxmProgramFindParameterByName(fp,"u_ind_mtx");
   p.texcoordScale=sceGxmProgramFindParameterByName(fp,"u_texcoord_scale");
   p.textureSizeBias=sceGxmProgramFindParameterByName(fp,"u_texture_size_bias");
+  p.textureTransform=sceGxmProgramFindParameterByName(fp,"u_tex_transform");
+  p.textureForceOpaque=sceGxmProgramFindParameterByName(fp,"u_tex_force_opaque");
   p.gxPosition=sceGxmProgramFindParameterByName(vp,"u_gx_position");
   p.gxMaterial=sceGxmProgramFindParameterByName(vp,"u_gx_material");
   for(unsigned i=0;i<MaxTextures;++i) {
@@ -562,7 +567,8 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s) {
 }
 
 bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor& scissor,
-                             const FixedVertexUniforms* fixedVertex) {
+                             const FixedVertexUniforms* fixedVertex,
+                             const std::array<TextureBinding,MaxTextures>* textures) {
   auto& d=*impl_;
   const auto it=d.pipelines.find(key);
   if(it==d.pipelines.end()) return d.fail("unknown native pipeline");
@@ -609,6 +615,20 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
      !upload(p.indirectMatrices,MaxIndMatrices*8,u.indirectMatrices[0].data()) ||
      !upload(p.texcoordScale,MaxTextures*4,u.texcoordScale[0].data()) ||
      !upload(p.textureSizeBias,MaxTextures*4,u.textureSizeBias[0].data()))return false;
+  if(p.textureTransform) {
+    std::array<std::array<float,4>,MaxTextures> transform{};
+    for(unsigned i=0;i<MaxTextures;++i) {
+      const bool flipX=textures&&(*textures)[i].flipX;
+      const bool flipY=textures&&(*textures)[i].flipY;
+      transform[i]={flipX?-1.f:1.f,flipY?-1.f:1.f,flipX?1.f:0.f,flipY?1.f:0.f};
+    }
+    if(!upload(p.textureTransform,MaxTextures*4,transform[0].data()))return false;
+  }
+  if(p.textureForceOpaque) {
+    std::array<float,MaxTextures> opaque{};
+    for(unsigned i=0;i<MaxTextures;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
+    if(!upload(p.textureForceOpaque,MaxTextures,opaque.data()))return false;
+  }
   p.inFlight=true;
   return true;
 }
@@ -643,7 +663,7 @@ bool Renderer::draw(const DrawPacket& packet) {
       return d.fail("vertex index outside the supplied slice or GXM range");
   }
   if (pipeline.cull == CullMode::All || packet.scissor.width <= 0 || packet.scissor.height <= 0) return true;
-  if(!bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms)) return false;
+  if(!bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures)) return false;
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
     if(!bind_texture(packet.textures[i].texture,i,packet.textures[i].sampler)) return false;
   const float low = std::min(vp.znear, vp.zfar), high = std::max(vp.znear, vp.zfar);
@@ -708,6 +728,10 @@ bool Renderer::finish() {
   auto& d=*impl_;
   if(!d.context) return true;
   if(!d.end_scene()) return false;
+  if(d.pendingFragmentTransferSync) {
+    if(!d.check(sceGxmTransferFinish(),"finish pending native transfer"))return false;
+    d.pendingFragmentTransferSync=false;
+  }
   sceGxmFinish(d.context);
   d.pendingVertexDependency=nullptr;
   for(auto& [_,b]:d.buffers) b.inFlight=false;
@@ -876,28 +900,38 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
   const Handle originalTarget=d.boundTarget;
   const void* sourceData=nullptr;
   uint32_t sourceStride=0;
+  SceGxmSyncObject* sourceSync=nullptr;
   if(originalTarget) {
     const auto sourceIt=d.textures.find(originalTarget);
     if(sourceIt==d.textures.end())return d.fail("missing native EFB source");
     sourceData=sourceIt->second->memory.data();
     sourceStride=sourceIt->second->stride;
+    sourceSync=sourceIt->second->sync;
   } else {
     sourceData=d.surfaces[d.back].memory.data();
     sourceStride=d.stride;
+    sourceSync=d.surfaces[d.back].sync;
   }
 
   // TransferDownscale is purpose-built for the 2x GX EFB copies used by
   // Strikers. Complete raster work first, run one transfer job, and keep the
   // display EFB bound; unlike the bring-up shader copy this does not open a
   // second render scene or consume render-target scene references.
-  if(!finish())return false;
+  const uint64_t copyStarted=sceKernelGetProcessTimeWide();
+  const bool asyncCopy=format==EfbCopyFormat::Passthrough && !flipX && !flipY;
+  if(asyncCopy) {
+    if(!d.end_scene())return false;
+  } else if(!finish()) return false;
+  const uint64_t afterSourceFinish=sceKernelGetProcessTimeWide();
   if(!d.check(sceGxmTransferDownscale(SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
       sourceData,static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),
       static_cast<unsigned>(source.width),static_cast<unsigned>(source.height),
       static_cast<int>(sourceStride*4u),SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
       destination.memory.data(),0,0,static_cast<int>(destination.stride*4u),
-      nullptr,0,nullptr),"native EFB downscale transfer"))return false;
-  if(!d.check(sceGxmTransferFinish(),"finish native EFB downscale transfer"))return false;
+      asyncCopy?sourceSync:nullptr,asyncCopy?SCE_GXM_TRANSFER_FRAGMENT_SYNC:0u,nullptr),"native EFB downscale transfer"))return false;
+  const uint64_t afterTransferSubmit=sceKernelGetProcessTimeWide();
+  if(!asyncCopy && !d.check(sceGxmTransferFinish(),"finish native EFB downscale transfer"))return false;
+  const uint64_t afterTransferFinish=sceKernelGetProcessTimeWide();
 
   // Preserve the shared GXCopyTex orientation contract. TransferDownscale has
   // no mirror flags, so apply the requested mirror to the already-downscaled
@@ -923,6 +957,22 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
       for(uint32_t x=0;x<destination.width;++x)std::swap(top[x],bottom[x]);
     }
   }
+  const uint64_t afterCpuFixup=sceKernelGetProcessTimeWide();
+  if(asyncCopy) {
+    d.pendingFragmentTransferSync=true;
+    destination.inFlight=true;
+  }
+  static uint64_t copyTimingCount=0;
+  const uint64_t copyN=++copyTimingCount;
+  if(copyN<=8 || (copyN&(copyN-1u))==0)
+    std::fprintf(stderr,
+      "[aurora-gxm] efb_2x_timing n=%llu source_finish_us=%llu transfer_submit_us=%llu transfer_wait_us=%llu cpu_fixup_us=%llu total_us=%llu\n",
+      static_cast<unsigned long long>(copyN),
+      static_cast<unsigned long long>(afterSourceFinish-copyStarted),
+      static_cast<unsigned long long>(afterTransferSubmit-afterSourceFinish),
+      static_cast<unsigned long long>(afterTransferFinish-afterTransferSubmit),
+      static_cast<unsigned long long>(afterCpuFixup-afterTransferFinish),
+      static_cast<unsigned long long>(afterCpuFixup-copyStarted));
   destination.inFlight=false;
   d.pendingVertexDependency=nullptr;
   d.boundTarget=originalTarget;

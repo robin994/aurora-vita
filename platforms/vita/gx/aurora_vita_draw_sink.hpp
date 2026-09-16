@@ -142,7 +142,12 @@ private:
   bool strictFailed_ = false;
   uint32_t diagnosticDrawLimit_ = 0;
   uint32_t frameDrawIndex_ = 0;
-  struct CopyTextureEntry { gfx::Handle handle=gfx::InvalidHandle; uint32_t width=0,height=0; uint32_t revision=0; };
+  struct CopyTextureEntry {
+    gfx::Handle handle=gfx::InvalidHandle;
+    uint32_t width=0,height=0;
+    uint32_t revision=0;
+    bool logicalFlipX=false,logicalFlipY=false,forceOpaque=false;
+  };
   std::unordered_map<uintptr_t,CopyTextureEntry> copyTextures_{};
   bool initialized_ = false;
 };

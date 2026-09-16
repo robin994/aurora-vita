@@ -310,11 +310,21 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const auto oldIt = copyTextures_.find(copyKey);
   const gfx::Handle oldHandle = oldIt == copyTextures_.end() ? gfx::InvalidHandle : oldIt->second.handle;
   const uint32_t oldRevision = oldIt == copyTextures_.end() ? 0 : oldIt->second.revision;
-  // GX EFB copies are consumed later as textures in GX's image convention. On
-  // vitaGL the framebuffer and sampled texture orientation differ on both axes,
-  // so rotate the copied image 180 degrees here rather than touching display
-  // presentation or menu rendering.
-  const auto h = renderer_->capture_current(oldHandle, src, dstW, dstH, copyFormat, true, true);
+  // vitaGL keeps the legacy physical 180-degree copy. Native GXM avoids touching
+  // the uncached target pixels on the CPU: its transfer stores the image as-is
+  // and the EFB texture binding carries the horizontal GX mirror to the shader.
+#if defined(AURORA_VITA_RENDERER_GXM)
+  constexpr bool physicalFlipX=false,physicalFlipY=true;
+  constexpr bool logicalFlipX=true,logicalFlipY=false;
+  const bool forceOpaque=copyFormat==gfx::EfbCopyFormat::RGB565;
+  const auto physicalFormat=forceOpaque?gfx::EfbCopyFormat::Passthrough:copyFormat;
+#else
+  constexpr bool physicalFlipX=true,physicalFlipY=true;
+  constexpr bool logicalFlipX=false,logicalFlipY=false;
+  constexpr bool forceOpaque=false;
+  const auto physicalFormat=copyFormat;
+#endif
+  const auto h = renderer_->capture_current(oldHandle, src, dstW, dstH, physicalFormat, physicalFlipX, physicalFlipY);
   if (!h) {
     // capture_current may destroy an incompatible old target before allocation/copy; never retain
     // a potentially stale handle in the guest-destination map after failure.
@@ -325,7 +335,7 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
     return false;
   }
   if (telemetry_) telemetry_->efb_copy();
-  copyTextures_[copyKey] = CopyTextureEntry{h, dstW, dstH, oldRevision + 1};
+  copyTextures_[copyKey] = CopyTextureEntry{h, dstW, dstH, oldRevision + 1, logicalFlipX, logicalFlipY, forceOpaque};
   resolvedTextureBindingsValid_=false;
   if (clear) {
 #if defined(AURORA_VITA_UPSTREAM_STUB)
@@ -614,7 +624,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       const auto ptr = reinterpret_cast<uintptr_t>(aurora::gx::g_gxState.loadedTextures[slot].data);
       const auto ci = copyTextures_.find(ptr);
       if (ci != copyTextures_.end() && ci->second.handle) {
-        bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb};
+        bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb,
+                                             ci->second.logicalFlipX,ci->second.logicalFlipY,ci->second.forceOpaque};
         continue;
       }
     }

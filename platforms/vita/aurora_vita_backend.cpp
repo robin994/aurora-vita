@@ -191,7 +191,7 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.displayBuffers=c.vgl_display_buffer_count;
   rc.waitVblank=c.wait_vblank;
   // The native budget covers persistent streaming buffers as well as textures.
-  rc.nativeResourceBudget=c.texture_cache_budget+
+  rc.nativeResourceBudget=c.texture_cache_budget+c.static_geometry_budget+
       (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
 #if defined(AURORA_VITA_RENDERER_GXM)
   // Native Cg/GXP compilation is expensive enough to stall first-use gameplay.

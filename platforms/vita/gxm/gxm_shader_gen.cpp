@@ -116,7 +116,8 @@ void indirect(std::ostringstream& fs,const PipelineDesc& d,const TevStage& s) {
   fs<<"float2 ind_uv="<<coordinate(d,itc)<<"*max(u_texcoord_scale["<<itc<<"].xy,float2(1.0))*float2("
     <<(1.f/float(1u<<ind.scaleSShift))<<","<<(1.f/float(1u<<ind.scaleTShift))
     <<")/max(u_texture_size_bias["<<itex<<"].xy,float2(1.0));\n"
-      "float4 ind_sample=tex2D(u_tex"<<itex<<",ind_uv);\n"
+      "float4 ind_sample=tex2D(u_tex"<<itex<<",gx_sample_uv(ind_uv,u_tex_transform["<<itex<<"]));\n"
+      "ind_sample.a=lerp(ind_sample.a,1.0,u_tex_force_opaque["<<itex<<"]);\n"
       "float3 ind_raw=ind_sample.abg*255.0;\nfloat3 indv=floor(ind_raw/"<<divisors[unsigned(s.indirectFormat)]<<".0);\n";
   const unsigned bias=unsigned(s.indirectBias);
   const char* biasValue=s.indirectFormat==IndirectFormat::Bits8?"-128.0":"1.0";
@@ -254,16 +255,21 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   std::vector<std::string> fp{"float4 window_position : WPOS", "uniform float4 u_clip_rect",
       "uniform float4 u_kcolor[4]", "uniform float4 u_tevreg[4]",
       "uniform float4 u_ind_mtx[6]", "uniform float4 u_texcoord_scale[8]", "uniform float4 u_texture_size_bias[8]",
+      "uniform float4 u_tex_transform[8]", "uniform float u_tex_force_opaque[8]",
       "uniform float4 u_fog_color", "uniform float4 u_fog_params", "uniform float u_fog_range_k[10]",
       "uniform float u_render_viewport_width"};
   if (!d.positionIsClipSpace || d.fixedVertexOnGpu) vp.push_back("uniform float4 u_mvp[4]");
   const auto fixedInputs=d.fixedVertexOnGpu?fixed_vertex_gpu_inputs(d):VertexSemanticMask{};
-  for (unsigned i = 0; i < 2; ++i) if (out.colorMask & (1u << i)) {
+  for (unsigned i = 0; i < 2; ++i) {
     const auto n = std::to_string(i);
-    if(!d.fixedVertexOnGpu || (fixedInputs&vertex_semantic_bit(i?VertexSemantic::Color1:VertexSemantic::Color0)))
+    const bool inputColor=!d.fixedVertexOnGpu ||
+        (fixedInputs&vertex_semantic_bit(i?VertexSemantic::Color1:VertexSemantic::Color0));
+    if(inputColor)
       vp.push_back("float4 a_color" + n + " : COLOR" + n);
-    vp.push_back("out float4 v_color" + n + " : COLOR" + n);
-    fp.push_back("float4 v_color" + n + " : COLOR" + n);
+    if(out.colorMask & (1u << i)) {
+      vp.push_back("out float4 v_color" + n + " : COLOR" + n);
+      fp.push_back("float4 v_color" + n + " : COLOR" + n);
+    }
   }
   if(d.fixedVertexOnGpu) {
     if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))vp.push_back("float3 a_normal : TEXCOORD8");
@@ -331,7 +337,8 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     for (unsigned i = 0; i < MaxTextures; ++i) if (out.texcoordMask & (1u << i)) vs << "v_tex" << i << "=a_tex" << i << ";\n";
   }
   vs << "}\n";
-  fs << "float tev_wrap1(float v){float b=v*255.0;return (b-floor(b/256.0)*256.0)/255.0;}\n"
+  fs << "float2 gx_sample_uv(float2 uv,float4 t){return uv*t.xy+t.zw;}\n"
+        "float tev_wrap1(float v){float b=v*255.0;return (b-floor(b/256.0)*256.0)/255.0;}\n"
         "float3 tev_wrap3(float3 v){float3 b=v*255.0;return (b-floor(b/256.0)*256.0)/255.0;}\n"
         "float4 main(\n";
   signature(fs, fp);
@@ -346,7 +353,9 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     indirect(fs,d,s);
     fs << "float4 raw_tex=";
     if (tev_stage_uses_texture(s) && s.texture < MaxTextures) {
-      fs << "tex2D(u_tex" << unsigned(s.texture) << ",tev_uv);\n";
+      fs << "tex2D(u_tex" << unsigned(s.texture) << ",gx_sample_uv(tev_uv,u_tex_transform["
+         << unsigned(s.texture) << "]));\nraw_tex.a=lerp(raw_tex.a,1.0,u_tex_force_opaque["
+         << unsigned(s.texture) << "]);\n";
     } else fs << "float4(1.0);\n";
     fs << "float4 texc=" << swizzle("raw_tex", d.tev.swapTable[s.texSwap]) << ";\nfloat4 raw_ras=";
     if (!tev_stage_uses_raster(s) || s.rasterSource == RasterSource::Zero) fs << "float4(0.0)";
