@@ -655,6 +655,7 @@ bool Renderer::draw(const DrawPacket& packet) {
   const auto* indices = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(ii->second.memory.data()) + packet.indices.offset);
   const uint32_t stride = pipeline.layout.attributes[0].stride;
   const size_t base = packet.absoluteVertexIndices ? 0 : packet.vertices.offset;
+#if !defined(NDEBUG)
   const size_t end = size_t(packet.vertices.offset) + packet.vertices.size;
   for (uint32_t i = 0; i < packet.indexCount; ++i) {
     const size_t offset = base + size_t(indices[i]) * stride;
@@ -662,6 +663,7 @@ bool Renderer::draw(const DrawPacket& packet) {
     if (indices[i] >= 64000 || offset < packet.vertices.offset || offset > end || stride > end - offset)
       return d.fail("vertex index outside the supplied slice or GXM range");
   }
+#endif
   if (pipeline.cull == CullMode::All || packet.scissor.width <= 0 || packet.scissor.height <= 0) return true;
   if(!bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures)) return false;
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
