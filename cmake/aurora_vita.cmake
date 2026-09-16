@@ -120,7 +120,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
         target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_NATIVE_GX_TEXTURES=1)
     endif ()
     target_compile_options(aurora_vita_backend PRIVATE
-        -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -fshort-wchar
+        -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
         -mtune=cortex-a9 -mfpu=neon -ffast-math -fsigned-char
     )
     target_link_options(aurora_vita_backend PRIVATE -Wl,--gc-sections -Wl,-q)
@@ -140,7 +140,6 @@ if (VITA AND AURORA_VITA_BUILD_PROBE)
         ${PROJECT_SOURCE_DIR}/platforms/vita/probe/main.cpp
     )
     target_compile_features(aurora_vita_probe PRIVATE cxx_std_20)
-    target_compile_options(aurora_vita_probe PRIVATE -fshort-wchar)
     target_link_libraries(aurora_vita_probe PRIVATE aurora::vita_backend)
     vita_create_self(aurora_vita_probe.self aurora_vita_probe)
     # Keep diagnostic probe installs independent from older AURVPRB01 builds so
@@ -156,7 +155,6 @@ if (VITA AND AURORA_VITA_SDL3_NATIVE AND AURORA_VITA_BUILD_SDL3_PROBE)
     )
     target_compile_features(aurora_vita_sdl3_probe PRIVATE cxx_std_20)
     target_compile_definitions(aurora_vita_sdl3_probe PRIVATE AURORA_VITA_SDL3_NATIVE=1)
-    target_compile_options(aurora_vita_sdl3_probe PRIVATE -fshort-wchar)
     target_link_libraries(aurora_vita_sdl3_probe PRIVATE aurora::vita_backend ${AURORA_SDL3_TARGET})
     vita_create_self(aurora_vita_sdl3_probe.self aurora_vita_sdl3_probe)
     vita_create_vpk(aurora_vita_sdl3_probe.vpk AURVSDL01 aurora_vita_sdl3_probe.self
