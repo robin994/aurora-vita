@@ -1,6 +1,7 @@
 # Native SceGxm backend - first vertical slice
 
-This is an additive experimental renderer, based on Aurora-Vita `10c683b`.
+This is an additive experimental renderer, originally based on Aurora-Vita
+`10c683b` and integrated with the ABI/ARM32 fixes from `ced956a`.
 The existing vitaGL renderer remains the default and is not replaced. The native
 renderer is not yet a drop-in implementation of the GX DrawSink/EFB facade.
 Do not select it for a game until that adapter and its missing capabilities exist.
@@ -127,8 +128,8 @@ python3 tools/check_vita_gxm_binary.py build-gxm/aurora_vita_gxm_probe \
 
 Output: `build-gxm/aurora_vita_gxm_probe.vpk`, title ID `AURVGXM01`.
 The unstripped ELF and linker map are retained for dependency verification.
-The native build uses VitaSDK's default enum/wchar ABI; the historical vitaGL
-compile options remain isolated to its configuration.
+Both standalone builds use VitaSDK's default enum/wchar ABI. Game-specific ABI
+flags remain the responsibility of the downstream game integration.
 
 For the preserved renderer, use another build directory and
 `-DAURORA_VITA_RENDERER=VITAGL`. Do not link both context owners into one process.

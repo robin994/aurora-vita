@@ -47,7 +47,7 @@ inline uint32_t byte_span_hash(const void* source, size_t bytes) noexcept {
   constexpr uint32_t Seed=0x9e3779b1u;
   constexpr uint32_t Prime=0x85ebca6bu;
   const auto* p=static_cast<const uint8_t*>(source);
-  const size_t original=bytes;
+  const uint64_t original=static_cast<uint64_t>(bytes);
   uint32_t h=Seed^static_cast<uint32_t>(original)^static_cast<uint32_t>(original>>32);
   if(!p)return h;
 #if defined(__vita__) && defined(__ARM_NEON)
