@@ -108,6 +108,13 @@ SceGxmBlendInfo blend_info(const PipelineDesc& d) {
 bool is_slice_valid(const BufferSlice& s, size_t capacity) {
   return s.offset <= capacity && s.size <= capacity - s.offset;
 }
+bool same_sampler(const SamplerDesc& a,const SamplerDesc& b) noexcept {
+  return a.wrapS==b.wrapS&&a.wrapT==b.wrapT&&a.minFilter==b.minFilter&&a.magFilter==b.magFilter&&
+         a.lodBias==b.lodBias&&a.minLod==b.minLod&&a.maxLod==b.maxLod;
+}
+bool same_viewport(const Viewport& a,const Viewport& b) noexcept {
+  return a.x==b.x&&a.y==b.y&&a.width==b.width&&a.height==b.height&&a.znear==b.znear&&a.zfar==b.zfar;
+}
 } // namespace
 
 struct Renderer::Impl {
@@ -167,9 +174,15 @@ struct Renderer::Impl {
   Handle clearVertices = 0, clearIndices = 0;
   Handle boundTarget = 0, blitVertices = 0, displaySource = 0, copyVertices = 0;
   uint64_t clearPipeline = 0, frameStarted = 0;
+  uint64_t boundPipelineKey = 0;
   uint32_t stride = 0, front = 0, back = 1;
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
   bool frameActive = false, depthValid = false;
+  bool pipelineStateValid = false, viewportValid = false;
+  Viewport cachedViewport{};
+  uint8_t textureBindingValidMask = 0;
+  std::array<Handle,MaxTextures> boundTextureHandles{};
+  std::array<SamplerDesc,MaxTextures> boundTextureSamplers{};
   SceGxmSyncObject* pendingVertexDependency = nullptr;
   bool pendingFragmentTransferSync = false;
   Scissor displayCopySource{};
@@ -220,6 +233,7 @@ struct Renderer::Impl {
     if (!check(sceGxmBeginScene(context, flags, rt, nullptr, vertexDependency, sync, cs, ds), "begin native scene")) return false;
     pendingVertexDependency = nullptr;
     pendingFragmentTransferSync = false;
+    pipelineStateValid=false;viewportValid=false;textureBindingValidMask=0;boundPipelineKey=0;
     inScene = true;
     return true;
   }
@@ -548,6 +562,11 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s) {
       !std::isfinite(s.lodBias) || !std::isfinite(s.minLod) || !std::isfinite(s.maxLod) ||
       s.minLod<0 || s.maxLod<s.minLod) return d.fail("invalid native texture binding");
   if(!d.ensure_scene()) return false;
+  if((d.textureBindingValidMask&(1u<<unit))&&d.boundTextureHandles[unit]==handle&&
+     same_sampler(d.boundTextureSamplers[unit],s)) {
+    it->second->inFlight=true;
+    return true;
+  }
   auto texture=it->second->descriptor;
   const bool point=s.minFilter==Filter::Nearest || s.minFilter==Filter::NearestMipmapNearest || s.minFilter==Filter::NearestMipmapLinear;
   const bool useMips=s.minFilter>Filter::Linear && it->second->mipCount>1;
@@ -562,6 +581,8 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s) {
      !d.check(sceGxmTextureSetMipFilter(&texture,useMips&&trilinear?SCE_GXM_TEXTURE_MIP_FILTER_ENABLED:SCE_GXM_TEXTURE_MIP_FILTER_DISABLED),"texture mip filter") ||
      !d.check(sceGxmTextureSetLodBias(&texture,bias),"texture LOD bias") ||
      !d.check(sceGxmSetFragmentTexture(d.context,unit,&texture),"bind fragment texture")) return false;
+  d.textureBindingValidMask|=static_cast<uint8_t>(1u<<unit);
+  d.boundTextureHandles[unit]=handle;d.boundTextureSamplers[unit]=s;
   it->second->inFlight=true;
   return true;
 }
@@ -575,14 +596,17 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(!d.ensure_scene()) return false;
   auto& p=*it->second;
   const auto& pipeline=p.desc;
-  sceGxmSetVertexProgram(d.context,p.vertex);
-  sceGxmSetFragmentProgram(d.context,p.fragment);
-  const auto compare=pipeline.depthTest?depth_func(pipeline.depthFunc):SCE_GXM_DEPTH_FUNC_ALWAYS;
-  const auto write=pipeline.depthTest&&pipeline.depthWrite?SCE_GXM_DEPTH_WRITE_ENABLED:SCE_GXM_DEPTH_WRITE_DISABLED;
-  sceGxmSetFrontDepthFunc(d.context,compare);sceGxmSetBackDepthFunc(d.context,compare);
-  sceGxmSetFrontDepthWriteEnable(d.context,write);sceGxmSetBackDepthWriteEnable(d.context,write);
-  sceGxmSetCullMode(d.context,pipeline.cull==CullMode::None?SCE_GXM_CULL_NONE:
-      pipeline.cull==CullMode::Back?SCE_GXM_CULL_CCW:SCE_GXM_CULL_CW);
+  if(!d.pipelineStateValid||d.boundPipelineKey!=key) {
+    sceGxmSetVertexProgram(d.context,p.vertex);
+    sceGxmSetFragmentProgram(d.context,p.fragment);
+    const auto compare=pipeline.depthTest?depth_func(pipeline.depthFunc):SCE_GXM_DEPTH_FUNC_ALWAYS;
+    const auto write=pipeline.depthTest&&pipeline.depthWrite?SCE_GXM_DEPTH_WRITE_ENABLED:SCE_GXM_DEPTH_WRITE_DISABLED;
+    sceGxmSetFrontDepthFunc(d.context,compare);sceGxmSetBackDepthFunc(d.context,compare);
+    sceGxmSetFrontDepthWriteEnable(d.context,write);sceGxmSetBackDepthWriteEnable(d.context,write);
+    sceGxmSetCullMode(d.context,pipeline.cull==CullMode::None?SCE_GXM_CULL_NONE:
+        pipeline.cull==CullMode::Back?SCE_GXM_CULL_CCW:SCE_GXM_CULL_CW);
+    d.pipelineStateValid=true;d.boundPipelineKey=key;
+  }
   const float clip[]{float(scissor.x),float(scissor.y),float(int64_t(scissor.x)+scissor.width),float(int64_t(scissor.y)+scissor.height)};
   void* vertex=nullptr;
   const bool needsVertexUniforms=p.mvp || (pipeline.fixedVertexOnGpu && fixedVertex);
@@ -668,9 +692,12 @@ bool Renderer::draw(const DrawPacket& packet) {
   if(!bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures)) return false;
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
     if(!bind_texture(packet.textures[i].texture,i,packet.textures[i].sampler)) return false;
-  const float low = std::min(vp.znear, vp.zfar), high = std::max(vp.znear, vp.zfar);
-  sceGxmSetViewport(d.context, vp.x + vp.width * .5f, vp.width * .5f,
-      vp.y + vp.height * .5f, -vp.height * .5f, (low + high) * .5f, (high - low) * .5f);
+  if(!d.viewportValid||!same_viewport(d.cachedViewport,vp)) {
+    const float low = std::min(vp.znear, vp.zfar), high = std::max(vp.znear, vp.zfar);
+    sceGxmSetViewport(d.context, vp.x + vp.width * .5f, vp.width * .5f,
+        vp.y + vp.height * .5f, -vp.height * .5f, (low + high) * .5f, (high - low) * .5f);
+    d.cachedViewport=vp;d.viewportValid=true;
+  }
   if (!d.check(sceGxmSetVertexStream(d.context, 0, static_cast<uint8_t*>(vi->second.memory.data()) + base), "bind native vertex stream")) return false;
   const auto primitive = pipeline.primitive == Primitive::Triangles ? SCE_GXM_PRIMITIVE_TRIANGLES :
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;

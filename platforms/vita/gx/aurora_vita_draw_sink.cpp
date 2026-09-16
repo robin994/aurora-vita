@@ -66,6 +66,7 @@ void DrawSink::shutdown() noexcept {
   preparedScratch_=gfx::PreparedDraw{};
   fixedVertexUniforms_.clear();staticGeometry_.reset();fixedPipelineKeys_.clear();
   translatedVertexStateValid_=false;
+  translatedVertexStateLightweight_=false;
 #if defined(AURORA_VITA_UPSTREAM)
   translatedStateValid_=false;
   resolvedTextureBindingsValid_=false;
@@ -458,23 +459,32 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (pipeline.texgenCount) coverage_->observe(integration::FeatureClass::TexGen, translatedPipelineKey ^ pipeline.texgenCount, "GX texgen program");
     if (translatedLit_) coverage_->observe(integration::FeatureClass::Lighting, translatedPipelineKey, "GX lighting");
   }
-  // Matrix palettes, lighting and the large CPU-side transform state frequently
-  // stay identical across long runs of GX draws. command_processor marks
-  // g_gxState.stateDirty on every relevant write and clears it after a successful
-  // submission, so this is a reliable zero-hash reuse gate.
-  if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty){
+  const auto source = translate_source_primitive(primitive);
+  translatedVertexState_.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(
+      aurora::gx::g_gxState.currentPnMtx,translatedVertexState_.postexMatrices.size()-1));
+  const bool fixedCandidate=staticGeometry_&&vertexCount>=48&&rawIndices==nullptr&&indexCount==0&&
+      source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&source!=gfx::SourcePrimitive::Points&&
+      gfx::supports_fixed_vertex_gpu(pipeline,layout,translatedVertexState_);
+  // Fixed-PN GXM draws consume only the current position/material/texgen state
+  // plus fragment uniforms. Avoid copying normal palettes and light tables that
+  // the native vertex shader cannot use by construction.
+  if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty||
+     (translatedVertexStateLightweight_&&!fixedCandidate)){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
-    translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
+    if(fixedCandidate) {
+      translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,pipeline);
+      translatedVertexStateLightweight_=true;
+    } else {
+      translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
+      translatedVertexStateLightweight_=false;
+    }
     translatedVertexStateValid_=true;
   }
   const auto& vertexState=translatedVertexState_;
   auto& uniforms=translatedUniforms_;
-  const auto source = translate_source_primitive(primitive);
   const gfx::StaticGeometryCache::Entry* gpuGeometry=nullptr;
   uint64_t fixedPipelineKey=0;
-  if(staticGeometry_&&vertexCount>=48&&rawIndices==nullptr&&indexCount==0&&
-     source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&source!=gfx::SourcePrimitive::Points&&
-     gfx::supports_fixed_vertex_gpu(pipeline,layout,vertexState)){
+  if(fixedCandidate){
 #if defined(__vita__)
     static unsigned debugGpuDraws=0;
     const bool debugGpu=telemetry_&&telemetry_->split_vertex_phases()&&debugGpuDraws++<4;

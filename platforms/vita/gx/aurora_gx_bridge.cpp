@@ -454,6 +454,66 @@ void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms&
   }
 }
 
+void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms,
+                                  const gfx::PipelineDesc& pipeline) noexcept {
+  const auto& g=aurora::gx::g_gxState;
+  state.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(g.currentPnMtx,state.postexMatrices.size()-1));
+  if(state.currentPnMatrix<aurora::gx::MaxPnMtx)
+    copy_matrix(state.postexMatrices[state.currentPnMatrix],g.pnMtx[state.currentPnMatrix].pos);
+  else {
+    const unsigned tex=state.currentPnMatrix-aurora::gx::MaxPnMtx;
+    if(tex<aurora::gx::MaxTexMtx)copy_matrix(state.postexMatrices[state.currentPnMatrix],g.texMtxs[tex]);
+  }
+
+  const uint8_t texgenMask=gfx::pipeline_texgen_compute_mask(pipeline);
+  for(unsigned i=0;i<pipeline.texgenCount&&i<gfx::MaxTextures;++i)if(texgenMask&(1u<<i)) {
+    const auto& t=pipeline.texgens[i];
+    if(t.matrix>=0&&static_cast<unsigned>(t.matrix)<aurora::gx::MaxTexMtx)
+      copy_matrix(state.postexMatrices[10u+static_cast<unsigned>(t.matrix)],g.texMtxs[static_cast<unsigned>(t.matrix)]);
+    if(t.postMatrix>=0&&static_cast<unsigned>(t.postMatrix)<aurora::gx::MaxPTTexMtx)
+      copy_matrix(state.postMatrices[static_cast<unsigned>(t.postMatrix)],g.ptTexMtxs[static_cast<unsigned>(t.postMatrix)]);
+  }
+
+  const auto proj=aurora::gx::effective_projection_for_depth_range(g.proj,g.renderViewport.znear,g.renderViewport.zfar);
+  const auto glProj=proj.transpose();
+  std::memcpy(state.projection.data(),&glProj,sizeof(glProj));
+  uniforms.mvp=state.projection;
+
+  const uint8_t colorMask=gfx::pipeline_raster_color_mask(pipeline);
+  for(unsigned ch=0;ch<4;++ch)if(colorMask&(1u<<(ch&1u))) {
+    state.channelMaterial[ch]=copy_vec4(g.colorChannelState[ch].matColor);
+    uniforms.channelMaterial[ch]=state.channelMaterial[ch];
+  }
+  for(unsigned i=0;i<4;++i) {
+    uniforms.tevreg[i]=copy_vec4(g.colorRegs[i]);
+    uniforms.kcolor[i]=copy_vec4(g.kcolors[i]);
+  }
+  uniforms.fogColor=copy_vec4(g.fog.color);
+  const float logicalWidth=std::max(g.logicalViewport.width,1.f);
+  const float renderWidth=std::max(g.renderViewport.width,1.f);
+  const int32_t rawCenter=static_cast<int32_t>(g.fogRange[0]&0x3ffu)-342;
+  const float rangeCenter=((static_cast<float>(rawCenter)-g.logicalViewport.left)/logicalWidth)*2.f-1.f+
+                          (g.renderViewport.left/renderWidth)*2.f;
+  uniforms.fogParams={g.fog.a,g.fog.b,g.fog.c,rangeCenter};
+  uniforms.renderViewportWidth=renderWidth;
+  for(unsigned i=0;i<uniforms.fogRangeK.size();++i) {
+    const u32 packed=g.fogRange[1+i/2];
+    const u32 raw=(packed>>((i&1u)*12u))&0xfffu;
+    uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
+  }
+  for(unsigned i=0;i<gfx::MaxTextures;++i) {
+    const auto& s=g.texCoordScales[i];
+    uniforms.texcoordScale[i]={static_cast<float>(s.scaleS)+1.f,static_cast<float>(s.scaleT)+1.f,0.f,0.f};
+    const auto& t=g.loadedTextures[i];
+    uniforms.textureSizeBias[i]={static_cast<float>(t.width()),static_cast<float>(t.height()),t.lod_bias(),0.f};
+  }
+  for(unsigned i=0;i<gfx::MaxIndMatrices;++i) {
+    const auto& m=g.indTexMtxs[i];
+    uniforms.indirectMatrices[i*2]={m.mtx.m0.x,m.mtx.m0.y,m.mtx.m1.x,m.mtx.m1.y};
+    uniforms.indirectMatrices[i*2+1]={m.mtx.m2.x,m.mtx.m2.y,std::exp2f(m.scaleExp),0.f};
+  }
+}
+
 
 namespace {
 gfx::TextureFormat texture_format(GXTexFmt v, bool& ok) noexcept {

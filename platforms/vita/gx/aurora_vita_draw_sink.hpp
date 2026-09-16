@@ -109,6 +109,7 @@ private:
   gfx::VertexTransformState translatedVertexState_{};
   gfx::DrawUniforms translatedUniforms_{};
   bool translatedVertexStateValid_ = false;
+  bool translatedVertexStateLightweight_ = false;
   gfx::Handle whiteTexture_ = gfx::InvalidHandle;
 #if defined(AURORA_VITA_UPSTREAM)
   uint32_t translatedStateGeneration_ = 0;
