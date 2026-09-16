@@ -83,6 +83,18 @@ bool efb_contract() {
   for(auto v:pixels)if(std::abs(int(v)-64)>1) {
     std::fprintf(stderr,"[gx-contract] EFB R8 copy byte=%u expected=64\n",v);return false;
   }
+  const auto nativeCopy=r.capture_current(0,{0,0,64,64},32,32,gfx::EfbCopyFormat::RGB565,true,true);
+  if(!nativeCopy||!r.efb().read_rgba(nativeCopy,pixels)||pixels.size()!=32u*32u*4u) {
+    std::fprintf(stderr,"[gx-contract] native EFB 2x copy/read failed handle=%u size=%u\n",
+        nativeCopy,unsigned(pixels.size()));return false;
+  }
+  for(size_t p=0;p<pixels.size();p+=4) {
+    if(std::abs(int(pixels[p])-64)>3||pixels[p+1]>1||pixels[p+2]>1||pixels[p+3]!=255) {
+      std::fprintf(stderr,"[gx-contract] native EFB 2x copy pixel=%u rgba=%u,%u,%u,%u expected~=64,0,0,255\n",
+          unsigned(p/4),pixels[p],pixels[p+1],pixels[p+2],pixels[p+3]);return false;
+    }
+  }
+  std::fprintf(stderr,"[gx-contract] native EFB 2x GXM transfer PASS\n");
   if(!r.blit_efb(copy))return false;
   end_frame();
   if(!r.readback_rgba8(pixels)||pixels.size()!=960u*544u*4u)return false;
@@ -91,7 +103,46 @@ bool efb_contract() {
       std::fprintf(stderr,"[gx-contract] EFB sampled copy pixel=%u channel=%u value=%u expected=64\n",
           unsigned(p/4),c,pixels[p+c]);return false;
     }
-  r.efb().destroy(copy);r.efb().destroy(target);
+  r.efb().destroy(nativeCopy);r.efb().destroy(copy);r.efb().destroy(target);
+  return !r.failed();
+}
+bool display_blit_orientation_probe() {
+  auto& r=renderer();
+  constexpr uint32_t side=16;
+  std::array<uint8_t,side*side*4> rgba{};
+  for(uint32_t y=0;y<side;++y)for(uint32_t x=0;x<side;++x) {
+    uint8_t color[3]{};
+    if(y<side/2 && x<side/2) {color[0]=255;}
+    else if(y<side/2) {color[1]=255;}
+    else if(x<side/2) {color[2]=255;}
+    else {color[0]=255;color[1]=255;}
+    auto* p=rgba.data()+(size_t(y)*side+x)*4;
+    p[0]=color[0];p[1]=color[1];p[2]=color[2];p[3]=255;
+  }
+  auto source=r.upload_efb_rgba(0,side,side,rgba.data());
+  if(!source||!begin_frame()||!r.blit_efb(source)||!r.display_copy({0,0,960,544})) {
+    std::fprintf(stderr,"[gx-contract] display blit setup failed handle=%u\n",source);return false;
+  }
+  end_frame();
+  std::vector<uint8_t> pixels;
+  if(r.failed()||!r.readback_rgba8(pixels)||pixels.size()!=960u*544u*4u)return false;
+  const auto sample=[&](uint32_t x,uint32_t y) {
+    const auto* p=pixels.data()+(size_t(y)*960u+x)*4u;
+    return std::array<uint8_t,3>{p[0],p[1],p[2]};
+  };
+  const auto tl=sample(240,136),tr=sample(720,136),bl=sample(240,408),br=sample(720,408);
+  std::fprintf(stderr,
+    "[gx-contract] display_blit TL=%u,%u,%u TR=%u,%u,%u BL=%u,%u,%u BR=%u,%u,%u\n",
+    tl[0],tl[1],tl[2],tr[0],tr[1],tr[2],bl[0],bl[1],bl[2],br[0],br[1],br[2]);
+  const auto near=[](const std::array<uint8_t,3>& actual,const std::array<uint8_t,3>& expected) {
+    for(unsigned i=0;i<3;++i)if(std::abs(int(actual[i])-int(expected[i]))>4)return false;
+    return true;
+  };
+  if(!near(tl,{0,0,255})||!near(tr,{255,255,0})||!near(bl,{255,0,0})||!near(br,{0,255,0})) {
+    std::fprintf(stderr,"[gx-contract] display blit orientation mismatch\n");
+    r.efb().destroy(source);return false;
+  }
+  r.efb().destroy(source);
   return !r.failed();
 }
 bool extended_contract() {
@@ -180,6 +231,9 @@ int run() {
     std::fprintf(stderr,"[gx-contract] EFB FAILED %s\n",renderer().last_error());shutdown();return 2;
   }
   std::fprintf(stderr,"[gx-contract] EFB clear_masks/copy/resize/R8/sample PASS\n");
+  if(!display_blit_orientation_probe()) {
+    std::fprintf(stderr,"[gx-contract] display blit FAILED %s\n",renderer().last_error());shutdown();return 10;
+  }
   if(!extended_contract()) {
     std::fprintf(stderr,"[gx-contract] extended shader/mipmap FAILED %s\n",renderer().last_error());shutdown();return 8;
   }

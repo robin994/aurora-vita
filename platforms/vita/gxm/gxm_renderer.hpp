@@ -15,6 +15,7 @@ struct Config {
   size_t maxPipelines = 128;
   bool waitVblank = true;
   const char* shaderCompilerPath = nullptr;
+  const char* programCachePath = nullptr;
 };
 
 // Native implementation used by the public gfx::Renderer facade and the device
@@ -31,7 +32,10 @@ public:
   uint64_t create_pipeline(const gfx::PipelineDesc& desc);
   void destroy_pipeline(uint64_t key);
   gfx::Handle create_buffer(const void* data, size_t bytes);
-  bool update_buffer(gfx::Handle handle, const void* data, size_t bytes, size_t offset=0);
+  // `storageRetired` is only for common streaming pages whose owner has already
+  // observed the configured frames-in-flight retirement interval.
+  bool update_buffer(gfx::Handle handle, const void* data, size_t bytes, size_t offset=0,
+                     bool storageRetired=false);
   void destroy_buffer(gfx::Handle handle);
   gfx::Handle create_texture(const gfx::TextureDesc& desc);
   void destroy_texture(gfx::Handle handle);
@@ -45,7 +49,10 @@ public:
   bool read_target(gfx::Handle handle, std::vector<uint8_t>& pixels);
   bool read_current(std::vector<uint8_t>& pixels, uint32_t& width, uint32_t& height);
   bool upload_target(gfx::Handle handle, const void* rgba, uint32_t width, uint32_t height);
+  bool copy_current_to_target(gfx::Handle handle, const gfx::Scissor& source,
+                              gfx::EfbCopyFormat format, bool flipX, bool flipY);
   bool blit_to_default(gfx::Handle handle);
+  bool copy_display_region(const gfx::Scissor& source);
   bool draw(const gfx::DrawPacket& packet);
   bool bind_pipeline(uint64_t key,const gfx::GpuDrawUniforms& uniforms,const gfx::Scissor& scissor={});
   bool bind_texture(gfx::Handle handle,unsigned unit,const gfx::SamplerDesc& sampler);

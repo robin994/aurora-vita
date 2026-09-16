@@ -6,6 +6,7 @@
 #include "gfx/vita_efb_copy.hpp"
 #include "gfx/vita_sampler_units.hpp"
 #include "gxm/gxm_texture_layout.hpp"
+#include "gxm/gxm_program_cache.hpp"
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -311,6 +312,21 @@ void native_extended_contract() {
     REQUIRE(copy_efb_rgba8(rgba,2,2,all,3,5,EfbCopyFormat(fmt),false,false,copy));
   REQUIRE(copy_efb_rgba8(rgba,2,2,all,2,2,EfbCopyFormat::RG8,false,false,copy));
   REQUIRE(copy[0]==255 && copy[1]==255 && copy[2]==255 && copy[3]==0);
+
+  const char* cg="float4 main(float4 p:POSITION):POSITION{return p;}";
+  const auto vh=gxm::gxm_program_source_hash(cg,gxm::ProgramStage::Vertex);
+  const auto fh=gxm::gxm_program_source_hash(cg,gxm::ProgramStage::Fragment);
+  REQUIRE(vh!=fh);
+  std::array<uint8_t,32> gxp{};
+  for(unsigned i=0;i<gxp.size();++i)gxp[i]=uint8_t(i*7u+3u);
+  gxm::GxmProgramCacheHeader cache{};
+  cache.sourceHash=vh;cache.stage=uint32_t(gxm::ProgramStage::Vertex);cache.length=gxp.size();
+  cache.binaryHash=program_cache_hash(gxp.data(),gxp.size());
+  REQUIRE(gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),vh,gxm::ProgramStage::Vertex));
+  REQUIRE(!gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),fh,gxm::ProgramStage::Vertex));
+  REQUIRE(!gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),vh,gxm::ProgramStage::Fragment));
+  gxp[5]^=1;
+  REQUIRE(!gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),vh,gxm::ProgramStage::Vertex));
 }
 } // namespace
 int main() {

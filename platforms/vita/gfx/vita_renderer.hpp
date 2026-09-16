@@ -16,6 +16,7 @@ struct RendererConfig {
   uint32_t displayBuffers=3;
   bool waitVblank=true;
   size_t nativeResourceBudget=64*1024*1024;
+  const char* programBinaryCachePath=nullptr;
 };
 class Renderer {
 public:
@@ -40,6 +41,17 @@ public:
     return 65536;
 #endif
   }
+  // vitaGL batches adjacent streamed draws by rebasing U16 indices against the
+  // start of the frame VBO. Native GXM can instead bind each draw's vertex slice
+  // directly, keeping U16 indices local and avoiding a cumulative 64k vertex
+  // limit across a large logical GX frame.
+  static constexpr bool uses_local_stream_indices() noexcept {
+#if defined(AURORA_VITA_RENDERER_GXM)
+    return true;
+#else
+    return false;
+#endif
+  }
   uint64_t create_pipeline(const PipelineDesc& d) noexcept;
   Handle create_texture(const TextureDesc& d) noexcept;
   size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept;
@@ -49,6 +61,9 @@ public:
   Handle create_efb(uint32_t w,uint32_t h,bool depth=true) noexcept;
   bool bind_efb(Handle h) noexcept;void bind_default() noexcept;
   bool blit_efb(Handle h) noexcept;
+  // GX display copy: crop/scale the current EFB into the presentable backbuffer.
+  // Hardware backends may implement this without a CPU readback.
+  bool display_copy(const Scissor& src) noexcept;
   // Framebuffer copy. Source coordinates are top-left Aurora/GX coordinates.
   // Backends own synchronization and may use a conservative CPU conversion path.
   // flipX/flipY rotate only the sampled copy, leaving the display path untouched.
@@ -75,6 +90,7 @@ private:
   std::unique_ptr<gxm::Renderer> native_;
 #endif
   bool failed_=false;
+  Handle displayCopy_=InvalidHandle;
   Handle maskedClearVertices_=InvalidHandle,maskedClearIndices_=InvalidHandle;
   PipelineCache pipelines_{};TextureCache textures_;BufferPool buffers_{};EfbManager efb_{};FrameStats stats_{};uint64_t frame_=0;bool initialized_=false;
 #if defined(__vita__)

@@ -90,6 +90,10 @@ bool Renderer::blit_efb(Handle h) noexcept {
     invalidate_draw_state();}
   return ok;
 }
+bool Renderer::display_copy(const Scissor& src) noexcept {
+  displayCopy_=capture_current(displayCopy_,src,cfg_.width,cfg_.height,EfbCopyFormat::Passthrough);
+  return displayCopy_!=InvalidHandle && blit_efb(displayCopy_);
+}
 Handle Renderer::capture_current(Handle existing,const Scissor& src,uint32_t dstWidth,uint32_t dstHeight,EfbCopyFormat format,bool flipX,bool flipY) noexcept {if(src.width<=0||src.height<=0||!dstWidth||!dstHeight)return InvalidHandle;const int32_t y=static_cast<int32_t>(targetHeight_)-(src.y+src.height);const int32_t x=std::max<int32_t>(0,src.x);const int32_t sy=std::max<int32_t>(0,y);const uint32_t sw=std::min<uint32_t>(static_cast<uint32_t>(src.width),targetWidth_-std::min<uint32_t>(static_cast<uint32_t>(x),targetWidth_));const uint32_t sh=std::min<uint32_t>(static_cast<uint32_t>(src.height),targetHeight_-std::min<uint32_t>(static_cast<uint32_t>(sy),targetHeight_));if(!sw||!sh)return InvalidHandle;
 #if defined(__vita__)
   const bool scissorWasEnabled=scissorEnabled_;

@@ -9,6 +9,7 @@ if (AURORA_VITA_BUILD_SDL3_PROBE)
 endif ()
 add_library(aurora_vita_gxm_backend STATIC
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_memory.cpp
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_program_cache.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_facade.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_renderer.cpp)

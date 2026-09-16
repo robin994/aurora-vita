@@ -286,6 +286,17 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const uint32_t rawCopyFormat = static_cast<uint32_t>(g.texCopyFmt);
   const gfx::EfbCopyFormat copyFormat = gfx::efb_copy_format_from_gx_raw(rawCopyFormat);
 #endif
+#if defined(__vita__)
+  {
+    static uint64_t copyLogCount=0;
+    const uint64_t n=++copyLogCount;
+    if(n<=8 || (n&(n-1))==0)
+      std::fprintf(stderr,
+        "[aurora-vita] gx_copy_tex n=%llu src=%d,%d %dx%d dst=%ux%u fmt=0x%x mapped=%u clear=%u\n",
+        static_cast<unsigned long long>(n),src.x,src.y,src.width,src.height,dstW,dstH,
+        rawCopyFormat,static_cast<unsigned>(copyFormat),clear?1u:0u);
+  }
+#endif
   if (!gfx::is_supported_color_copy_format(copyFormat)) {
     const char* reason = gfx::is_depth_copy_format(copyFormat)
         ? "GXCopyTex depth conversion unsupported on vitaGL EFB path"
@@ -499,10 +510,14 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto arenaCanFit=[&](const gfx::DrawFootprint& required) noexcept {
     if(!arena_->can_reserve(required.vertexBytes,gpuStride,required.indexBytes,alignof(uint16_t)))return false;
     if(required.indexBytes){
-      const size_t used=arena_->vertex_used();
-      const size_t rem=used%gpuStride;
-      const size_t aligned=rem?used+(gpuStride-rem):used;
-      if(aligned/gpuStride+required.vertexCount>renderer_->max_indexed_vertices())return false;
+      if(renderer_->uses_local_stream_indices()){
+        if(required.vertexCount>renderer_->max_indexed_vertices())return false;
+      }else{
+        const size_t used=arena_->vertex_used();
+        const size_t rem=used%gpuStride;
+        const size_t aligned=rem?used+(gpuStride-rem):used;
+        if(aligned/gpuStride+required.vertexCount>renderer_->max_indexed_vertices())return false;
+      }
     }
     return true;
   };

@@ -1,5 +1,6 @@
 #include "gxm_renderer.hpp"
 #include "gxm_memory.hpp"
+#include "gxm_program_cache.hpp"
 #include "gxm_shader_gen.hpp"
 #include "gxm_texture_layout.hpp"
 #include "gfx/vita_pipeline_key.hpp"
@@ -37,6 +38,10 @@ void display_callback(const void* opaque) {
   frame.size = sizeof(frame); frame.base = request.address;
   frame.width = request.width; frame.height = request.height; frame.pitch = request.stride;
   frame.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+  // Match vitaGL's proven swap contract: schedule the buffer for NEXTFRAME and,
+  // when vsync is requested, keep the display-queue callback alive through that
+  // retrace. This paces queue retirement instead of letting pending swaps build
+  // up until DisplayQueueAddEntry has to absorb multiple refresh intervals.
   int error = sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_NEXTFRAME);
   if (error >= 0 && request.wait) error = sceDisplayWaitVblankStart();
   if (error < 0) request.error->store(error, std::memory_order_relaxed);
@@ -123,9 +128,12 @@ struct Renderer::Impl {
       if (target) sceGxmDestroyRenderTarget(target);
     }
   };
+  struct CompiledStage {
+    std::vector<uint32_t> code;
+  };
   struct Pipeline {
     PipelineDesc desc{};
-    std::vector<uint32_t> vertexCode, fragmentCode;
+    std::shared_ptr<CompiledStage> vertexCode, fragmentCode;
     SceGxmShaderPatcherId vertexId = nullptr, fragmentId = nullptr;
     SceGxmVertexProgram* vertex = nullptr;
     SceGxmFragmentProgram* fragment = nullptr;
@@ -144,6 +152,7 @@ struct Renderer::Impl {
   SceGxmDepthStencilSurface depthSurface{};
   std::array<Surface, 3> surfaces;
   std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> pipelines;
+  std::unordered_map<uint64_t, std::shared_ptr<CompiledStage>> stageCache;
   std::unordered_map<Handle, Buffer> buffers;
   std::unordered_map<Handle, std::unique_ptr<Texture>> textures;
   std::unordered_map<uint64_t, Handle> textureCache;
@@ -153,11 +162,19 @@ struct Renderer::Impl {
   size_t resourceBytes = 0;
   Handle nextHandle = 1;
   Handle clearVertices = 0, clearIndices = 0;
-  Handle boundTarget = 0, blitVertices = 0;
+  Handle boundTarget = 0, blitVertices = 0, displaySource = 0, copyVertices = 0;
   uint64_t clearPipeline = 0, frameStarted = 0;
   uint32_t stride = 0, front = 0, back = 1;
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
   bool frameActive = false, depthValid = false;
+  SceGxmSyncObject* pendingVertexDependency = nullptr;
+  Scissor displayCopySource{};
+  bool displayCopySourceValid = false;
+  Scissor efbCopySource{};
+  uint32_t efbCopySourceWidth = 0, efbCopySourceHeight = 0;
+  bool efbCopyFlipX = false, efbCopyFlipY = false, efbCopyGeometryValid = false;
+  ProgramBinaryCache programCache;
+  uint32_t stageMemoryHits = 0, stageCompiles = 0;
 
   uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
   uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
@@ -185,11 +202,18 @@ struct Renderer::Impl {
       t.inFlight = true;
     }
     if (ds) {
+      // GXCopyTex and target switches can split one logical EFB frame across
+      // multiple GXM scenes. Preserve Z across those boundaries for both the
+      // display EFB and offscreen targets.
       sceGxmDepthStencilSurfaceSetForceLoadMode(ds, loadDepth ?
           SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
       sceGxmDepthStencilSurfaceSetForceStoreMode(ds, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
     }
-    if (!check(sceGxmBeginScene(context, 0, rt, nullptr, nullptr, sync, cs, ds), "begin native scene")) return false;
+    unsigned flags = sync ? SCE_GXM_SCENE_FRAGMENT_SET_DEPENDENCY : 0u;
+    SceGxmSyncObject* vertexDependency = pendingVertexDependency;
+    if (vertexDependency) flags |= SCE_GXM_SCENE_VERTEX_WAIT_FOR_DEPENDENCY;
+    if (!check(sceGxmBeginScene(context, flags, rt, nullptr, vertexDependency, sync, cs, ds), "begin native scene")) return false;
+    pendingVertexDependency = nullptr;
     inScene = true;
     return true;
   }
@@ -217,17 +241,45 @@ struct Renderer::Impl {
     if (p.vertexId) sceGxmShaderPatcherUnregisterProgram(patcher, p.vertexId);
     p.fragment = nullptr; p.vertex = nullptr; p.fragmentId = nullptr; p.vertexId = nullptr;
   }
-  bool compile(const std::string& source, shark_type type, std::vector<uint32_t>& storage) {
-    if (source.size() > UINT32_MAX) return fail("shader source too large");
+  std::shared_ptr<CompiledStage> compile_stage(const std::string& source, shark_type type,
+                                               ProgramStage stage) {
+    const uint64_t sourceHash = gxm_program_source_hash(source.c_str(), stage);
+    if (const auto it = stageCache.find(sourceHash); it != stageCache.end()) {
+      ++stageMemoryHits;
+      return it->second;
+    }
+    auto compiled = std::make_shared<CompiledStage>();
+    if (programCache.load(sourceHash, stage, compiled->code)) {
+      if (check(sceGxmProgramCheck(reinterpret_cast<const SceGxmProgram*>(compiled->code.data())),
+                "validate cached GXP")) {
+        stageCache.emplace(sourceHash, compiled);
+        return compiled;
+      }
+      error.clear();
+      compiled->code.clear();
+    }
+    if (source.size() > UINT32_MAX) { fail("shader source too large"); return {}; }
+    const uint64_t started = sceKernelGetProcessTimeWide();
     uint32_t size = uint32_t(source.size());
     const SceGxmProgram* program = shark_compile_shader(source.c_str(), &size, type);
-    if (!program || !size) { shark_clear_output(); return fail("Cg compilation failed; see shader diagnostics"); }
+    if (!program || !size) { shark_clear_output(); fail("Cg compilation failed; see shader diagnostics"); return {}; }
     // Compiler output belongs to vitaShaRK. Registered headers must outlive the
     // patched programs, so take an aligned owned copy before clearing output.
-    storage.resize((size + 3u) / 4u);
-    std::memcpy(storage.data(), program, size);
+    compiled->code.resize((size + 3u) / 4u);
+    std::memcpy(compiled->code.data(), program, size);
     shark_clear_output();
-    return check(sceGxmProgramCheck(reinterpret_cast<const SceGxmProgram*>(storage.data())), "validate GXP");
+    if (!check(sceGxmProgramCheck(reinterpret_cast<const SceGxmProgram*>(compiled->code.data())), "validate GXP")) return {};
+    programCache.save(sourceHash, stage, compiled->code, size);
+    stageCache.emplace(sourceHash, compiled);
+    ++stageCompiles;
+    const uint64_t elapsed = sceKernelGetProcessTimeWide() - started;
+    if (stageCompiles <= 8 || (stageCompiles & (stageCompiles - 1)) == 0)
+      std::fprintf(stderr,
+          "[aurora-gxm] stage_compile stage=%c hash=%016llx us=%llu compiled=%u mem_hits=%u disk_hits=%u disk_misses=%u\n",
+          stage == ProgramStage::Vertex ? 'v' : 'f', static_cast<unsigned long long>(sourceHash),
+          static_cast<unsigned long long>(elapsed), stageCompiles, stageMemoryHits,
+          programCache.hits(), programCache.misses());
+    return compiled;
   }
 };
 
@@ -300,6 +352,7 @@ bool Renderer::initialize(const Config& config) {
   d.ownsCompiler = true;
   shark_install_log_cb(shader_log);
   shark_set_warnings_level(SHARK_WARN_HIGH);
+  d.programCache.configure(config.programCachePath);
   d.initialized = true;
   PipelineDesc clear{};
   clear.reversedZ = false; clear.cull = CullMode::None; clear.depthFunc = Compare::Always;
@@ -329,10 +382,11 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   if (!source.ok()) { d.fail(source.error.c_str()); return 0; }
   auto pipeline = std::make_unique<Impl::Pipeline>();
   auto& p = *pipeline; p.desc = desc; p.textureMask = source.textureMask;
-  if (!d.compile(source.vertex, SHARK_VERTEX_SHADER, p.vertexCode) ||
-      !d.compile(source.fragment, SHARK_FRAGMENT_SHADER, p.fragmentCode)) return 0;
-  const auto* vp = reinterpret_cast<const SceGxmProgram*>(p.vertexCode.data());
-  const auto* fp = reinterpret_cast<const SceGxmProgram*>(p.fragmentCode.data());
+  p.vertexCode = d.compile_stage(source.vertex, SHARK_VERTEX_SHADER, ProgramStage::Vertex);
+  p.fragmentCode = d.compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
+  if (!p.vertexCode || !p.fragmentCode) return 0;
+  const auto* vp = reinterpret_cast<const SceGxmProgram*>(p.vertexCode->code.data());
+  const auto* fp = reinterpret_cast<const SceGxmProgram*>(p.fragmentCode->code.data());
   const auto abort = [&]() { d.destroy_pipeline(p); return uint64_t{0}; };
   if (!d.check(sceGxmShaderPatcherRegisterProgram(d.patcher, vp, &p.vertexId), "register vertex GXP") ||
       !d.check(sceGxmShaderPatcherRegisterProgram(d.patcher, fp, &p.fragmentId), "register fragment GXP")) return abort();
@@ -579,11 +633,12 @@ bool Renderer::draw(const DrawPacket& packet) {
 bool Renderer::end_frame(bool present) {
   auto& d = *impl_;
   if (!d.frameActive) return d.fail("end_frame outside a frame");
+  const uint64_t timingStart=sceKernelGetProcessTimeWide();
   if (!d.end_scene()) return false;
+  const uint64_t afterEnd=sceKernelGetProcessTimeWide();
   d.frameActive = false;
   auto& surface = d.surfaces[d.back];
   if (present) {
-    if (!d.check(sceGxmPadHeartbeat(&surface.color, surface.sync), "display heartbeat")) return false;
     const DisplayRequest request{surface.memory.data(), d.config.width, d.config.height, d.stride, d.config.waitVblank, &d.displayError};
     if (!d.check(sceGxmDisplayQueueAddEntry(d.surfaces[d.front].sync, surface.sync, &request), "queue present")) return false;
     d.displayed = true; d.front = d.back; d.back = (d.back + 1) % d.config.displayBuffers;
@@ -592,6 +647,15 @@ bool Renderer::end_frame(bool present) {
     // same offscreen surface can become the next scene's target.
     if(!finish()) return false;
   }
+  const uint64_t afterQueue=sceKernelGetProcessTimeWide();
+  static uint64_t presentCount=0;
+  const uint64_t count=++presentCount;
+  if(present && (count<=8 || (count&(count-1))==0))
+    std::fprintf(stderr,"[aurora-gxm] present_timing n=%llu end_us=%llu queue_us=%llu total_us=%llu\n",
+      static_cast<unsigned long long>(count),
+      static_cast<unsigned long long>(afterEnd-timingStart),
+      static_cast<unsigned long long>(afterQueue-afterEnd),
+      static_cast<unsigned long long>(afterQueue-timingStart));
   d.stats.cpuFrameUs = sceKernelGetProcessTimeWide() - d.frameStarted;
   return true;
 }
@@ -613,19 +677,25 @@ bool Renderer::finish() {
   if(!d.context) return true;
   if(!d.end_scene()) return false;
   sceGxmFinish(d.context);
+  d.pendingVertexDependency=nullptr;
   for(auto& [_,b]:d.buffers) b.inFlight=false;
   for(auto& [_,t]:d.textures) t->inFlight=false;
   for(auto& [_,p]:d.pipelines) p->inFlight=false;
   return true;
 }
 
-bool Renderer::update_buffer(Handle handle,const void* data,size_t bytes,size_t offset) {
+bool Renderer::update_buffer(Handle handle,const void* data,size_t bytes,size_t offset,bool storageRetired) {
   auto& d=*impl_;
   auto it=d.buffers.find(handle);
   if(it==d.buffers.end() || offset>it->second.bytes || bytes>it->second.bytes-offset || (!data&&bytes))
     return d.fail("invalid buffer update");
   if(!bytes) return true;
-  if(it->second.inFlight && !finish()) return false;
+  if(it->second.inFlight && !storageRetired && !finish()) return false;
+  // StreamingArena only sets storageRetired after its frames-in-flight interval.
+  // At that point the corresponding display work has already rotated through
+  // GXM's bounded queue, so a second global finish here would serialize every
+  // third frame and defeat the ring buffer.
+  if(storageRetired) it->second.inFlight=false;
   std::memcpy(static_cast<uint8_t*>(it->second.memory.data())+offset,data,bytes);
   return true;
 }
@@ -755,6 +825,78 @@ bool Renderer::upload_target(Handle handle,const void* rgba,uint32_t width,uint3
   return true;
 }
 
+bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCopyFormat format,
+                                      bool flipX,bool flipY) {
+  auto& d=*impl_;
+  const auto destinationIt=d.textures.find(handle);
+  if(!d.initialized || !d.frameActive || destinationIt==d.textures.end() ||
+     !destinationIt->second->target || source.x<0 || source.y<0 ||
+     source.width<=0 || source.height<=0)
+    return d.fail("invalid native EFB GPU copy");
+  auto& destination=*destinationIt->second;
+  const uint32_t sourceWidth=d.width(),sourceHeight=d.height();
+  if(uint64_t(source.x)+uint64_t(source.width)>sourceWidth ||
+     uint64_t(source.y)+uint64_t(source.height)>sourceHeight ||
+     (format!=EfbCopyFormat::Passthrough && format!=EfbCopyFormat::RGB565) ||
+     uint32_t(source.width)!=destination.width*2u || uint32_t(source.height)!=destination.height*2u)
+    return d.fail("unsupported native EFB GPU copy");
+
+  const Handle originalTarget=d.boundTarget;
+  const void* sourceData=nullptr;
+  uint32_t sourceStride=0;
+  if(originalTarget) {
+    const auto sourceIt=d.textures.find(originalTarget);
+    if(sourceIt==d.textures.end())return d.fail("missing native EFB source");
+    sourceData=sourceIt->second->memory.data();
+    sourceStride=sourceIt->second->stride;
+  } else {
+    sourceData=d.surfaces[d.back].memory.data();
+    sourceStride=d.stride;
+  }
+
+  // TransferDownscale is purpose-built for the 2x GX EFB copies used by
+  // Strikers. Complete raster work first, run one transfer job, and keep the
+  // display EFB bound; unlike the bring-up shader copy this does not open a
+  // second render scene or consume render-target scene references.
+  if(!finish())return false;
+  if(!d.check(sceGxmTransferDownscale(SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
+      sourceData,static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),
+      static_cast<unsigned>(source.width),static_cast<unsigned>(source.height),
+      static_cast<int>(sourceStride*4u),SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
+      destination.memory.data(),0,0,static_cast<int>(destination.stride*4u),
+      nullptr,0,nullptr),"native EFB downscale transfer"))return false;
+  if(!d.check(sceGxmTransferFinish(),"finish native EFB downscale transfer"))return false;
+
+  // Preserve the shared GXCopyTex orientation contract. TransferDownscale has
+  // no mirror flags, so apply the requested mirror to the already-downscaled
+  // uncached CPU/GPU surface. This touches only the 480x272 destination.
+  auto* pixels=static_cast<uint32_t*>(destination.memory.data());
+  if(format==EfbCopyFormat::RGB565) {
+    for(uint32_t y=0;y<destination.height;++y) {
+      auto* row=pixels+size_t(y)*destination.stride;
+      for(uint32_t x=0;x<destination.width;++x)row[x]|=0xff000000u;
+    }
+  }
+  if(flipX) {
+    for(uint32_t y=0;y<destination.height;++y) {
+      auto* row=pixels+size_t(y)*destination.stride;
+      for(uint32_t x=0;x<destination.width/2u;++x)
+        std::swap(row[x],row[destination.width-1u-x]);
+    }
+  }
+  if(flipY) {
+    for(uint32_t y=0;y<destination.height/2u;++y) {
+      auto* top=pixels+size_t(y)*destination.stride;
+      auto* bottom=pixels+size_t(destination.height-1u-y)*destination.stride;
+      for(uint32_t x=0;x<destination.width;++x)std::swap(top[x],bottom[x]);
+    }
+  }
+  destination.inFlight=false;
+  d.pendingVertexDependency=nullptr;
+  d.boundTarget=originalTarget;
+  return true;
+}
+
 bool Renderer::blit_to_default(Handle handle) {
   auto& d=*impl_;
   if(d.textures.find(handle)==d.textures.end()) return d.fail("unknown blit texture");
@@ -769,7 +911,10 @@ bool Renderer::blit_to_default(Handle handle) {
   const auto key=create_pipeline(p);
   if(!key) return false;
   if(!d.blitVertices) {
-    const float vertices[]{-1,-1,-.5f,1, 0,1,1, 3,-1,-.5f,1, 2,1,1, -1,3,-.5f,1, 0,-1,1};
+    // Match the legacy vitaGL display-copy convention. Native render targets are
+    // sampled with the opposite vertical origin from GL FBO textures, so the
+    // fullscreen copy must invert V once when presenting a captured EFB.
+    const float vertices[]{-1,-1,-.5f,1, 0,0,1, 3,-1,-.5f,1, 2,0,1, -1,3,-.5f,1, 0,2,1};
     d.blitVertices=create_buffer(vertices,sizeof(vertices));
   }
   if(!d.blitVertices) return false;
@@ -784,6 +929,109 @@ bool Renderer::blit_to_default(Handle handle) {
   return draw(packet);
 }
 
+bool Renderer::copy_display_region(const Scissor& source) {
+  auto& d=*impl_;
+  const uint64_t timingStart=sceKernelGetProcessTimeWide();
+  if(!d.initialized || !d.frameActive || d.boundTarget || source.x<0 || source.y<0 ||
+     source.width<=0 || source.height<=0 || uint64_t(source.x)+uint64_t(source.width)>d.config.width ||
+     uint64_t(source.y)+uint64_t(source.height)>d.config.height)
+    return d.fail("invalid native display-copy region");
+  if(d.config.displayBuffers<3) return d.fail("native display copy requires three display buffers");
+
+  // The Vita frontend already maps the logical GX EFB into the native render
+  // target. When GXCopyDisp selects that complete image, the EFB is already the
+  // exact XFB we need to scan out; a second textured scene would only resample
+  // the same pixels and force an unnecessary scene dependency.
+  if(source.x==0 && source.y==0 && uint32_t(source.width)==d.config.width &&
+     uint32_t(source.height)==d.config.height) {
+    static uint64_t passthroughCount=0;
+    const uint64_t count=++passthroughCount;
+    if(count<=4 || (count&(count-1))==0)
+      std::fprintf(stderr,"[aurora-gxm] display_copy passthrough n=%llu source=%d,%d %dx%d\n",
+                   static_cast<unsigned long long>(count),source.x,source.y,source.width,source.height);
+    return true;
+  }
+
+  // GXCopyDisp needs arbitrary crop/scale. Keep it on the GPU: complete the EFB
+  // scene, sample that display surface as a texture, and render into the third
+  // display buffer. This replaces the old full-frame GPU->CPU->GPU round-trip.
+  const uint32_t sourceBuffer=d.back;
+  // Submit the EFB scene without stalling the CPU. The following display-copy
+  // scene waits on its fragment dependency in the GPU command stream.
+  if(!d.end_scene()) return false;
+  const uint64_t afterEnd=sceKernelGetProcessTimeWide();
+  uint32_t destination=UINT32_MAX;
+  for(uint32_t i=0;i<d.config.displayBuffers;++i)
+    if(i!=sourceBuffer && i!=d.front) {destination=i;break;}
+  if(destination==UINT32_MAX) return d.fail("no free display-copy destination");
+
+  Impl::Texture* alias=nullptr;
+  if(!d.displaySource) {
+    auto texture=std::make_unique<Impl::Texture>();
+    texture->width=d.config.width;texture->height=d.config.height;texture->stride=d.stride;
+    d.displaySource=d.nextHandle++;
+    alias=texture.get();
+    d.textures.emplace(d.displaySource,std::move(texture));
+  } else alias=d.textures.at(d.displaySource).get();
+  const uint32_t expectedStride=(d.config.width+7u)&~7u;
+  if(d.stride!=expectedStride) return d.fail("display surface stride cannot be sampled linearly");
+  if(!d.check(sceGxmTextureInitLinear(&alias->descriptor,d.surfaces[sourceBuffer].memory.data(),
+      SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,d.config.width,d.config.height,0),"initialize display source texture")) return false;
+
+  d.back=destination;
+  d.pendingVertexDependency=d.surfaces[sourceBuffer].sync;
+  PipelineDesc p{};
+  p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
+  p.layout.count=2;
+  p.layout.attributes[0]={0,4,VertexScalar::F32,false,28,0};
+  p.layout.attributes[1]={3,3,VertexScalar::F32,false,28,16};
+  p.tev.stages[0].texture=0;p.tev.stages[0].texCoord=0;
+  p.tev.stages[0].color.d=TevColorArg::TexColor;p.tev.stages[0].alpha.d=TevAlphaArg::TexAlpha;
+  const auto key=create_pipeline(p);
+  if(!key) return false;
+  const float u0=float(source.x)/float(d.config.width);
+  const float u1=(float(source.x)+float(source.width))/float(d.config.width);
+  const float v0=float(source.y)/float(d.config.height);
+  const float v1=(float(source.y)+float(source.height))/float(d.config.height);
+  const float du=u1-u0,dv=v1-v0;
+  // GXM's viewport uses negative Y scale, so bottom clip vertices take the
+  // source rectangle's bottom V. This preserves the top-left GX image origin.
+  const float vertices[]{-1,-1,-.5f,1, u0,v1,1,
+                          3,-1,-.5f,1, u0+2*du,v1,1,
+                         -1, 3,-.5f,1, u0,v1-2*dv,1};
+  if(!d.blitVertices) d.blitVertices=create_buffer(vertices,sizeof(vertices));
+  else if(!d.displayCopySourceValid || source.x!=d.displayCopySource.x || source.y!=d.displayCopySource.y ||
+          source.width!=d.displayCopySource.width || source.height!=d.displayCopySource.height) {
+    if(!update_buffer(d.blitVertices,vertices,sizeof(vertices),0,false)) return false;
+  }
+  if(!d.blitVertices) return false;
+  d.displayCopySource=source;d.displayCopySourceValid=true;
+  DrawPacket packet{};packet.pipelineKey=key;
+  packet.vertices={d.blitVertices,0,84};packet.indices={d.clearIndices,0,6};
+  packet.vertexCount=packet.indexCount=3;
+  packet.viewport.width=float(d.config.width);packet.viewport.height=float(d.config.height);
+  packet.scissor.width=d.config.width;packet.scissor.height=d.config.height;
+  packet.textures[0].texture=d.displaySource;
+  packet.textures[0].sampler.wrapS=packet.textures[0].sampler.wrapT=WrapMode::Clamp;
+  packet.textures[0].sampler.minFilter=packet.textures[0].sampler.magFilter=Filter::Linear;
+  const uint64_t beforeDraw=sceKernelGetProcessTimeWide();
+  const bool ok=draw(packet);
+  const uint64_t afterDraw=sceKernelGetProcessTimeWide();
+  static uint64_t displayCopyCount=0;
+  const uint64_t count=++displayCopyCount;
+  if(count<=8 || (count&(count-1))==0) {
+    std::fprintf(stderr,
+      "[aurora-gxm] display_copy n=%llu source=%d,%d %dx%d total_us=%llu end_us=%llu prep_us=%llu draw_us=%llu\n",
+      static_cast<unsigned long long>(count),
+      source.x,source.y,source.width,source.height,
+      static_cast<unsigned long long>(afterDraw-timingStart),
+      static_cast<unsigned long long>(afterEnd-timingStart),
+      static_cast<unsigned long long>(beforeDraw-afterEnd),
+      static_cast<unsigned long long>(afterDraw-beforeDraw));
+  }
+  return ok;
+}
+
 void Renderer::shutdown() noexcept {
   auto& d = *impl_;
   if (d.inScene && d.context) { sceGxmEndScene(d.context, nullptr, nullptr); d.inScene = false; }
@@ -792,7 +1040,7 @@ void Renderer::shutdown() noexcept {
   // Stop scanout before releasing display backing storage.
   if (d.displayed) { sceDisplaySetFrameBuf(nullptr, SCE_DISPLAY_SETBUF_NEXTFRAME); sceDisplayWaitVblankStart(); }
   for (auto& entry : d.pipelines) d.destroy_pipeline(*entry.second);
-  d.pipelines.clear(); d.textures.clear(); d.textureCache.clear(); d.buffers.clear();
+  d.pipelines.clear(); d.stageCache.clear(); d.textures.clear(); d.textureCache.clear(); d.buffers.clear();
   if (d.patcher) { sceGxmShaderPatcherDestroy(d.patcher); d.patcher = nullptr; }
   if (d.ownsCompiler) { shark_clear_output(); shark_install_log_cb(nullptr); shark_end(); d.ownsCompiler = false; }
   if (d.target) { sceGxmDestroyRenderTarget(d.target); d.target = nullptr; }
@@ -803,7 +1051,9 @@ void Renderer::shutdown() noexcept {
   std::free(d.hostMemory); d.hostMemory = nullptr;
   if (d.ownsGxm) { sceGxmTerminate(); d.ownsGxm = false; }
   d.initialized = false; d.displayed = false; d.resourceBytes = 0;
-  d.frameActive=false;d.depthValid=false;d.boundTarget=0;d.blitVertices=0;
+  d.frameActive=false;d.depthValid=false;d.boundTarget=0;d.blitVertices=0;d.displaySource=0;d.copyVertices=0;
+  d.pendingVertexDependency=nullptr;d.displayCopySourceValid=false;d.efbCopyGeometryValid=false;
+  d.stageMemoryHits=0;d.stageCompiles=0;
   d.clearVertices = d.clearIndices = 0; d.clearPipeline = 0;
   d.front = 0; d.back = 1;
 }

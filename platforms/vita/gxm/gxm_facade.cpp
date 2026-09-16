@@ -21,7 +21,8 @@ Handle BufferPool::create_index(const void* data,size_t bytes,bool dynamic) noex
   return create_vertex(data,bytes,dynamic);
 }
 bool BufferPool::update(Handle h,const void* data,size_t bytes,size_t offset) noexcept {
-  return native_ && map_.contains(h) && native_->update_buffer(h,data,bytes,offset);
+  const auto it=map_.find(h);
+  return native_ && it!=map_.end() && native_->update_buffer(h,data,bytes,offset,it->second.dynamic);
 }
 void BufferPool::wait_idle() noexcept { if(native_) native_->finish(); }
 void BufferPool::destroy(Handle h) noexcept {
@@ -203,12 +204,38 @@ Handle EfbManager::upload_rgba(Handle existing,uint32_t width,uint32_t height,co
 Handle EfbManager::capture_from_bound(Handle existing,int32_t x,int32_t y,uint32_t sw,uint32_t sh,
                                       uint32_t dw,uint32_t dh,EfbCopyFormat format,bool,bool flipX,bool flipY) noexcept {
   if(!native_)return 0;
-  std::vector<uint8_t> pixels,copy;
   uint32_t width=0,height=0;
-  if(!native_->read_current(pixels,width,height))return 0;
+  if(boundFbo_) {
+    const auto current=map_.find(boundFbo_);
+    if(current==map_.end())return 0;
+    width=current->second.width;height=current->second.height;
+  } else {
+    width=960;height=544;
+  }
   const int64_t top=int64_t(height)-y-sh;
   if(top<0 || top>INT32_MAX || sw>INT32_MAX || sh>INT32_MAX)return 0;
   const Scissor rect{x,int32_t(top),int32_t(sw),int32_t(sh)};
+  const bool nativeHalfScale=(format==EfbCopyFormat::Passthrough || format==EfbCopyFormat::RGB565) &&
+      sw==dw*2u && sh==dh*2u;
+  if(nativeHalfScale) {
+    Handle target=0;
+    const auto existingIt=map_.find(existing);
+    if(existingIt!=map_.end() && existingIt->second.width==dw && existingIt->second.height==dh)target=existing;
+    else target=create(dw,dh,false);
+    if(!target)return 0;
+    // CPU fallback below consumes top-left rows and applies !flipY after the
+    // legacy framebuffer-origin normalization. Preserve that exact contract in
+    // the native render-to-texture path so GXCopyTex is backend interchangeable.
+    if(native_->copy_current_to_target(target,rect,format,flipX,!flipY)) {
+      if(existing && existing!=target)destroy(existing);
+      return target;
+    }
+    if(target!=existing)destroy(target);
+    return 0;
+  }
+
+  std::vector<uint8_t> pixels,copy;
+  if(!native_->read_current(pixels,width,height))return 0;
   // The shared capture API follows the existing render-texture convention:
   // its first sampled row is the framebuffer's bottom row. Native read_current
   // returns top-left scanout rows, so normalize that origin before user flips.
@@ -243,6 +270,7 @@ bool Renderer::initialize() noexcept {
   if(initialized_)return true;
   gxm::Config c{};c.width=cfg_.width;c.height=cfg_.height;c.displayBuffers=cfg_.displayBuffers;
   c.waitVblank=cfg_.waitVblank;c.resourceBudgetBytes=cfg_.nativeResourceBudget;
+  c.programCachePath=cfg_.programBinaryCachePath;
   c.maxPipelines=cfg_.pipelineBudget+16; // Native clear/blit variants are not GX cache entries.
   if(!native_->initialize(c))return false;
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=native_.get();
@@ -283,6 +311,10 @@ void Renderer::bind_default() noexcept {
 }
 bool Renderer::blit_efb(Handle h) noexcept {
   if(!efb_.blit_to_default(h,cfg_.width,cfg_.height))return false;
+  boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;return true;
+}
+bool Renderer::display_copy(const Scissor& src) noexcept {
+  if(!native_->copy_display_region(src)) {failed_=true;return false;}
   boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;return true;
 }
 Handle Renderer::capture_current(Handle existing,const Scissor& s,uint32_t dw,uint32_t dh,EfbCopyFormat f,bool fx,bool fy) noexcept {

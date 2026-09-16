@@ -193,6 +193,15 @@ bool initialize(const BackendConfig& c) noexcept {
   // The native budget covers persistent streaming buffers as well as textures.
   rc.nativeResourceBudget=c.texture_cache_budget+
       (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  // Native Cg/GXP compilation is expensive enough to stall first-use gameplay.
+  // Keep the generic override, but make the validated GXM cache persistent by
+  // default so games do not need renderer-specific configuration files.
+  rc.programBinaryCachePath=c.program_binary_cache_path ? c.program_binary_cache_path :
+      "ux0:data/aurora-vita/program_cache";
+#else
+  rc.programBinaryCachePath=c.program_binary_cache_path;
+#endif
   g_renderer=std::make_unique<gfx::Renderer>(rc);
   if(!g_renderer->initialize()) {
     g_initFailure=InitFailure::RendererInitFailed;
@@ -280,7 +289,8 @@ void discard_present() noexcept {
 
 void end_frame() noexcept {
   if(!g_initialized) return;
-  g_drawSink->flush(); g_renderer->end_frame();
+  g_drawSink->flush();
+  g_renderer->end_frame();
   const uint64_t presentStart = now_us();
   g_renderer->present(!g_discardPresent);
   const uint64_t end = now_us();

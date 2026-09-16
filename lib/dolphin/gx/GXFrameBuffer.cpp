@@ -470,17 +470,9 @@ void GXCopyDisp(void* dest, GXBool clear) {
   // source rectangle and scale it to the full Vita backbuffer before swap.
   const auto vitaRect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
   const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
-  static aurora::vita::gfx::Handle s_displayCopy = aurora::vita::gfx::InvalidHandle;
   const aurora::vita::gfx::Scissor source{
       vitaRect.x, vitaRect.y, vitaRect.width, vitaRect.height};
-  const auto copied = aurora::vita::renderer().capture_current(
-      s_displayCopy, source,
-      std::max<u32>(targetWidth, 1), std::max<u32>(targetHeight, 1),
-      aurora::vita::gfx::EfbCopyFormat::Passthrough);
-  if (copied != aurora::vita::gfx::InvalidHandle) {
-    s_displayCopy = copied;
-    aurora::vita::renderer().blit_efb(s_displayCopy);
-  } else {
+  if (!aurora::vita::renderer().display_copy(source)) {
     static bool s_warnedDisplayCopy = false;
     if (!s_warnedDisplayCopy) {
       std::printf("[aurora-vita] display copy failed; presenting raw EFB\n");
