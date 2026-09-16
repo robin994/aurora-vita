@@ -1,4 +1,5 @@
 #include "aurora_vita_backend.hpp"
+#include "gfx/vita_fixed_vertex.hpp"
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gx/aurora_vita_draw_sink.hpp"
@@ -210,6 +211,54 @@ bool extended_contract() {
   r.buffers().destroy(vb);r.buffers().destroy(ib);r.textures().erase(texture);r.efb().destroy(target);
   return !r.failed();
 }
+bool fixed_vertex_contract() {
+  using namespace gfx;
+  auto& r=renderer();
+  PipelineDesc p{};
+  p.fixedVertexOnGpu=true;
+  p.reversedZ=false;
+  p.depthTest=false;p.depthWrite=false;p.cull=CullMode::None;
+  p.tev.stages[0].color.d=TevColorArg::Konst;
+  p.tev.stages[0].alpha.d=TevAlphaArg::Konst;
+  p.tev.stages[0].konstColor=KonstColorSel::K0;
+  p.tev.stages[0].konstAlpha=KonstAlphaSel::K0A;
+  p.layout=fixed_vertex_gpu_layout(p);
+  const auto pipeline=r.create_pipeline(p);
+  const float vertices[]{-.75f,-.75f,-.5f,1.f, .75f,-.75f,-.5f,1.f, 0.f,.75f,-.5f,1.f};
+  const uint16_t indices[]{0,1,2};
+  const auto vb=r.create_vertex_buffer(vertices,sizeof(vertices),false);
+  const auto ib=r.create_index_buffer(indices,sizeof(indices),false);
+  const auto target=r.create_efb(64,64,true);
+  if(!pipeline||!vb||!ib||!target||!begin_frame()||!r.bind_efb(target)) {
+    std::fprintf(stderr,"[gx-contract] fixed vertex setup failed pipe=%llu vb=%u ib=%u target=%u err=%s\n",
+      static_cast<unsigned long long>(pipeline),vb,ib,target,r.last_error());
+    return false;
+  }
+  r.clear_current({0,0,0,1},1,true,true,true);
+  FixedVertexUniforms fixed{};
+  DrawPacket draw{};
+  draw.pipelineKey=pipeline;draw.vertices={vb,0,sizeof(vertices)};draw.indices={ib,0,sizeof(indices)};
+  draw.vertexCount=3;draw.indexCount=3;draw.viewport.width=draw.viewport.height=64;
+  draw.scissor.width=draw.scissor.height=64;draw.fixedVertexUniforms=&fixed;
+  draw.uniforms.kcolor[0]={0.125f,0.75f,0.25f,1.f};
+  r.draw(draw);
+  std::vector<uint8_t> pixels;
+  if(r.failed()||!r.efb().read_rgba(target,pixels)||pixels.size()!=64u*64u*4u) {
+    std::fprintf(stderr,"[gx-contract] fixed vertex draw/read failed size=%u err=%s\n",
+      unsigned(pixels.size()),r.last_error());return false;
+  }
+  unsigned colored=0;
+  for(size_t i=0;i<pixels.size();i+=4) {
+    if(pixels[i+1]>128 && pixels[i]>8 && pixels[i+2]>16) ++colored;
+  }
+  if(colored<500) {
+    std::fprintf(stderr,"[gx-contract] fixed vertex output too small colored=%u\n",colored);return false;
+  }
+  r.bind_default();end_frame();
+  r.buffers().destroy(vb);r.buffers().destroy(ib);r.efb().destroy(target);
+  std::fprintf(stderr,"[gx-contract] fixed-PN native GPU vertex PASS colored=%u\n",colored);
+  return !r.failed();
+}
 int run() {
   sceIoMkdir("ux0:data/aurora-vita",0777);
   char path[160];
@@ -221,6 +270,10 @@ int run() {
   config.texture_cache_budget=4*1024*1024;
   config.vgl_circular_pool_size=4*1024*1024;
   config.cpu_worker_threads=0;config.wait_vblank=true;
+  // Exercise the immutable object-space geometry path on both renderers. The
+  // probe intentionally keeps the budget tiny; it only needs to compile and
+  // execute at least one fixed-PN GPU vertex pipeline.
+  config.static_geometry_budget=256*1024;
   // A successful draw count must not hide a missing GXCopyTex binding behind
   // the white fallback texture. This probe only exercises supported GX state.
   config.strict_unsupported=true;
@@ -238,6 +291,9 @@ int run() {
     std::fprintf(stderr,"[gx-contract] extended shader/mipmap FAILED %s\n",renderer().last_error());shutdown();return 8;
   }
   std::fprintf(stderr,"[gx-contract] 20 fog/indirect shader variants and sampled explicit mip chain PASS\n");
+  if(!fixed_vertex_contract()) {
+    std::fprintf(stderr,"[gx-contract] fixed vertex FAILED %s\n",renderer().last_error());shutdown();return 11;
+  }
   setup_gx();
   alignas(32) static std::array<uint8_t,64*64*4> copyDestination{};
   GXTexObj copyTexture{};

@@ -3,6 +3,7 @@
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_vertex_pipeline.hpp"
+#include "gfx/vita_fixed_vertex.hpp"
 #include "gfx/vita_efb_copy.hpp"
 #include "gfx/vita_sampler_units.hpp"
 #include "gxm/gxm_texture_layout.hpp"
@@ -148,7 +149,6 @@ void rejection_tests() {
   };
   auto d = basic(); d.fogMode = FogMode(255); reject(d);
   d = basic(); d.tev.indirectStageCount = 5; reject(d);
-  d = basic(); d.fixedVertexOnGpu = true; reject(d);
   d = basic(); d.polygonOffset = true; reject(d);
   d = basic(); d.blendMode = BlendMode::Logic; d.logicOp=LogicOp::Xor; reject(d);
   d = basic(); d.primitive = Primitive::Lines; reject(d);
@@ -183,6 +183,27 @@ void projection_contract() {
   d.positionIsClipSpace = true;
   source = gxm::build_tev_cg(d);
   REQUIRE(source.vertex.find("u_mvp") == std::string::npos);
+
+  auto fixed = basic();
+  fixed.fixedVertexOnGpu = true;
+  fixed.layout = fixed_vertex_gpu_layout(fixed);
+  source = gxm::build_tev_cg(fixed);
+  REQUIRE(source.ok());
+  REQUIRE(source.vertex.find("u_gx_position[3]") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_material[4]") != std::string::npos);
+  REQUIRE(source.vertex.find("dot(u_gx_position[0],object_pos)") != std::string::npos);
+  fixed.texgenCount=1;
+  fixed.texgens[0].type=TexGenType::Matrix2x4;
+  fixed.texgens[0].source=TexGenSource::Tex0;
+  fixed.texgens[0].matrix=0;
+  fixed.tev.stages[0].texture=0;
+  fixed.tev.stages[0].texCoord=0;
+  fixed.tev.stages[0].color.d=TevColorArg::TexColor;
+  fixed.layout=fixed_vertex_gpu_layout(fixed);
+  source=gxm::build_tev_cg(fixed);
+  REQUIRE(source.ok());
+  REQUIRE(source.vertex.find("u_gx_texture0[3]") != std::string::npos);
+  REQUIRE(source.vertex.find("a_tex0 : TEXCOORD0") != std::string::npos);
   // Check the shared projection's depth contract independently of GPU execution.
   for (const bool reversed : {false, true}) {
     for (const float fraction : {0.f, .25f, .5f, 1.f}) {

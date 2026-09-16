@@ -28,11 +28,7 @@ public:
   const char* last_error() const noexcept;
   bool failed() const noexcept { return failed_; }
   static constexpr bool supports_fixed_vertex() noexcept {
-#if defined(AURORA_VITA_RENDERER_GXM)
-    return false;
-#else
     return true;
-#endif
   }
   static constexpr uint32_t max_indexed_vertices() noexcept {
 #if defined(AURORA_VITA_RENDERER_GXM)

@@ -1,4 +1,5 @@
 #include "gxm_shader_gen.hpp"
+#include "gfx/vita_fixed_vertex.hpp"
 #include <array>
 #include <sstream>
 #include <vector>
@@ -158,7 +159,6 @@ std::string fog_range(const std::string& index) {
 std::string validate_pipeline(const gfx::PipelineDesc& d) {
   if (!d.tev.stageCount || d.tev.stageCount > MaxTevStages || d.texgenCount > MaxTextures)
     return "invalid TEV/texgen count";
-  if (d.fixedVertexOnGpu) return "GXM requires CPU-prepared vertices; fixed GX GPU transform is not implemented";
   if (d.fogMode>FogMode::RevExp2 || d.tev.indirectStageCount>MaxIndStages) return "invalid fog/indirect state";
   if (d.polygonOffset) return "GXM polygon offset is not implemented";
   if (d.blendMode == BlendMode::Logic && d.logicOp!=LogicOp::Clear && d.logicOp!=LogicOp::Copy && d.logicOp!=LogicOp::Noop)
@@ -205,19 +205,41 @@ std::string validate_pipeline(const gfx::PipelineDesc& d) {
   if (!stride || stride % 4) return "vertex stride must be a nonzero multiple of four";
   for (unsigned i = 0; i < d.layout.count; ++i) {
     const auto& a = d.layout.attributes[i];
-    if (a.location > 10 || supplied & (1u << a.location) || a.stride != stride || !a.components || a.components > 4 ||
+    if (a.location > 13 || supplied & (1u << a.location) || a.stride != stride || !a.components || a.components > 4 ||
         a.scalar > VertexScalar::U16) return "invalid or duplicate vertex attribute";
     const unsigned scalar = a.scalar == VertexScalar::F32 ? 4 : (a.scalar == VertexScalar::U16 || a.scalar == VertexScalar::S16 ? 2 : 1);
     if (a.offset % scalar || static_cast<unsigned>(a.offset) + a.components * scalar > stride)
       return "vertex attribute exceeds its stride or is misaligned";
     if (a.location == 0 && (a.components != 4 || a.scalar != VertexScalar::F32)) return "position must be float4";
-    if (a.location >= 3 && a.components != 3) return "prepared texture coordinates must have three components";
+    if (a.location >= 3 && a.location <= 10 && a.components != 3) return "prepared texture coordinates must have three components";
+    if (a.location >= 11 && a.components != 3) return "fixed GX basis inputs must have three components";
     if ((a.location == 1 || a.location == 2) && a.components != 4) return "prepared colors must have four components";
     supplied |= 1u << a.location;
   }
-  const uint32_t required = 1u | (uint32_t(pipeline_raster_color_mask(d)) << 1) | (uint32_t(pipeline_texcoord_mask(d)) << 3);
+  uint32_t required = 0;
+  if (d.fixedVertexOnGpu) {
+    const auto expected = fixed_vertex_gpu_layout(d);
+    for (unsigned i=0;i<expected.count;++i) required |= 1u << expected.attributes[i].location;
+  } else {
+    required = 1u | (uint32_t(pipeline_raster_color_mask(d)) << 1) | (uint32_t(pipeline_texcoord_mask(d)) << 3);
+  }
   if ((supplied & required) != required) return "vertex layout does not provide all shader inputs";
   return {};
+}
+
+std::string fixed_vertex_source_cg(TexGenSource source) {
+  switch(source) {
+  case TexGenSource::Position:return "float4(a_position.xyz,1.0)";
+  case TexGenSource::Normal:return "float4(a_normal,1.0)";
+  case TexGenSource::Binormal:return "float4(a_binormal,1.0)";
+  case TexGenSource::Tangent:return "float4(a_tangent,1.0)";
+  case TexGenSource::Color0:return "a_color0";
+  case TexGenSource::Color1:return "a_color1";
+  default: {
+    const unsigned i=static_cast<unsigned>(source)-static_cast<unsigned>(TexGenSource::Tex0);
+    return i<MaxTextures?"float4(a_tex"+std::to_string(i)+".xy,1.0,1.0)":"float4(0.0,0.0,1.0,1.0)";
+  }
+  }
 }
 
 ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
@@ -234,31 +256,80 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
       "uniform float4 u_ind_mtx[6]", "uniform float4 u_texcoord_scale[8]", "uniform float4 u_texture_size_bias[8]",
       "uniform float4 u_fog_color", "uniform float4 u_fog_params", "uniform float u_fog_range_k[10]",
       "uniform float u_render_viewport_width"};
-  if (!d.positionIsClipSpace) vp.push_back("uniform float4 u_mvp[4]");
+  if (!d.positionIsClipSpace || d.fixedVertexOnGpu) vp.push_back("uniform float4 u_mvp[4]");
+  const auto fixedInputs=d.fixedVertexOnGpu?fixed_vertex_gpu_inputs(d):VertexSemanticMask{};
   for (unsigned i = 0; i < 2; ++i) if (out.colorMask & (1u << i)) {
     const auto n = std::to_string(i);
-    vp.push_back("float4 a_color" + n + " : COLOR" + n);
+    if(!d.fixedVertexOnGpu || (fixedInputs&vertex_semantic_bit(i?VertexSemantic::Color1:VertexSemantic::Color0)))
+      vp.push_back("float4 a_color" + n + " : COLOR" + n);
     vp.push_back("out float4 v_color" + n + " : COLOR" + n);
     fp.push_back("float4 v_color" + n + " : COLOR" + n);
   }
+  if(d.fixedVertexOnGpu) {
+    if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))vp.push_back("float3 a_normal : TEXCOORD8");
+    if(fixedInputs&vertex_semantic_bit(VertexSemantic::Binormal))vp.push_back("float3 a_binormal : TEXCOORD9");
+    if(fixedInputs&vertex_semantic_bit(VertexSemantic::Tangent))vp.push_back("float3 a_tangent : TEXCOORD10");
+    vp.push_back("uniform float4 u_gx_position[3]");
+    vp.push_back("uniform float4 u_gx_material[4]");
+  }
   for (unsigned i = 0; i < MaxTextures; ++i) {
     const auto n = std::to_string(i);
-    if (out.texcoordMask & (1u << i)) {
+    const bool fixedInput=d.fixedVertexOnGpu &&
+      (fixedInputs&vertex_semantic_bit(static_cast<VertexSemantic>(static_cast<unsigned>(VertexSemantic::Tex0)+i)));
+    if ((!d.fixedVertexOnGpu && (out.texcoordMask & (1u << i))) || fixedInput)
       vp.push_back("float3 a_tex" + n + " : TEXCOORD" + n);
+    if (out.texcoordMask & (1u << i)) {
       vp.push_back("out float3 v_tex" + n + " : TEXCOORD" + n);
       fp.push_back("float3 v_tex" + n + " : TEXCOORD" + n);
+      if(d.fixedVertexOnGpu && i<d.texgenCount) {
+        const auto& t=d.texgens[i];
+        if(t.matrix>=0&&t.type!=TexGenType::SRTG)vp.push_back("uniform float4 u_gx_texture"+n+"[3]");
+        if(t.postMatrix>=0)vp.push_back("uniform float4 u_gx_post"+n+"[3]");
+      }
     }
     if (out.textureMask & (1u << i)) fp.push_back("uniform sampler2D u_tex" + n + " : TEXUNIT" + n);
   }
-  vs << "void main(\n"; signature(vs, vp); vs << "){\nfloat4 p=";
-  if (d.positionIsClipSpace) vs << "a_position;\n";
-  else vs << "u_mvp[0]*a_position.x+u_mvp[1]*a_position.y+u_mvp[2]*a_position.z+u_mvp[3]*a_position.w;\n";
+  vs << "void main(\n"; signature(vs, vp); vs << "){\n";
+  if(d.fixedVertexOnGpu) {
+    vs << "float4 object_pos=float4(a_position.xyz,1.0);\n"
+          "float3 mv=float3(dot(u_gx_position[0],object_pos),dot(u_gx_position[1],object_pos),dot(u_gx_position[2],object_pos));\n"
+          "float4 p=u_mvp[0]*mv.x+u_mvp[1]*mv.y+u_mvp[2]*mv.z+u_mvp[3]*a_position.w;\n";
+  } else {
+    vs << "float4 p=";
+    if (d.positionIsClipSpace) vs << "a_position;\n";
+    else vs << "u_mvp[0]*a_position.x+u_mvp[1]*a_position.y+u_mvp[2]*a_position.z+u_mvp[3]*a_position.w;\n";
+  }
   // Shared projection values retain Aurora's GX depth convention. With the
   // native viewport zOffset/zScale=(near+far)/2,(far-near)/2 this is the same
   // effective depth as the existing renderer, without an OpenGL call.
   vs << (d.reversedZ ? "p.z=-2.0*p.z-p.w;\n" : "p.z=2.0*p.z+p.w;\n") << "v_position=p;\n";
-  for (unsigned i = 0; i < 2; ++i) if (out.colorMask & (1u << i)) vs << "v_color" << i << "=a_color" << i << ";\n";
-  for (unsigned i = 0; i < MaxTextures; ++i) if (out.texcoordMask & (1u << i)) vs << "v_tex" << i << "=a_tex" << i << ";\n";
+  if(d.fixedVertexOnGpu) {
+    vs << "float3 gxq;float gxi;\n";
+    for(unsigned i=0;i<2;++i)if(out.colorMask&(1u<<i)) {
+      const auto n=std::to_string(i);
+      if(d.colorChannels[i].materialSource==ColorSource::Vertex)vs<<"v_color"<<n<<".rgb=a_color"<<n<<".rgb;\n";
+      else vs<<"gxq=clamp(u_gx_material["<<i<<"].rgb*255.0,0.0,255.0);v_color"<<n<<".rgb=floor(gxq+0.5)/255.0;\n";
+      if(d.colorChannels[i+2].materialSource==ColorSource::Vertex)vs<<"v_color"<<n<<".a=a_color"<<n<<".a;\n";
+      else vs<<"gxi=clamp(u_gx_material["<<i+2<<"].a*255.0,0.0,255.0);v_color"<<n<<".a=floor(gxi+0.5)/255.0;\n";
+    }
+    for(unsigned i=0;i<MaxTextures;++i)if(out.texcoordMask&(1u<<i)) {
+      const auto n=std::to_string(i);
+      if(i>=d.texgenCount){vs<<"v_tex"<<n<<"=a_tex"<<n<<";\n";continue;}
+      const auto& t=d.texgens[i];
+      vs<<"{float4 src="<<fixed_vertex_source_cg(t.source)<<";float3 tc;\n";
+      if(t.type==TexGenType::SRTG)vs<<"tc=float3(src.xy,1.0);\n";
+      else if(t.matrix<0)vs<<"tc=src.xyz;\n";
+      else vs<<"tc=float3(dot(u_gx_texture"<<n<<"[0],src),dot(u_gx_texture"<<n<<"[1],src),dot(u_gx_texture"<<n<<"[2],src));\n";
+      if(t.type==TexGenType::Matrix2x4)vs<<"tc.z=1.0;\n";
+      if(t.normalize)vs<<"float l=sqrt(dot(tc,tc));tc=l>0.0000000001?tc/l:float3(0.0);\n";
+      if(t.postMatrix>=0)vs<<"float4 pt=float4(tc,1.0);tc=float3(dot(u_gx_post"<<n<<"[0],pt),dot(u_gx_post"<<n<<"[1],pt),dot(u_gx_post"<<n<<"[2],pt));\n";
+      if(t.type!=TexGenType::Matrix3x4)vs<<"tc.z=1.0;\n";
+      vs<<"v_tex"<<n<<"=tc;}\n";
+    }
+  } else {
+    for (unsigned i = 0; i < 2; ++i) if (out.colorMask & (1u << i)) vs << "v_color" << i << "=a_color" << i << ";\n";
+    for (unsigned i = 0; i < MaxTextures; ++i) if (out.texcoordMask & (1u << i)) vs << "v_tex" << i << "=a_tex" << i << ";\n";
+  }
   vs << "}\n";
   fs << "float tev_wrap1(float v){float b=v*255.0;return (b-floor(b/256.0)*256.0)/255.0;}\n"
         "float3 tev_wrap3(float3 v){float3 b=v*255.0;return (b-floor(b/256.0)*256.0)/255.0;}\n"

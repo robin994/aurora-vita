@@ -54,7 +54,8 @@ public:
   bool blit_to_default(gfx::Handle handle);
   bool copy_display_region(const gfx::Scissor& source);
   bool draw(const gfx::DrawPacket& packet);
-  bool bind_pipeline(uint64_t key,const gfx::GpuDrawUniforms& uniforms,const gfx::Scissor& scissor={});
+  bool bind_pipeline(uint64_t key,const gfx::GpuDrawUniforms& uniforms,const gfx::Scissor& scissor={},
+                     const gfx::FixedVertexUniforms* fixedVertex=nullptr);
   bool bind_texture(gfx::Handle handle,unsigned unit,const gfx::SamplerDesc& sampler);
   bool end_frame(bool present = true);
   // Diagnostic synchronization/readback, never part of the normal frame loop.

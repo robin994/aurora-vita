@@ -140,6 +140,9 @@ struct Renderer::Impl {
     const SceGxmProgramParameter *mvp = nullptr, *kcolor = nullptr, *tevreg = nullptr, *clip = nullptr;
     const SceGxmProgramParameter *fogColor=nullptr,*fogParams=nullptr,*fogRange=nullptr,*viewportWidth=nullptr;
     const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr;
+    const SceGxmProgramParameter *gxPosition=nullptr,*gxMaterial=nullptr;
+    std::array<const SceGxmProgramParameter*,MaxTextures> gxTexture{};
+    std::array<const SceGxmProgramParameter*,MaxTextures> gxPost{};
     uint8_t textureMask = 0;
     bool inFlight = false;
   };
@@ -396,7 +399,10 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
     char name[24];
     if (!a.location) std::snprintf(name, sizeof(name), "a_position");
     else if (a.location < 3) std::snprintf(name, sizeof(name), "a_color%u", unsigned(a.location - 1));
-    else std::snprintf(name, sizeof(name), "a_tex%u", unsigned(a.location - 3));
+    else if (a.location <= 10) std::snprintf(name, sizeof(name), "a_tex%u", unsigned(a.location - 3));
+    else if (a.location == 11) std::snprintf(name, sizeof(name), "a_normal");
+    else if (a.location == 12) std::snprintf(name, sizeof(name), "a_binormal");
+    else std::snprintf(name, sizeof(name), "a_tangent");
     const auto* parameter = sceGxmProgramFindParameterByName(vp, name);
     if (!parameter) continue; // Optimized out, no hardware stream binding needed.
     if (sceGxmProgramParameterGetCategory(parameter) != SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE) {
@@ -427,6 +433,15 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.indirectMatrices=sceGxmProgramFindParameterByName(fp,"u_ind_mtx");
   p.texcoordScale=sceGxmProgramFindParameterByName(fp,"u_texcoord_scale");
   p.textureSizeBias=sceGxmProgramFindParameterByName(fp,"u_texture_size_bias");
+  p.gxPosition=sceGxmProgramFindParameterByName(vp,"u_gx_position");
+  p.gxMaterial=sceGxmProgramFindParameterByName(vp,"u_gx_material");
+  for(unsigned i=0;i<MaxTextures;++i) {
+    char name[32];
+    std::snprintf(name,sizeof(name),"u_gx_texture%u",i);
+    p.gxTexture[i]=sceGxmProgramFindParameterByName(vp,name);
+    std::snprintf(name,sizeof(name),"u_gx_post%u",i);
+    p.gxPost[i]=sceGxmProgramFindParameterByName(vp,name);
+  }
   d.pipelines.emplace(key, std::move(pipeline));
   ++d.stats.pipelineMisses;
   return key;
@@ -546,7 +561,8 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s) {
   return true;
 }
 
-bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor& scissor) {
+bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor& scissor,
+                             const FixedVertexUniforms* fixedVertex) {
   auto& d=*impl_;
   const auto it=d.pipelines.find(key);
   if(it==d.pipelines.end()) return d.fail("unknown native pipeline");
@@ -563,8 +579,23 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
       pipeline.cull==CullMode::Back?SCE_GXM_CULL_CCW:SCE_GXM_CULL_CW);
   const float clip[]{float(scissor.x),float(scissor.y),float(int64_t(scissor.x)+scissor.width),float(int64_t(scissor.y)+scissor.height)};
   void* vertex=nullptr;
-  if(p.mvp && (!d.check(sceGxmReserveVertexDefaultUniformBuffer(d.context,&vertex),"reserve vertex uniforms") ||
-      !d.check(sceGxmSetUniformDataF(vertex,p.mvp,0,16,u.mvp.data()),"upload projection"))) return false;
+  const bool needsVertexUniforms=p.mvp || (pipeline.fixedVertexOnGpu && fixedVertex);
+  if(needsVertexUniforms && !d.check(sceGxmReserveVertexDefaultUniformBuffer(d.context,&vertex),"reserve vertex uniforms")) return false;
+  const auto uploadVertex=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
+    if(!param) return true;
+    count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
+    return d.check(sceGxmSetUniformDataF(vertex,param,0,count,data),"upload vertex uniform");
+  };
+  if(p.mvp && !uploadVertex(p.mvp,16,u.mvp.data())) return false;
+  if(pipeline.fixedVertexOnGpu) {
+    if(!fixedVertex) return d.fail("missing fixed GX vertex uniforms");
+    if(!uploadVertex(p.gxPosition,12,fixedVertex->position.data()) ||
+       !uploadVertex(p.gxMaterial,16,fixedVertex->material[0].data())) return false;
+    for(unsigned i=0;i<MaxTextures;++i) {
+      if(!uploadVertex(p.gxTexture[i],12,fixedVertex->texture[i].data()) ||
+         !uploadVertex(p.gxPost[i],12,fixedVertex->post[i].data())) return false;
+    }
+  }
   void* fragment=nullptr;
   if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
   const auto upload=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
@@ -590,7 +621,8 @@ bool Renderer::draw(const DrawPacket& packet) {
   if (pi == d.pipelines.end() || vi == d.buffers.end() || ii == d.buffers.end()) return d.fail("unknown pipeline or buffer handle");
   const auto& p = *pi->second;
   const auto& pipeline = p.desc;
-  if (packet.instanceCount != 1 || packet.fixedVertexUniforms || !packet.indexCount || packet.firstVertex ||
+  if (packet.instanceCount != 1 || (pipeline.fixedVertexOnGpu != (packet.fixedVertexUniforms != nullptr)) ||
+      !packet.indexCount || packet.firstVertex ||
       !is_slice_valid(packet.vertices, vi->second.bytes) || !is_slice_valid(packet.indices, ii->second.bytes) ||
       packet.vertices.offset % 4 || packet.indices.offset % 2 || packet.indexCount > packet.indices.size / 2)
     return d.fail("invalid native indexed draw");
@@ -611,7 +643,7 @@ bool Renderer::draw(const DrawPacket& packet) {
       return d.fail("vertex index outside the supplied slice or GXM range");
   }
   if (pipeline.cull == CullMode::All || packet.scissor.width <= 0 || packet.scissor.height <= 0) return true;
-  if(!bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor)) return false;
+  if(!bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms)) return false;
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
     if(!bind_texture(packet.textures[i].texture,i,packet.textures[i].sampler)) return false;
   const float low = std::min(vp.znear, vp.zfar), high = std::max(vp.znear, vp.zfar);
