@@ -681,6 +681,9 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(!d.ensure_scene()) return false;
   auto& p=*it->second;
   const auto& pipeline=p.desc;
+  unsigned usedTextureCount=0;
+  for(unsigned i=0;i<MaxTextures;++i)
+    if(p.textureMask&(1u<<i)) usedTextureCount=i+1;
   if(!d.pipelineStateValid||d.boundPipelineKey!=key) {
     sceGxmSetVertexProgram(d.context,p.vertex);
     sceGxmSetFragmentProgram(d.context,p.fragment);
@@ -714,7 +717,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   void* fragment=nullptr;
   if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
   const auto upload=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
-    if(!param) return true;
+    if(!param || !count) return true;
     count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
     return d.check(sceGxmSetUniformDataF(fragment,param,0,count,data),"upload fragment uniform");
   };
@@ -722,30 +725,30 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(!upload(p.fogColor,4,u.fogColor.data()) || !upload(p.fogParams,4,u.fogParams.data()) ||
      !upload(p.fogRange,10,u.fogRangeK.data()) || !upload(p.viewportWidth,1,&u.renderViewportWidth) ||
      !upload(p.indirectMatrices,MaxIndMatrices*8,u.indirectMatrices[0].data()) ||
-     !upload(p.texcoordScale,MaxTextures*4,u.texcoordScale[0].data()) ||
-     !upload(p.textureSizeBias,MaxTextures*4,u.textureSizeBias[0].data()))return false;
+     !upload(p.texcoordScale,usedTextureCount*4,u.texcoordScale[0].data()) ||
+     !upload(p.textureSizeBias,usedTextureCount*4,u.textureSizeBias[0].data()))return false;
   if(p.textureTransform) {
     std::array<std::array<float,4>,MaxTextures> transform{};
-    for(unsigned i=0;i<MaxTextures;++i) {
+    for(unsigned i=0;i<usedTextureCount;++i) {
       const bool flipX=textures&&(*textures)[i].flipX;
       const bool flipY=textures&&(*textures)[i].flipY;
       transform[i]={flipX?-1.f:1.f,flipY?-1.f:1.f,flipX?1.f:0.f,flipY?1.f:0.f};
     }
-    if(!upload(p.textureTransform,MaxTextures*4,transform[0].data()))return false;
+    if(!upload(p.textureTransform,usedTextureCount*4,transform[0].data()))return false;
   }
   if(p.textureWrap) {
     std::array<std::array<float,4>,MaxTextures> wrap{};
-    for(unsigned i=0;i<MaxTextures;++i) {
+    for(unsigned i=0;i<usedTextureCount;++i) {
       const auto wrapS=textures?(*textures)[i].sampler.wrapS:WrapMode::Clamp;
       const auto wrapT=textures?(*textures)[i].sampler.wrapT:WrapMode::Clamp;
       wrap[i]={float(static_cast<unsigned>(wrapS)),float(static_cast<unsigned>(wrapT)),0.f,0.f};
     }
-    if(!upload(p.textureWrap,MaxTextures*4,wrap[0].data()))return false;
+    if(!upload(p.textureWrap,usedTextureCount*4,wrap[0].data()))return false;
   }
   if(p.textureForceOpaque) {
     std::array<float,MaxTextures> opaque{};
-    for(unsigned i=0;i<MaxTextures;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
-    if(!upload(p.textureForceOpaque,MaxTextures,opaque.data()))return false;
+    for(unsigned i=0;i<usedTextureCount;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
+    if(!upload(p.textureForceOpaque,usedTextureCount,opaque.data()))return false;
   }
   p.inFlight=true;
   return true;
