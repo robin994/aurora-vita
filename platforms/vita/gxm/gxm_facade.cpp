@@ -336,6 +336,7 @@ void Renderer::draw(const DrawPacket& packet) noexcept {
   if(failed_)return;
   if(!native_->draw(packet)) {failed_=true;return;}
   const auto& s=native_->stats();stats_.drawCalls=s.drawCalls;stats_.triangles=s.triangles;
+  stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;stats_.nativeDrawUs=s.nativeDrawUs;
 }
 void Renderer::execute(const CommandStream& stream) noexcept {
   for(const auto& c:stream.commands()) {

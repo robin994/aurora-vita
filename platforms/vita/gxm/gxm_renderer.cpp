@@ -129,6 +129,7 @@ struct Renderer::Impl {
     SceGxmSyncObject* sync = nullptr;
     uint32_t width = 0, height = 0, stride = 0;
     uint32_t mipCount = 1;
+    bool swizzled = false;
     bool inFlight = false, depthValid = false;
     ~Texture() {
       if (sync) sceGxmSyncObjectDestroy(sync);
@@ -146,7 +147,7 @@ struct Renderer::Impl {
     SceGxmFragmentProgram* fragment = nullptr;
     const SceGxmProgramParameter *mvp = nullptr, *kcolor = nullptr, *tevreg = nullptr, *clip = nullptr;
     const SceGxmProgramParameter *fogColor=nullptr,*fogParams=nullptr,*fogRange=nullptr,*viewportWidth=nullptr;
-    const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr,*textureTransform=nullptr,*textureForceOpaque=nullptr;
+    const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr,*textureTransform=nullptr,*textureWrap=nullptr,*textureForceOpaque=nullptr;
     const SceGxmProgramParameter *gxPosition=nullptr,*gxMaterial=nullptr;
     std::array<const SceGxmProgramParameter*,MaxTextures> gxTexture{};
     std::array<const SceGxmProgramParameter*,MaxTextures> gxPost{};
@@ -154,6 +155,8 @@ struct Renderer::Impl {
     bool inFlight = false;
   };
   Config config{};
+  uint64_t profileFrame = 0;
+  bool profileDraws = false;
   SceGxmContext* context = nullptr;
   SceGxmRenderTarget* target = nullptr;
   SceGxmShaderPatcher* patcher = nullptr;
@@ -451,6 +454,7 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.texcoordScale=sceGxmProgramFindParameterByName(fp,"u_texcoord_scale");
   p.textureSizeBias=sceGxmProgramFindParameterByName(fp,"u_texture_size_bias");
   p.textureTransform=sceGxmProgramFindParameterByName(fp,"u_tex_transform");
+  p.textureWrap=sceGxmProgramFindParameterByName(fp,"u_tex_wrap");
   p.textureForceOpaque=sceGxmProgramFindParameterByName(fp,"u_tex_force_opaque");
   p.gxPosition=sceGxmProgramFindParameterByName(vp,"u_gx_position");
   p.gxMaterial=sceGxmProgramFindParameterByName(vp,"u_gx_material");
@@ -494,7 +498,9 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
     const auto it = d.textureCache.find(key);
     if (it != d.textureCache.end()) { ++d.stats.textureHits; return it->second; }
   }
-  auto pixels=prepare_linear_texture(desc);
+  const bool swizzled=(desc.width&(desc.width-1u))==0 &&
+      (desc.height&(desc.height-1u))==0 && desc.mipCount<=1 && !desc.generateMipmaps;
+  auto pixels=swizzled?prepare_swizzled_texture(desc):prepare_linear_texture(desc);
   if(!pixels.ok()) {d.fail(pixels.error.c_str());return 0;}
   const uint32_t rowBytes = ((desc.width + 7u) & ~7u) * 4u;
   const size_t bytes=pixels.pixels.size();
@@ -503,13 +509,18 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
   auto& texture = *owned;
   texture.width=desc.width; texture.height=desc.height; texture.stride=rowBytes/4;
   texture.mipCount=pixels.mipCount;
+  texture.swizzled=swizzled;
   if (!d.alloc(texture.memory, bytes, MemoryKind::CpuGpu)) return 0;
   std::memcpy(texture.memory.data(),pixels.pixels.data(),bytes);
   // Ordinary linear textures permit sampler filter changes. LINEAR_STRIDED
   // rejects them with SCE_GXM_ERROR_UNSUPPORTED on hardware. The native linear
   // RGBA8 layout has the same eight-texel row padding used above.
-  if (!d.check(sceGxmTextureInitLinear(&texture.descriptor, texture.memory.data(),
-      SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, desc.width, desc.height, texture.mipCount), "initialize native texture")) return 0;
+  const int textureResult=swizzled?
+      sceGxmTextureInitSwizzled(&texture.descriptor, texture.memory.data(),
+          SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, desc.width, desc.height, texture.mipCount):
+      sceGxmTextureInitLinear(&texture.descriptor, texture.memory.data(),
+          SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, desc.width, desc.height, texture.mipCount);
+  if (!d.check(textureResult, "initialize native texture")) return 0;
   d.resourceBytes += texture.memory.size();
   const Handle handle = d.nextHandle++;
   d.textures.emplace(handle, std::move(owned));
@@ -525,6 +536,7 @@ bool Renderer::begin_frame() {
   const int displayError = d.displayError.load(std::memory_order_relaxed);
   if (displayError < 0) return d.fail("display callback failed", displayError);
   d.stats = {}; d.frameStarted = sceKernelGetProcessTimeWide();
+  d.profileDraws = (++d.profileFrame % 120u) == 60u;
   d.frameActive = true; d.boundTarget = 0;
   return true;
 }
@@ -539,6 +551,7 @@ bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool
   if (!std::isfinite(depth) || depth<0.f || depth>1.f) return d.fail("invalid clear depth");
   if (!rgb && !alpha && !writeDepth) return true;
   auto desc=d.pipelines.at(d.clearPipeline)->desc;
+  desc.fragmentScissor=false; // The clear always covers the complete target.
   desc.colorWrite=rgb; desc.alphaWrite=alpha; desc.depthWrite=writeDepth;
   const auto key=create_pipeline(desc);
   if (!key) return false;
@@ -573,10 +586,14 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s) {
   const bool trilinear=s.minFilter==Filter::NearestMipmapLinear || s.minFilter==Filter::LinearMipmapLinear;
   const unsigned mips=useMips?std::min(it->second->mipCount,unsigned(std::min(std::floor(s.maxLod),12.f))+1u):1u;
   const unsigned bias=native_lod_bias(s.lodBias);
+  const auto address=[&](WrapMode mode) {
+    if (!it->second->swizzled || mode==WrapMode::Clamp) return SCE_GXM_TEXTURE_ADDR_CLAMP;
+    return mode==WrapMode::Repeat?SCE_GXM_TEXTURE_ADDR_REPEAT:SCE_GXM_TEXTURE_ADDR_MIRROR;
+  };
   if(!d.check(sceGxmTextureSetMinFilter(&texture,point?SCE_GXM_TEXTURE_FILTER_POINT:SCE_GXM_TEXTURE_FILTER_LINEAR),"texture min filter") ||
      !d.check(sceGxmTextureSetMagFilter(&texture,s.magFilter==Filter::Nearest?SCE_GXM_TEXTURE_FILTER_POINT:SCE_GXM_TEXTURE_FILTER_LINEAR),"texture mag filter") ||
-     !d.check(sceGxmTextureSetUAddrMode(&texture,address_mode(s.wrapS)),"texture U wrap") ||
-     !d.check(sceGxmTextureSetVAddrMode(&texture,address_mode(s.wrapT)),"texture V wrap") ||
+     !d.check(sceGxmTextureSetUAddrMode(&texture,address(s.wrapS)),"texture U wrap") ||
+     !d.check(sceGxmTextureSetVAddrMode(&texture,address(s.wrapT)),"texture V wrap") ||
      !d.check(sceGxmTextureSetMipmapCount(&texture,mips),"texture mip count") ||
      !d.check(sceGxmTextureSetMipFilter(&texture,useMips&&trilinear?SCE_GXM_TEXTURE_MIP_FILTER_ENABLED:SCE_GXM_TEXTURE_MIP_FILTER_DISABLED),"texture mip filter") ||
      !d.check(sceGxmTextureSetLodBias(&texture,bias),"texture LOD bias") ||
@@ -648,6 +665,15 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     }
     if(!upload(p.textureTransform,MaxTextures*4,transform[0].data()))return false;
   }
+  if(p.textureWrap) {
+    std::array<std::array<float,4>,MaxTextures> wrap{};
+    for(unsigned i=0;i<MaxTextures;++i) {
+      const auto wrapS=textures?(*textures)[i].sampler.wrapS:WrapMode::Clamp;
+      const auto wrapT=textures?(*textures)[i].sampler.wrapT:WrapMode::Clamp;
+      wrap[i]={float(static_cast<unsigned>(wrapS)),float(static_cast<unsigned>(wrapT)),0.f,0.f};
+    }
+    if(!upload(p.textureWrap,MaxTextures*4,wrap[0].data()))return false;
+  }
   if(p.textureForceOpaque) {
     std::array<float,MaxTextures> opaque{};
     for(unsigned i=0;i<MaxTextures;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
@@ -665,6 +691,11 @@ bool Renderer::draw(const DrawPacket& packet) {
   if (pi == d.pipelines.end() || vi == d.buffers.end() || ii == d.buffers.end()) return d.fail("unknown pipeline or buffer handle");
   const auto& p = *pi->second;
   const auto& pipeline = p.desc;
+  for (unsigned unit=0;unit<MaxTextures;++unit) if (pipeline.nativeTextureWrapMask&(1u<<unit)) {
+    const auto texture=d.textures.find(packet.textures[unit].texture);
+    if(texture==d.textures.end() || !texture->second->swizzled)
+      return d.fail("native wrapping requires a swizzled texture");
+  }
   if (packet.instanceCount != 1 || (pipeline.fixedVertexOnGpu != (packet.fixedVertexUniforms != nullptr)) ||
       !packet.indexCount || packet.firstVertex ||
       !is_slice_valid(packet.vertices, vi->second.bytes) || !is_slice_valid(packet.indices, ii->second.bytes) ||
@@ -689,9 +720,17 @@ bool Renderer::draw(const DrawPacket& packet) {
   }
 #endif
   if (pipeline.cull == CullMode::All || packet.scissor.width <= 0 || packet.scissor.height <= 0) return true;
+  if (!pipeline.fragmentScissor &&
+      (packet.scissor.x > 0 || packet.scissor.y > 0 ||
+       int64_t(packet.scissor.x) + packet.scissor.width < d.width() ||
+       int64_t(packet.scissor.y) + packet.scissor.height < d.height()))
+    return d.fail("full-target pipeline requires a full-target scissor");
+  uint64_t profileTick = d.profileDraws ? sceKernelGetProcessTimeWide() : 0;
   if(!bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures)) return false;
+  if(d.profileDraws) { const auto now=sceKernelGetProcessTimeWide(); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
     if(!bind_texture(packet.textures[i].texture,i,packet.textures[i].sampler)) return false;
+  if(d.profileDraws) { const auto now=sceKernelGetProcessTimeWide(); d.stats.nativeTextureUs+=now-profileTick; profileTick=now; }
   if(!d.viewportValid||!same_viewport(d.cachedViewport,vp)) {
     const float low = std::min(vp.znear, vp.zfar), high = std::max(vp.znear, vp.zfar);
     sceGxmSetViewport(d.context, vp.x + vp.width * .5f, vp.width * .5f,
@@ -702,6 +741,7 @@ bool Renderer::draw(const DrawPacket& packet) {
   const auto primitive = pipeline.primitive == Primitive::Triangles ? SCE_GXM_PRIMITIVE_TRIANGLES :
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
   if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;
+  if(d.profileDraws) d.stats.nativeDrawUs+=sceKernelGetProcessTimeWide()-profileTick;
   pi->second->inFlight = true;
   vi->second.inFlight = true; ii->second.inFlight = true;
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))

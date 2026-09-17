@@ -9,6 +9,8 @@ uint64_t pipeline_key(const PipelineDesc& d) noexcept {
   add(h,d.layout.count);for(unsigned i=0;i<d.layout.count&&i<MaxVertexAttributes;i++){const auto&a=d.layout.attributes[i];add(h,a.location);add(h,a.components);add(h,a.scalar);add(h,a.normalized);add(h,a.stride);add(h,a.offset);}
   add(h,d.texgenCount);for(unsigned i=0;i<d.texgenCount&&i<MaxTextures;i++){const auto&t=d.texgens[i];add(h,t.type);add(h,t.source);add(h,t.matrix);add(h,t.postMatrix);add(h,t.embossSource);add(h,t.normalize);add(h,t.matrixFromVertex);}
   add(h,d.fixedVertexOnGpu);
+  add(h,d.fragmentScissor);
+  add(h,d.nativeTextureWrapMask);
   for(const auto&c:d.colorChannels){add(h,c.materialSource);add(h,c.ambientSource);add(h,c.diffuse);add(h,c.attenuation);add(h,c.lightingEnabled);}
   add(h,d.tev.stageCount);add(h,d.tev.texCoordCount);add(h,d.tev.rasterColorCount);add(h,d.tev.indirectStageCount);
   for(const auto&s:d.tev.swapTable){add(h,s.r);add(h,s.g);add(h,s.b);add(h,s.a);}

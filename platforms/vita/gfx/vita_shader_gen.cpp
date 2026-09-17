@@ -188,7 +188,8 @@ std::string alpha_arg_expr(TevAlphaArg a,const TevStage&s,const std::array<bool,
 }
 
 std::string color_calc(const TevStage& s,const std::array<bool,4>&cn,const std::array<bool,4>&an) {
-  const auto A=color_arg_expr(s.color.a,s,cn,an),B=color_arg_expr(s.color.b,s,cn,an),C=color_arg_expr(s.color.c,s,cn,an),D=color_arg_expr(s.color.d,s,cn,an);
+  // Unlike the eight-bit A/B/C inputs, GX D retains the signed accumulator.
+  const auto A=color_arg_expr(s.color.a,s,cn,an),B=color_arg_expr(s.color.b,s,cn,an),C=color_arg_expr(s.color.c,s,cn,an),D=carg(s.color.d,s);
   std::string e;
   switch (s.colorOp) {
   case TevOp::Add: e = "(" + D + " + mix(" + A + ", " + B + ", " + C + ") " + bias(s.colorBias) + ") * " + scale(s.colorScale); break;
@@ -207,7 +208,7 @@ std::string color_calc(const TevStage& s,const std::array<bool,4>&cn,const std::
 }
 
 std::string alpha_calc(const TevStage& s,const std::array<bool,4>&an) {
-  const auto A=alpha_arg_expr(s.alpha.a,s,an),B=alpha_arg_expr(s.alpha.b,s,an),C=alpha_arg_expr(s.alpha.c,s,an),D=alpha_arg_expr(s.alpha.d,s,an);
+  const auto A=alpha_arg_expr(s.alpha.a,s,an),B=alpha_arg_expr(s.alpha.b,s,an),C=alpha_arg_expr(s.alpha.c,s,an),D=aarg(s.alpha.d,s);
   std::string e;
   switch (s.alphaOp) {
   case TevOp::Add: e = "(" + D + " + mix(" + A + ", " + B + ", " + C + ") " + bias(s.alphaBias) + ") * " + scale(s.alphaScale); break;

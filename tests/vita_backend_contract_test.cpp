@@ -6,6 +6,7 @@
 #include "gfx/vita_fixed_vertex.hpp"
 #include "gfx/vita_efb_copy.hpp"
 #include "gfx/vita_sampler_units.hpp"
+#include "gfx/vita_draw_batch.hpp"
 #include "gxm/gxm_texture_layout.hpp"
 #include "gxm/gxm_program_cache.hpp"
 #include <array>
@@ -98,6 +99,29 @@ void shader_masks() {
   REQUIRE(source.fragment.find("raw_tex=float4(1.0)") != std::string::npos);
 }
 void shader_operations() {
+  {
+    auto d = basic();
+    const auto clippedKey = pipeline_key(d);
+    d.fragmentScissor = false;
+    REQUIRE(pipeline_key(d) != clippedKey);
+    const auto source = gxm::build_tev_cg(d);
+    REQUIRE(source.ok());
+    REQUIRE(source.fragment.find("WPOS") == std::string::npos);
+    REQUIRE(source.fragment.find("window_position.x<u_clip_rect") == std::string::npos);
+  }
+  {
+    auto d = basic();
+    d.tev.stages[0].color = {TevColorArg::Reg0, TevColorArg::Zero,
+                            TevColorArg::Zero, TevColorArg::Reg0};
+    d.tev.stages[0].alpha = {TevAlphaArg::Reg0A, TevAlphaArg::Zero,
+                            TevAlphaArg::Zero, TevAlphaArg::Reg0A};
+    const auto source = gxm::build_tev_cg(d);
+    REQUIRE(source.ok());
+    REQUIRE(source.fragment.find("float3 cA=tev_wrap3(reg0.rgb);") != std::string::npos);
+    REQUIRE(source.fragment.find("float aA=tev_wrap1(reg0.a);") != std::string::npos);
+    REQUIRE(source.fragment.find("float3 cD=reg0.rgb;") != std::string::npos);
+    REQUIRE(source.fragment.find("float aD=reg0.a;") != std::string::npos);
+  }
   for (unsigned op = 0; op <= unsigned(TevOp::CompRGB8Equal); ++op) {
     auto d = basic();
     d.tev.stageCount = 16;
@@ -351,6 +375,56 @@ void native_extended_contract() {
 }
 } // namespace
 int main() {
+  {
+    TextureDesc d{}; d.format=TextureFormat::RGBA8888; d.mipCount=1;
+    d.width=d.height=4;
+    std::array<uint8_t,64> pixels{};
+    for(unsigned i=0;i<16;++i) for(unsigned c=0;c<4;++c) pixels[4*i+c]=uint8_t(i);
+    d.data=pixels.data();d.dataSize=pixels.size();
+    const auto sw=gxm::prepare_swizzled_texture(d);
+    const uint8_t expected[]{0,4,1,5,8,12,9,13,2,6,3,7,10,14,11,15};
+    REQUIRE(sw.ok()); REQUIRE(sw.pixels.size()==64);
+    for(unsigned i=0;i<16;++i) REQUIRE(sw.pixels[i*4]==expected[i]);
+    for(unsigned w:{1u,2u,4u,8u,16u}) for(unsigned h:{1u,2u,4u,8u,16u}) {
+      std::vector<uint8_t> input(size_t(w)*h*4);
+      for(unsigned i=0;i<w*h;++i) std::memcpy(input.data()+i*4,&i,4);
+      d.width=w;d.height=h;d.data=input.data();d.dataSize=input.size();
+      const auto result=gxm::prepare_swizzled_texture(d); REQUIRE(result.ok());
+      std::set<unsigned> seen;
+      for(unsigned i=0;i<w*h;++i) {unsigned v;std::memcpy(&v,result.pixels.data()+i*4,4);REQUIRE(v<w*h);seen.insert(v);}
+      REQUIRE(seen.size()==w*h);
+    }
+    d.width=3; REQUIRE(!gxm::prepare_swizzled_texture(d).ok());
+    d.width=4;d.mipCount=2; REQUIRE(!gxm::prepare_swizzled_texture(d).ok());
+    auto p=basic(); p.tev.stages[0].texture=0;p.tev.stages[0].texCoord=0;
+    p.tev.stages[0].color.d=TevColorArg::TexColor;
+    const auto normalKey=pipeline_key(p);p.nativeTextureWrapMask=1;
+    REQUIRE(pipeline_key(p)!=normalKey);
+    const auto shader=gxm::build_tev_cg(p); REQUIRE(shader.ok());
+    REQUIRE(shader.fragment.find("tex2D(u_tex0,gx_sample_uv(")!=std::string::npos);
+  }
+  {
+    DrawPacket a{}, b{};
+    a.pipelineKey = b.pipelineKey = 1;
+    a.vertices = {1, 0, 112}; b.vertices = {1, 112, 112};
+    a.indices = {2, 0, 12}; b.indices = {2, 12, 12};
+    a.vertexCount = b.vertexCount = 4; a.indexCount = b.indexCount = 6;
+    REQUIRE(local_draws_mergeable(a, b));
+    auto changed = b; changed.textures[0].sampler.maxLod = 2;
+    REQUIRE(!local_draws_mergeable(a, changed));
+    changed = b; changed.uniforms.mvp[12] = 1;
+    REQUIRE(!local_draws_mergeable(a, changed));
+    changed = b; changed.vertices.offset += 4;
+    REQUIRE(!local_draws_mergeable(a, changed));
+    changed = b; changed.absoluteVertexIndices = true;
+    REQUIRE(!local_draws_mergeable(a, changed));
+    changed = b; changed.vertexCount = 63996;
+    REQUIRE(!local_draws_mergeable(a, changed));
+    changed = b; changed.textures[0].flipY = true;
+    REQUIRE(!local_draws_mergeable(a, changed));
+    changed = b; changed.pipelineKey = 2;
+    REQUIRE(!local_draws_mergeable(a, changed));
+  }
   shader_masks(); shader_operations(); rejection_tests(); projection_contract(); common_decode_contract(); keys_and_defaults();
   native_extended_contract();
   std::printf("PASS: %u checks, 1024 input-mask combinations; native Cg generation and shared CPU contracts (not GPU execution).\n", checks);

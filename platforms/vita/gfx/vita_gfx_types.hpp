@@ -208,6 +208,8 @@ struct PipelineDesc {
   bool fogOrthographic = false;
   bool fogRangeEnabled = false;
   bool positionIsClipSpace = false; // CPU-expanded GX lines/points already contain clip-space xyzw.
+  bool fragmentScissor = true; // Native GXM may omit clipping only for the complete target.
+  uint8_t nativeTextureWrapMask = 0; // Swizzled samplers perform wrapping/filtering at seams.
   bool fixedVertexOnGpu = false; // Raw object-space inputs; fixed PN/unlit GX transform in the shader.
   VertexLayout layout{};
   std::array<TexGenDesc, MaxTextures> texgens{};
@@ -473,6 +475,10 @@ struct FrameStats {
   uint32_t textureUploads = 0;
   uint32_t stateChanges = 0;
   uint64_t cpuFrameUs = 0;
+  // Sampled native CPU timings (zero on unsampled frames and other backends).
+  uint64_t nativePipelineUs = 0;
+  uint64_t nativeTextureUs = 0;
+  uint64_t nativeDrawUs = 0;
 };
 
 } // namespace aurora::vita::gfx

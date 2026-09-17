@@ -3,6 +3,36 @@
 #include <cstring>
 
 namespace aurora::vita::gxm {
+LinearTextureData prepare_swizzled_texture(const gfx::TextureDesc& desc) {
+  LinearTextureData out;
+  if (!desc.width || !desc.height || desc.width > 4096 || desc.height > 4096 ||
+      (desc.width & (desc.width-1u)) || (desc.height & (desc.height-1u)) ||
+      desc.mipCount > 1 || desc.generateMipmaps) {
+    out.error="swizzled upload requires a single power-of-two level";
+    return out;
+  }
+  std::vector<uint8_t> linear;
+  if (!gfx::decode_texture_rgba8(desc,linear)) {out.error="swizzled GX decode failed";return out;}
+  out.pixels.resize(size_t(desc.width)*desc.height*4);
+  unsigned shared=0;
+  while ((1u<<shared) < std::min(desc.width,desc.height)) ++shared;
+  // Interleave common Y/X bits, then append the rectangular major axis.
+  const auto spread=[shared](uint32_t value,unsigned axis) {
+    uint32_t result=0;
+    for(unsigned bit=0;bit<shared;++bit) result|=((value>>bit)&1u)<<(bit*2u+axis);
+    return result | ((value>>shared)<<(shared*2u));
+  };
+  std::vector<uint32_t> xOffsets(desc.width);
+  for(unsigned x=0;x<desc.width;++x) xOffsets[x]=spread(x,1);
+  for(unsigned y=0;y<desc.height;++y) {
+    const uint32_t yOffset=spread(y,0);
+    for(unsigned x=0;x<desc.width;++x)
+      std::memcpy(out.pixels.data()+size_t(xOffsets[x]|yOffset)*4,
+                  linear.data()+(size_t(y)*desc.width+x)*4,4);
+  }
+  return out;
+}
+
 LinearTextureData prepare_linear_texture(const gfx::TextureDesc& desc) {
   LinearTextureData out;
   const auto fail=[&](const char* text) {out.error=text;out.pixels.clear();return out;};

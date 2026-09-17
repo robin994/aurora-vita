@@ -19,12 +19,12 @@ std::string konst(unsigned value, bool alpha) {
   return alpha ? expression : splat(expression);
 }
 std::string color_arg(TevColorArg arg, const TevStage& s, const std::array<bool, 4>& cn,
-                      const std::array<bool, 4>& an) {
+                      const std::array<bool, 4>& an, bool wrap = true) {
   const unsigned value = static_cast<unsigned>(arg);
   if (value < 8) {
     const auto expression = std::string(reg(value / 2)) + (value & 1 ? ".a" : ".rgb");
     const auto result = value & 1 ? splat(expression) : expression;
-    return (value & 1 ? an[value / 2] : cn[value / 2]) ? result : "tev_wrap3(" + result + ")";
+    return (!wrap || (value & 1 ? an[value / 2] : cn[value / 2])) ? result : "tev_wrap3(" + result + ")";
   }
   switch (arg) {
   case TevColorArg::TexColor: return "texc.rgb";
@@ -37,11 +37,11 @@ std::string color_arg(TevColorArg arg, const TevStage& s, const std::array<bool,
   default: return splat("0.0");
   }
 }
-std::string alpha_arg(TevAlphaArg arg, const TevStage& s, const std::array<bool, 4>& normalized) {
+std::string alpha_arg(TevAlphaArg arg, const TevStage& s, const std::array<bool, 4>& normalized, bool wrap = true) {
   const unsigned value = static_cast<unsigned>(arg);
   if (value < 4) {
     const auto result = std::string(reg(value)) + ".a";
-    return normalized[value] ? result : "tev_wrap1(" + result + ")";
+    return (!wrap || normalized[value]) ? result : "tev_wrap1(" + result + ")";
   }
   switch (arg) {
   case TevAlphaArg::TexAlpha: return "texc.a";
@@ -252,12 +252,14 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   out.colorMask = pipeline_raster_color_mask(d);
   std::ostringstream vs, fs;
   std::vector<std::string> vp{"float4 a_position : POSITION", "out float4 v_position : POSITION"};
-  std::vector<std::string> fp{"float4 window_position : WPOS", "uniform float4 u_clip_rect",
+  std::vector<std::string> fp{"uniform float4 u_clip_rect",
       "uniform float4 u_kcolor[4]", "uniform float4 u_tevreg[4]",
       "uniform float4 u_ind_mtx[6]", "uniform float4 u_texcoord_scale[8]", "uniform float4 u_texture_size_bias[8]",
-      "uniform float4 u_tex_transform[8]", "uniform float u_tex_force_opaque[8]",
+      "uniform float4 u_tex_transform[8]", "uniform float4 u_tex_wrap[8]", "uniform float u_tex_force_opaque[8]",
       "uniform float4 u_fog_color", "uniform float4 u_fog_params", "uniform float u_fog_range_k[10]",
       "uniform float u_render_viewport_width"};
+  if (d.fragmentScissor || d.fogMode != FogMode::None)
+    fp.push_back("float4 window_position : WPOS");
   if (!d.positionIsClipSpace || d.fixedVertexOnGpu) vp.push_back("uniform float4 u_mvp[4]");
   const auto fixedInputs=d.fixedVertexOnGpu?fixed_vertex_gpu_inputs(d):VertexSemanticMask{};
   for (unsigned i = 0; i < 2; ++i) {
@@ -338,13 +340,16 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   }
   vs << "}\n";
   fs << "float2 gx_sample_uv(float2 uv,float4 t){return uv*t.xy+t.zw;}\n"
+        "float gx_wrap_coord(float v,float mode){if(mode<0.5)return clamp(v,0.0,1.0);if(mode<1.5)return frac(v);float f=frac(v*0.5)*2.0;return 1.0-abs(f-1.0);}\n"
+        "float2 gx_wrap_uv(float2 uv,float2 mode){return float2(gx_wrap_coord(uv.x,mode.x),gx_wrap_coord(uv.y,mode.y));}\n"
         "float tev_wrap1(float v){float b=v*255.0;return (b-floor(b/256.0)*256.0)/255.0;}\n"
         "float3 tev_wrap3(float3 v){float3 b=v*255.0;return (b-floor(b/256.0)*256.0)/255.0;}\n"
         "float4 main(\n";
   signature(fs, fp);
-  fs << ") : COLOR {\n"
-        "if(window_position.x<u_clip_rect.x||window_position.y<u_clip_rect.y||window_position.x>=u_clip_rect.z||window_position.y>=u_clip_rect.w) discard;\n"
-        "float4 prev=u_tevreg[0],reg0=u_tevreg[1],reg1=u_tevreg[2],reg2=u_tevreg[3];\n"
+  fs << ") : COLOR {\n";
+  if (d.fragmentScissor)
+    fs << "if(window_position.x<u_clip_rect.x||window_position.y<u_clip_rect.y||window_position.x>=u_clip_rect.z||window_position.y>=u_clip_rect.w) discard;\n";
+  fs << "float4 prev=u_tevreg[0],reg0=u_tevreg[1],reg1=u_tevreg[2],reg2=u_tevreg[3];\n"
         "float2 prev_ind_uv=float2(0.0);\n";
   std::array<bool, 4> cn{}, an{};
   for (unsigned i = 0; i < d.tev.stageCount; ++i) {
@@ -353,8 +358,12 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     indirect(fs,d,s);
     fs << "float4 raw_tex=";
     if (tev_stage_uses_texture(s) && s.texture < MaxTextures) {
-      fs << "tex2D(u_tex" << unsigned(s.texture) << ",gx_sample_uv(tev_uv,u_tex_transform["
-         << unsigned(s.texture) << "]));\nraw_tex.a=lerp(raw_tex.a,1.0,u_tex_force_opaque["
+      const bool nativeWrap=(d.nativeTextureWrapMask&(1u<<s.texture))!=0;
+      fs << "tex2D(u_tex" << unsigned(s.texture) << ",";
+      if(!nativeWrap) fs << "gx_wrap_uv(";
+      fs << "gx_sample_uv(tev_uv,u_tex_transform[" << unsigned(s.texture) << "])";
+      if(!nativeWrap) fs << ",u_tex_wrap[" << unsigned(s.texture) << "].xy)";
+      fs << ");\nraw_tex.a=lerp(raw_tex.a,1.0,u_tex_force_opaque["
          << unsigned(s.texture) << "]);\n";
     } else fs << "float4(1.0);\n";
     fs << "float4 texc=" << swizzle("raw_tex", d.tev.swapTable[s.texSwap]) << ";\nfloat4 raw_ras=";
@@ -366,8 +375,10 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     const TevColorArg colors[]{s.color.a,s.color.b,s.color.c,s.color.d};
     const TevAlphaArg alphas[]{s.alpha.a,s.alpha.b,s.alpha.c,s.alpha.d};
     for (unsigned j = 0; j < 4; ++j) {
-      fs << "float3 c" << char('A'+j) << "=" << color_arg(colors[j], s, cn, an) << ";\n";
-      fs << "float a" << char('A'+j) << "=" << alpha_arg(alphas[j], s, an) << ";\n";
+      // GX truncates A/B/C to eight bits, but D is the signed accumulator.
+      // Wrapping D turns negative material offsets into bright positive ones.
+      fs << "float3 c" << char('A'+j) << "=" << color_arg(colors[j], s, cn, an, j != 3) << ";\n";
+      fs << "float a" << char('A'+j) << "=" << alpha_arg(alphas[j], s, an, j != 3) << ";\n";
     }
     fs << "float3 result_c=clamp(" << tev_arithmetic(false,s.colorOp,s.colorBias,s.colorScale)
        << (s.colorClamp ? ",0.0,1.0);\n" : ",-4.0,4.0);\n")

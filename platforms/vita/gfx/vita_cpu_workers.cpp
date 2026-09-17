@@ -2,10 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 
 #if defined(__vita__)
-#include <pthread.h>
+#include <psp2/kernel/threadmgr.h>
 #endif
 
 namespace aurora::vita::gfx {
@@ -16,142 +17,93 @@ constexpr uint32_t MaxWorkers = 2;
 constexpr size_t WorkerStackBytes = 128u * 1024u;
 
 struct CpuWorkerState {
-  pthread_mutex_t mutex{};
-  pthread_cond_t wake{};
-  pthread_cond_t done{};
-  bool syncReady = false;
+  struct Lane {
+    SceUID thread = -1, wake = -1, done = -1;
+    std::atomic<bool> stop{false};
+    std::atomic<unsigned> state{0}; // release/acquire publication: idle, ready, done
+    CpuRangeTask task = nullptr;
+    void *context = nullptr;
+    size_t begin = 0, end = 0;
+    bool result = true;
+  };
+  std::array<Lane, MaxWorkers> lanes{};
   bool initialized = false;
-  bool stop = false;
-  uint64_t generation = 0;
-  CpuRangeTask task = nullptr;
-  void* context = nullptr;
-  std::array<pthread_t, MaxWorkers> threads{};
-  std::array<uint32_t, MaxWorkers> indices{{0, 1}};
-  std::array<size_t, MaxWorkers> begin{};
-  std::array<size_t, MaxWorkers> end{};
-  std::array<bool, MaxWorkers> active{};
-  std::array<bool, MaxWorkers> result{{true, true}};
   uint32_t workerCount = 0;
-  uint32_t activeWorkers = 0;
-  uint32_t completedWorkers = 0;
   size_t minItems = 512;
 };
 
 CpuWorkerState g_workers{};
 
-void* cpu_worker_main(void* opaque) {
+int cpu_worker_main(SceSize, void* opaque) {
   const uint32_t index = *static_cast<const uint32_t*>(opaque);
-  uint64_t seenGeneration = 0;
-
-  pthread_mutex_lock(&g_workers.mutex);
+  auto &lane = g_workers.lanes[index];
   for (;;) {
-    while (!g_workers.stop && g_workers.generation == seenGeneration) {
-      pthread_cond_wait(&g_workers.wake, &g_workers.mutex);
-    }
-    if (g_workers.stop) {
-      pthread_mutex_unlock(&g_workers.mutex);
-      return nullptr;
-    }
-
-    const uint64_t generation = g_workers.generation;
-    const CpuRangeTask task = g_workers.task;
-    void* const context = g_workers.context;
-    const size_t begin = g_workers.begin[index];
-    const size_t end = g_workers.end[index];
-    const bool active = g_workers.active[index];
-    pthread_mutex_unlock(&g_workers.mutex);
-
-    const bool ok = !active || !task || task(context, begin, end, index + 1);
-
-    pthread_mutex_lock(&g_workers.mutex);
-    seenGeneration = generation;
-    if (active) {
-      g_workers.result[index] = ok;
-      ++g_workers.completedWorkers;
-      if (g_workers.completedWorkers >= g_workers.activeWorkers) {
-        pthread_cond_signal(&g_workers.done);
-      }
-    }
+    const int wait = sceKernelWaitSema(lane.wake, 1, nullptr);
+    if (lane.stop.load(std::memory_order_acquire)) return 0;
+    if (wait < 0) { sceKernelDelayThread(100); continue; }
+    if (lane.state.load(std::memory_order_acquire) != 1) continue;
+    lane.result = lane.task && lane.task(lane.context, lane.begin, lane.end, index + 1);
+    lane.state.store(2, std::memory_order_release);
+    sceKernelSignalSema(lane.done, 1);
   }
 }
 
-void destroy_sync_primitives() noexcept {
-  if (!g_workers.syncReady) return;
-  pthread_cond_destroy(&g_workers.done);
-  pthread_cond_destroy(&g_workers.wake);
-  pthread_mutex_destroy(&g_workers.mutex);
-  g_workers.syncReady = false;
+void destroy_lane(CpuWorkerState::Lane &lane) noexcept {
+  if (lane.thread >= 0) sceKernelDeleteThread(lane.thread);
+  if (lane.wake >= 0) sceKernelDeleteSema(lane.wake);
+  if (lane.done >= 0) sceKernelDeleteSema(lane.done);
+  lane.thread=lane.wake=lane.done=-1;
+  lane.task=nullptr;lane.context=nullptr;
+  lane.state.store(0);
 }
 } // namespace
 
 bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
   if (g_workers.initialized) shutdown_cpu_workers();
 
-  g_workers.stop = false;
-  g_workers.generation = 0;
-  g_workers.task = nullptr;
-  g_workers.context = nullptr;
   g_workers.workerCount = 0;
-  g_workers.activeWorkers = 0;
-  g_workers.completedWorkers = 0;
   g_workers.minItems = std::max<size_t>(1, minItems);
-
-  if (pthread_mutex_init(&g_workers.mutex, nullptr) != 0) return false;
-  if (pthread_cond_init(&g_workers.wake, nullptr) != 0) {
-    pthread_mutex_destroy(&g_workers.mutex);
-    return false;
-  }
-  if (pthread_cond_init(&g_workers.done, nullptr) != 0) {
-    pthread_cond_destroy(&g_workers.wake);
-    pthread_mutex_destroy(&g_workers.mutex);
-    return false;
-  }
-  g_workers.syncReady = true;
-
   const uint32_t requested = std::min(workerThreads, MaxWorkers);
-  pthread_attr_t attr{};
-  const bool attrReady = pthread_attr_init(&attr) == 0;
-  if (attrReady) (void)pthread_attr_setstacksize(&attr, WorkerStackBytes);
-
   for (uint32_t i = 0; i < requested; ++i) {
-    const int rc = pthread_create(&g_workers.threads[i], attrReady ? &attr : nullptr,
-                                  cpu_worker_main, &g_workers.indices[i]);
-    if (rc != 0) break;
+    auto &lane=g_workers.lanes[i];
+    lane.stop.store(false);lane.state.store(0);
+    lane.wake=sceKernelCreateSema("aurora_cpu_wake",0,0,1,nullptr);
+    lane.done=sceKernelCreateSema("aurora_cpu_done",0,0,1,nullptr);
+    if(lane.wake<0 || lane.done<0) {destroy_lane(lane);break;}
+    char name[24];std::snprintf(name,sizeof(name),"aurora_cpu_%u",i+1);
+    const int affinity=i==0?SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2;
+    lane.thread=sceKernelCreateThread(name,cpu_worker_main,0x10000110,
+                                     WorkerStackBytes,0,affinity,nullptr);
+    if(lane.thread<0 || sceKernelStartThread(lane.thread,sizeof(i),&i)<0) {
+      destroy_lane(lane);break;
+    }
     ++g_workers.workerCount;
   }
-  if (attrReady) pthread_attr_destroy(&attr);
 
   g_workers.initialized = true;
   std::fprintf(stderr,
-               "[aurora-vita] cpu workers=%u lanes=%u parallel_min_vertices=%llu\n",
+               "[aurora-vita] cpu workers=%u lanes=%u sync=native_semaphores cores=1,2 parallel_min_items=%llu\n",
                g_workers.workerCount, g_workers.workerCount + 1,
                static_cast<unsigned long long>(g_workers.minItems));
   return true;
 }
 
 void shutdown_cpu_workers() noexcept {
-  if (!g_workers.initialized && !g_workers.syncReady) return;
-
-  if (g_workers.syncReady) {
-    pthread_mutex_lock(&g_workers.mutex);
-    g_workers.stop = true;
-    ++g_workers.generation;
-    pthread_cond_broadcast(&g_workers.wake);
-    pthread_mutex_unlock(&g_workers.mutex);
-  }
-
+  if (!g_workers.initialized) return;
+  // The single producer calls shutdown only outside cpu_parallel_for, so no
+  // callback can still own a caller's capture/staging data at this boundary.
   for (uint32_t i = 0; i < g_workers.workerCount; ++i) {
-    pthread_join(g_workers.threads[i], nullptr);
+    auto &lane=g_workers.lanes[i];
+    lane.stop.store(true,std::memory_order_release);
+    sceKernelSignalSema(lane.wake,1);
   }
-  destroy_sync_primitives();
-
+  for (uint32_t i = 0; i < g_workers.workerCount; ++i) {
+    auto &lane=g_workers.lanes[i];
+    sceKernelWaitThreadEnd(lane.thread,nullptr,nullptr);
+    destroy_lane(lane);
+  }
   g_workers.initialized = false;
-  g_workers.stop = false;
   g_workers.workerCount = 0;
-  g_workers.activeWorkers = 0;
-  g_workers.completedWorkers = 0;
-  g_workers.task = nullptr;
-  g_workers.context = nullptr;
 }
 
 bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
@@ -166,47 +118,43 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
   // a ~150-vertex draw used to split it into ~50-vertex chunks, where condition
   // variable traffic cost more than the decode/transform work itself.  Scale the
   // active lane count with the draw instead and keep small draws on the caller.
+  // A dedicated semaphore per lane replaces the shared condition-variable
+  // barrier, which stalled under sustained Vita hardware workloads.
   const uint32_t maxLanes = g_workers.workerCount + 1;
   const uint32_t usefulLanes = static_cast<uint32_t>(std::min<size_t>(
       maxLanes, std::max<size_t>(1, count / g_workers.minItems)));
   if (usefulLanes <= 1) return task(context, 0, count, 0);
 
   const uint32_t lanes = usefulLanes;
-  const size_t chunk = (count + lanes - 1) / lanes;
+  const size_t chunk = count / lanes + (count % lanes != 0);
   const size_t mainEnd = std::min(count, chunk);
 
-  pthread_mutex_lock(&g_workers.mutex);
-  g_workers.task = task;
-  g_workers.context = context;
-  g_workers.activeWorkers = 0;
-  g_workers.completedWorkers = 0;
-  for (uint32_t i = 0; i < g_workers.workerCount; ++i) {
+  const uint32_t activeWorkers=lanes-1;
+  std::array<bool,MaxWorkers> dispatched{};
+  bool workersResult=true;
+  for (uint32_t i = 0; i < activeWorkers; ++i) {
+    auto &lane=g_workers.lanes[i];
     const size_t begin = std::min(count, chunk * static_cast<size_t>(i + 1));
     const size_t end = std::min(count, begin + chunk);
-    const bool laneEnabled = i + 1 < lanes;
-    g_workers.begin[i] = begin;
-    g_workers.end[i] = end;
-    g_workers.active[i] = laneEnabled && begin < end;
-    g_workers.result[i] = true;
-    if (g_workers.active[i]) ++g_workers.activeWorkers;
+    lane.task=task;lane.context=context;lane.begin=begin;lane.end=end;
+    lane.result=false;
+    lane.state.store(1,std::memory_order_release);
+    dispatched[i]=sceKernelSignalSema(lane.wake,1)>=0;
+    if(!dispatched[i]) workersResult=false;
   }
-  ++g_workers.generation;
-  pthread_cond_broadcast(&g_workers.wake);
-  pthread_mutex_unlock(&g_workers.mutex);
 
   const bool mainResult = task(context, 0, mainEnd, 0);
 
-  pthread_mutex_lock(&g_workers.mutex);
-  while (g_workers.completedWorkers < g_workers.activeWorkers) {
-    pthread_cond_wait(&g_workers.done, &g_workers.mutex);
+  for (uint32_t i = 0; i < activeWorkers; ++i) if(dispatched[i]) {
+    auto &lane=g_workers.lanes[i];
+    // Consume exactly one completion token before reusing any job memory.
+    // Inactive lanes receive no wake token and cannot acknowledge a later job.
+    while(sceKernelWaitSema(lane.done,1,nullptr)<0) sceKernelDelayThread(100);
+    const bool completed=lane.state.load(std::memory_order_acquire)==2;
+    workersResult=workersResult && completed && lane.result;
+    lane.task=nullptr;lane.context=nullptr;
+    lane.state.store(0,std::memory_order_release);
   }
-  bool workersResult = true;
-  for (uint32_t i = 0; i < g_workers.workerCount; ++i) {
-    if (g_workers.active[i]) workersResult = workersResult && g_workers.result[i];
-  }
-  g_workers.task = nullptr;
-  g_workers.context = nullptr;
-  pthread_mutex_unlock(&g_workers.mutex);
   return mainResult && workersResult;
 }
 
