@@ -270,6 +270,8 @@ bool Renderer::initialize() noexcept {
   if(initialized_)return true;
   gxm::Config c{};c.width=cfg_.width;c.height=cfg_.height;c.displayBuffers=cfg_.displayBuffers;
   c.waitVblank=cfg_.waitVblank;c.resourceBudgetBytes=cfg_.nativeResourceBudget;
+  c.cdramPoolBytes=cfg_.nativeCdramPoolBytes;
+  c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
   c.programCachePath=cfg_.programBinaryCachePath;
   c.maxPipelines=cfg_.pipelineBudget+16; // Native clear/blit variants are not GX cache entries.
   if(!native_->initialize(c))return false;

@@ -32,6 +32,67 @@ struct DisplayRequest {
   bool wait;
   std::atomic<int>* error;
 };
+
+void log_memory_state(const char* phase) {
+  const auto stats = memory_stats();
+  SceKernelFreeMemorySizeInfo freeMemory{};
+  freeMemory.size = sizeof(freeMemory);
+  const int freeResult = sceKernelGetFreeMemorySize(&freeMemory);
+  std::fprintf(stderr,
+      "[aurora-gxm] memory phase=%s "
+      "cdram=%llu peak=%llu allocs=%u pool=%llu pool_used=%llu pool_peak=%llu "
+      "user=%llu peak=%llu allocs=%u "
+      "phycont=%llu peak=%llu allocs=%u "
+      "cdialog=%llu peak=%llu allocs=%u fallbacks=%u "
+      "free_cdram=%d free_user=%d free_phycont=%d query=0x%08x\n",
+      phase,
+      static_cast<unsigned long long>(stats.cdramCurrent),
+      static_cast<unsigned long long>(stats.cdramPeak), stats.cdramAllocations,
+      static_cast<unsigned long long>(stats.cdramPoolBytes),
+      static_cast<unsigned long long>(stats.cdramPoolUsed),
+      static_cast<unsigned long long>(stats.cdramPoolPeak),
+      static_cast<unsigned long long>(stats.userCurrent),
+      static_cast<unsigned long long>(stats.userPeak), stats.userAllocations,
+      static_cast<unsigned long long>(stats.phycontCurrent),
+      static_cast<unsigned long long>(stats.phycontPeak), stats.phycontAllocations,
+      static_cast<unsigned long long>(stats.cdialogCurrent),
+      static_cast<unsigned long long>(stats.cdialogPeak), stats.cdialogAllocations,
+      stats.fallbackAllocations,
+      freeResult >= 0 ? freeMemory.size_cdram : -1,
+      freeResult >= 0 ? freeMemory.size_user : -1,
+      freeResult >= 0 ? freeMemory.size_phycont : -1,
+      unsigned(freeResult));
+
+  // Keep a lightweight persistent copy as well. The game redirects its own
+  // diagnostics to runtime.log, while the native renderer writes to stderr;
+  // on retail hardware that stream is not always captured by VitaCompanion.
+  if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_memory.log", "a")) {
+    std::fprintf(file,
+        "phase=%s cdram=%llu peak=%llu allocs=%u pool=%llu pool_used=%llu pool_peak=%llu "
+        "user=%llu peak=%llu allocs=%u phycont=%llu peak=%llu allocs=%u "
+        "cdialog=%llu peak=%llu allocs=%u fallbacks=%u free_cdram=%d free_user=%d "
+        "free_phycont=%d query=0x%08x\n",
+        phase,
+        static_cast<unsigned long long>(stats.cdramCurrent),
+        static_cast<unsigned long long>(stats.cdramPeak), stats.cdramAllocations,
+        static_cast<unsigned long long>(stats.cdramPoolBytes),
+        static_cast<unsigned long long>(stats.cdramPoolUsed),
+        static_cast<unsigned long long>(stats.cdramPoolPeak),
+        static_cast<unsigned long long>(stats.userCurrent),
+        static_cast<unsigned long long>(stats.userPeak), stats.userAllocations,
+        static_cast<unsigned long long>(stats.phycontCurrent),
+        static_cast<unsigned long long>(stats.phycontPeak), stats.phycontAllocations,
+        static_cast<unsigned long long>(stats.cdialogCurrent),
+        static_cast<unsigned long long>(stats.cdialogPeak), stats.cdialogAllocations,
+        stats.fallbackAllocations,
+        freeResult >= 0 ? freeMemory.size_cdram : -1,
+        freeResult >= 0 ? freeMemory.size_user : -1,
+        freeResult >= 0 ? freeMemory.size_phycont : -1,
+        unsigned(freeResult));
+    std::fclose(file);
+  }
+}
+
 void display_callback(const void* opaque) {
   const auto& request = *static_cast<const DisplayRequest*>(opaque);
   SceDisplayFrameBuf frame{};
@@ -318,6 +379,7 @@ bool Renderer::initialize(const Config& config) {
       config.displayBuffers < 2 || config.displayBuffers > 3 || !config.maxPipelines ||
       config.parameterBufferBytes < 0x40000 || config.parameterBufferBytes > UINT32_MAX)
     return d.fail("invalid GXM config");
+  log_memory_state("before-init");
   d.config = config; d.error.clear(); d.displayError = 0;
   d.stride = (config.width + 63u) & ~63u;
   const auto abort = [&]() { shutdown(); return false; };
@@ -355,8 +417,13 @@ bool Renderer::initialize(const Config& config) {
         config.width, config.height, d.stride, s.memory.data()), "initialize display surface") ||
         !d.check(sceGxmSyncObjectCreate(&s.sync), "create display sync")) return abort();
   }
+  const int poolResult = initialize_cdram_pool(config.cdramPoolBytes, config.cdramReserveBytes);
+  if (poolResult < 0)
+    std::fprintf(stderr,
+        "[aurora-gxm] cdram_pool unavailable requested=%zu reserve=%zu error=0x%08x; using mapped fallbacks\n",
+        config.cdramPoolBytes, config.cdramReserveBytes, unsigned(poolResult));
   const uint32_t tw = (config.width + 31u) & ~31u, th = (config.height + 31u) & ~31u;
-  if (!d.alloc(d.depth, size_t(tw) * th * 4, MemoryKind::CpuGpu)) return abort();
+  if (!d.alloc(d.depth, size_t(tw) * th * 4, MemoryKind::GpuResource)) return abort();
   if (!d.check(sceGxmDepthStencilSurfaceInit(&d.depthSurface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32,
       SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, tw, d.depth.data(), nullptr), "initialize depth surface")) return abort();
   sceGxmDepthStencilSurfaceSetBackgroundDepth(&d.depthSurface, 1.f);
@@ -392,6 +459,7 @@ bool Renderer::initialize(const Config& config) {
   if (!d.clearPipeline || !d.clearVertices || !d.clearIndices) return abort();
   std::fprintf(stderr, "[aurora-gxm] initialized %ux%u buffers=%u renderer=SceGxm native_cg=1\n",
       config.width, config.height, config.displayBuffers);
+  log_memory_state("after-init");
   return true;
 }
 
@@ -510,7 +578,7 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
   texture.width=desc.width; texture.height=desc.height; texture.stride=rowBytes/4;
   texture.mipCount=pixels.mipCount;
   texture.swizzled=swizzled;
-  if (!d.alloc(texture.memory, bytes, MemoryKind::CpuGpu)) return 0;
+  if (!d.alloc(texture.memory, bytes, MemoryKind::GpuResource)) return 0;
   std::memcpy(texture.memory.data(),pixels.pixels.data(),bytes);
   // Ordinary linear textures permit sampler filter changes. LINEAR_STRIDED
   // rejects them with SCE_GXM_ERROR_UNSUPPORTED on hardware. The native linear
@@ -778,6 +846,7 @@ bool Renderer::end_frame(bool present) {
       static_cast<unsigned long long>(afterQueue-afterEnd),
       static_cast<unsigned long long>(afterQueue-timingStart));
   d.stats.cpuFrameUs = sceKernelGetProcessTimeWide() - d.frameStarted;
+  if (d.profileDraws) log_memory_state("profile-frame");
   return true;
 }
 
@@ -874,7 +943,7 @@ Handle Renderer::create_target(uint32_t width,uint32_t height,bool useDepth) {
   auto texture=std::make_unique<Impl::Texture>();
   auto& t=*texture;
   t.width=width;t.height=height;t.stride=stride;
-  if(!d.alloc(t.memory,colorBytes,MemoryKind::CpuGpu)) return 0;
+  if(!d.alloc(t.memory,colorBytes,MemoryKind::GpuResource)) return 0;
   std::memset(t.memory.data(),0,t.memory.size());
   if(!d.check(sceGxmTextureInitLinear(&t.descriptor,t.memory.data(),SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,
           width,height,0),"initialize target texture") ||
@@ -882,7 +951,7 @@ Handle Renderer::create_target(uint32_t width,uint32_t height,bool useDepth) {
           SCE_GXM_COLOR_SURFACE_LINEAR,SCE_GXM_COLOR_SURFACE_SCALE_NONE,SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
           width,height,stride,t.memory.data()),"initialize target color surface")) return 0;
   if(useDepth) {
-    if(!d.alloc(t.depth,depthBytes,MemoryKind::CpuGpu) ||
+    if(!d.alloc(t.depth,depthBytes,MemoryKind::GpuResource) ||
        !d.check(sceGxmDepthStencilSurfaceInit(&t.depthSurface,SCE_GXM_DEPTH_STENCIL_FORMAT_DF32,
           SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,dw,t.depth.data(),nullptr),"initialize target depth")) return 0;
     sceGxmDepthStencilSurfaceSetBackgroundDepth(&t.depthSurface,1.f);
@@ -1199,6 +1268,7 @@ void Renderer::shutdown() noexcept {
   for (auto& s : d.surfaces) { if (s.sync) sceGxmSyncObjectDestroy(s.sync); s.sync = nullptr; s.memory.reset(); }
   d.depth.reset(); d.patchBuffer.reset(); d.vertexUsse.reset(); d.fragmentUsse.reset();
   d.vdm.reset(); d.vertexRing.reset(); d.fragmentRing.reset(); d.fragmentUsseRing.reset();
+  shutdown_cdram_pool();
   std::free(d.hostMemory); d.hostMemory = nullptr;
   if (d.ownsGxm) { sceGxmTerminate(); d.ownsGxm = false; }
   d.initialized = false; d.displayed = false; d.resourceBytes = 0;

@@ -12,6 +12,8 @@ struct Config {
   uint32_t displayBuffers = 3;
   size_t parameterBufferBytes = 4 * 1024 * 1024;
   size_t resourceBudgetBytes = 24 * 1024 * 1024;
+  size_t cdramPoolBytes = 64 * 1024 * 1024;
+  size_t cdramReserveBytes = 8 * 1024 * 1024;
   size_t maxPipelines = 128;
   bool waitVblank = true;
   const char* shaderCompilerPath = nullptr;

@@ -16,6 +16,11 @@ struct RendererConfig {
   uint32_t displayBuffers=3;
   bool waitVblank=true;
   size_t nativeResourceBudget=64*1024*1024;
+  // Native GXM only. Reserve a suballocated GPU-local heap after display
+  // surfaces are created, while keeping enough CDRAM free for late system or
+  // title allocations. Ignored by the vitaGL backend.
+  size_t nativeCdramPoolBytes=64*1024*1024;
+  size_t nativeCdramReserveBytes=8*1024*1024;
   const char* programBinaryCachePath=nullptr;
 };
 class Renderer {
