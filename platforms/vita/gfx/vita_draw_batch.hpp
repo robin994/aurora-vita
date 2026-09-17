@@ -25,7 +25,7 @@ inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noex
   for (unsigned i = 0; i < MaxTextures; ++i) {
     const auto& x = a.textures[i]; const auto& y = b.textures[i];
     if (x.texture != y.texture || x.source != y.source || x.flipX != y.flipX ||
-        x.flipY != y.flipY || x.forceOpaque != y.forceOpaque ||
+        x.flipY != y.flipY || x.forceOpaque != y.forceOpaque || x.sampleFormat != y.sampleFormat ||
         x.sampler.wrapS != y.sampler.wrapS || x.sampler.wrapT != y.sampler.wrapT ||
         x.sampler.minFilter != y.sampler.minFilter || x.sampler.magFilter != y.sampler.magFilter ||
         x.sampler.lodBias != y.sampler.lodBias || x.sampler.minLod != y.sampler.minLod ||

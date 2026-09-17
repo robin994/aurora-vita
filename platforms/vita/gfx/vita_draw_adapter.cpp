@@ -99,7 +99,7 @@ bool same_sampler(const SamplerDesc&a,const SamplerDesc&b) noexcept {
 }
 bool same_texture(const TextureBinding&a,const TextureBinding&b) noexcept {
   return a.texture==b.texture&&a.source==b.source&&a.flipX==b.flipX&&a.flipY==b.flipY&&
-         a.forceOpaque==b.forceOpaque&&same_sampler(a.sampler,b.sampler);
+         a.forceOpaque==b.forceOpaque&&a.sampleFormat==b.sampleFormat&&same_sampler(a.sampler,b.sampler);
 }
 bool same_viewport(const Viewport&a,const Viewport&b) noexcept {
   return a.x==b.x&&a.y==b.y&&a.width==b.width&&a.height==b.height&&a.znear==b.znear&&a.zfar==b.zfar;

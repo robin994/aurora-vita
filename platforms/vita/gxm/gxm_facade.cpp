@@ -215,9 +215,9 @@ Handle EfbManager::capture_from_bound(Handle existing,int32_t x,int32_t y,uint32
   const int64_t top=int64_t(height)-y-sh;
   if(top<0 || top>INT32_MAX || sw>INT32_MAX || sh>INT32_MAX)return 0;
   const Scissor rect{x,int32_t(top),int32_t(sw),int32_t(sh)};
-  const bool nativeHalfScale=(format==EfbCopyFormat::Passthrough || format==EfbCopyFormat::RGB565) &&
-      sw==dw*2u && sh==dh*2u;
-  if(nativeHalfScale) {
+  const bool nativeTransfer=(format==EfbCopyFormat::Passthrough || format==EfbCopyFormat::RGB565) &&
+      ((sw==dw && sh==dh) || (sw==dw*2u && sh==dh*2u));
+  if(nativeTransfer) {
     Handle target=0;
     const auto existingIt=map_.find(existing);
     if(existingIt!=map_.end() && existingIt->second.width==dw && existingIt->second.height==dh)target=existing;
@@ -322,7 +322,14 @@ bool Renderer::display_copy(const Scissor& src) noexcept {
 Handle Renderer::capture_current(Handle existing,const Scissor& s,uint32_t dw,uint32_t dh,EfbCopyFormat f,bool fx,bool fy) noexcept {
   const int64_t y=int64_t(targetHeight_)-s.y-s.height;
   if(s.width<=0||s.height<=0||y<INT32_MIN||y>INT32_MAX)return 0;
-  return efb_.capture_from_bound(existing,s.x,int32_t(y),s.width,s.height,dw,dh,f,false,fx,fy);
+  const auto h=efb_.capture_from_bound(existing,s.x,int32_t(y),s.width,s.height,dw,dh,f,false,fx,fy);
+  const auto& sNative=native_->stats();
+  stats_.nativeEfbCopies=sNative.nativeEfbCopies;
+  stats_.nativeEfbEndSceneUs=sNative.nativeEfbEndSceneUs;
+  stats_.nativeEfbTransferSubmitUs=sNative.nativeEfbTransferSubmitUs;
+  stats_.nativeEfbTransferWaitUs=sNative.nativeEfbTransferWaitUs;
+  stats_.nativeEfbCpuFixupUs=sNative.nativeEfbCpuFixupUs;
+  return h;
 }
 Handle Renderer::upload_efb_rgba(Handle existing,uint32_t w,uint32_t h,const void* data) noexcept {return efb_.upload_rgba(existing,w,h,data);}
 void Renderer::clear_current(const Color& c,float z,bool rgb,bool alpha,bool depth) noexcept {

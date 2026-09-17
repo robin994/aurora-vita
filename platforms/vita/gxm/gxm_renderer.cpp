@@ -208,7 +208,7 @@ struct Renderer::Impl {
     SceGxmFragmentProgram* fragment = nullptr;
     const SceGxmProgramParameter *mvp = nullptr, *kcolor = nullptr, *tevreg = nullptr, *clip = nullptr;
     const SceGxmProgramParameter *fogColor=nullptr,*fogParams=nullptr,*fogRange=nullptr,*viewportWidth=nullptr;
-    const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr,*textureTransform=nullptr,*textureWrap=nullptr,*textureForceOpaque=nullptr;
+    const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr,*textureTransform=nullptr,*textureWrap=nullptr,*textureForceOpaque=nullptr,*textureCopyMode=nullptr;
     const SceGxmProgramParameter *gxPosition=nullptr,*gxMaterial=nullptr;
     std::array<const SceGxmProgramParameter*,MaxTextures> gxTexture{};
     std::array<const SceGxmProgramParameter*,MaxTextures> gxPost{};
@@ -524,6 +524,7 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.textureTransform=sceGxmProgramFindParameterByName(fp,"u_tex_transform");
   p.textureWrap=sceGxmProgramFindParameterByName(fp,"u_tex_wrap");
   p.textureForceOpaque=sceGxmProgramFindParameterByName(fp,"u_tex_force_opaque");
+  p.textureCopyMode=sceGxmProgramFindParameterByName(fp,"u_tex_copy_mode");
   p.gxPosition=sceGxmProgramFindParameterByName(vp,"u_gx_position");
   p.gxMaterial=sceGxmProgramFindParameterByName(vp,"u_gx_material");
   for(unsigned i=0;i<MaxTextures;++i) {
@@ -749,6 +750,12 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     std::array<float,MaxTextures> opaque{};
     for(unsigned i=0;i<usedTextureCount;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
     if(!upload(p.textureForceOpaque,usedTextureCount,opaque.data()))return false;
+  }
+  if(p.textureCopyMode) {
+    std::array<float,MaxTextures> mode{};
+    for(unsigned i=0;i<usedTextureCount;++i)
+      mode[i]=textures&&(*textures)[i].sampleFormat==EfbCopyFormat::R4?1.f:0.f;
+    if(!upload(p.textureCopyMode,usedTextureCount,mode.data()))return false;
   }
   p.inFlight=true;
   return true;
@@ -1032,10 +1039,14 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     return d.fail("invalid native EFB GPU copy");
   auto& destination=*destinationIt->second;
   const uint32_t sourceWidth=d.width(),sourceHeight=d.height();
+  const bool sameSize=uint32_t(source.width)==destination.width &&
+      uint32_t(source.height)==destination.height;
+  const bool halfScale=uint32_t(source.width)==destination.width*2u &&
+      uint32_t(source.height)==destination.height*2u;
   if(uint64_t(source.x)+uint64_t(source.width)>sourceWidth ||
      uint64_t(source.y)+uint64_t(source.height)>sourceHeight ||
      (format!=EfbCopyFormat::Passthrough && format!=EfbCopyFormat::RGB565) ||
-     uint32_t(source.width)!=destination.width*2u || uint32_t(source.height)!=destination.height*2u)
+     (!sameSize && !halfScale))
     return d.fail("unsupported native EFB GPU copy");
 
   const Handle originalTarget=d.boundTarget;
@@ -1054,22 +1065,30 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     sourceSync=d.surfaces[d.back].sync;
   }
 
-  // TransferDownscale is purpose-built for the 2x GX EFB copies used by
-  // Strikers. Complete raster work first, run one transfer job, and keep the
-  // display EFB bound; unlike the bring-up shader copy this does not open a
-  // second render scene or consume render-target scene references.
+  // Melee commonly copies a GX EFB rectangle 1:1 after the logical-to-Vita
+  // framebuffer mapping. Keep both that case and the Strikers 2x downscale on
+  // the transfer engine so neither path falls back to a full framebuffer CPU
+  // readback between ordered GXCopyTex boundaries.
   const uint64_t copyStarted=sceKernelGetProcessTimeWide();
   const bool asyncCopy=format==EfbCopyFormat::Passthrough && !flipX && !flipY;
   if(asyncCopy) {
     if(!d.end_scene())return false;
   } else if(!finish()) return false;
   const uint64_t afterSourceFinish=sceKernelGetProcessTimeWide();
-  if(!d.check(sceGxmTransferDownscale(SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
-      sourceData,static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),
-      static_cast<unsigned>(source.width),static_cast<unsigned>(source.height),
-      static_cast<int>(sourceStride*4u),SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
-      destination.memory.data(),0,0,static_cast<int>(destination.stride*4u),
-      asyncCopy?sourceSync:nullptr,asyncCopy?SCE_GXM_TRANSFER_FRAGMENT_SYNC:0u,nullptr),"native EFB downscale transfer"))return false;
+  const int transferResult=sameSize?
+      sceGxmTransferCopy(destination.width,destination.height,0,0,SCE_GXM_TRANSFER_COLORKEY_NONE,
+          SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,SCE_GXM_TRANSFER_LINEAR,sourceData,
+          static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),static_cast<int>(sourceStride*4u),
+          SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,SCE_GXM_TRANSFER_LINEAR,destination.memory.data(),
+          0,0,static_cast<int>(destination.stride*4u),asyncCopy?sourceSync:nullptr,
+          asyncCopy?SCE_GXM_TRANSFER_FRAGMENT_SYNC:0u,nullptr):
+      sceGxmTransferDownscale(SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
+          sourceData,static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),
+          static_cast<unsigned>(source.width),static_cast<unsigned>(source.height),
+          static_cast<int>(sourceStride*4u),SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
+          destination.memory.data(),0,0,static_cast<int>(destination.stride*4u),
+          asyncCopy?sourceSync:nullptr,asyncCopy?SCE_GXM_TRANSFER_FRAGMENT_SYNC:0u,nullptr);
+  if(!d.check(transferResult,sameSize?"native EFB copy transfer":"native EFB downscale transfer"))return false;
   const uint64_t afterTransferSubmit=sceKernelGetProcessTimeWide();
   if(!asyncCopy && !d.check(sceGxmTransferFinish(),"finish native EFB downscale transfer"))return false;
   const uint64_t afterTransferFinish=sceKernelGetProcessTimeWide();
@@ -1099,6 +1118,11 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     }
   }
   const uint64_t afterCpuFixup=sceKernelGetProcessTimeWide();
+  ++d.stats.nativeEfbCopies;
+  d.stats.nativeEfbEndSceneUs+=afterSourceFinish-copyStarted;
+  d.stats.nativeEfbTransferSubmitUs+=afterTransferSubmit-afterSourceFinish;
+  d.stats.nativeEfbTransferWaitUs+=afterTransferFinish-afterTransferSubmit;
+  d.stats.nativeEfbCpuFixupUs+=afterCpuFixup-afterTransferFinish;
   if(asyncCopy) {
     d.pendingFragmentTransferSync=true;
     destination.inFlight=true;

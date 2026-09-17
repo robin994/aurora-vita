@@ -318,12 +318,15 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   constexpr bool physicalFlipX=false,physicalFlipY=true;
   constexpr bool logicalFlipX=true,logicalFlipY=false;
   const bool forceOpaque=copyFormat==gfx::EfbCopyFormat::RGB565;
-  const auto physicalFormat=forceOpaque?gfx::EfbCopyFormat::Passthrough:copyFormat;
+  const bool deferR4=copyFormat==gfx::EfbCopyFormat::R4;
+  const auto physicalFormat=(forceOpaque||deferR4)?gfx::EfbCopyFormat::Passthrough:copyFormat;
+  const auto sampleFormat=deferR4?gfx::EfbCopyFormat::R4:gfx::EfbCopyFormat::Passthrough;
 #else
   constexpr bool physicalFlipX=true,physicalFlipY=true;
   constexpr bool logicalFlipX=false,logicalFlipY=false;
   constexpr bool forceOpaque=false;
   const auto physicalFormat=copyFormat;
+  constexpr auto sampleFormat=gfx::EfbCopyFormat::Passthrough;
 #endif
   const auto h = renderer_->capture_current(oldHandle, src, dstW, dstH, physicalFormat, physicalFlipX, physicalFlipY);
   if (!h) {
@@ -336,7 +339,7 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
     return false;
   }
   if (telemetry_) telemetry_->efb_copy();
-  copyTextures_[copyKey] = CopyTextureEntry{h, dstW, dstH, oldRevision + 1, logicalFlipX, logicalFlipY, forceOpaque};
+  copyTextures_[copyKey] = CopyTextureEntry{h, dstW, dstH, oldRevision + 1, logicalFlipX, logicalFlipY, forceOpaque, sampleFormat};
   resolvedTextureBindingsValid_=false;
   if (clear) {
 #if defined(AURORA_VITA_UPSTREAM_STUB)
@@ -636,7 +639,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       const auto ci = copyTextures_.find(ptr);
       if (ci != copyTextures_.end() && ci->second.handle) {
         bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb,
-                                             ci->second.logicalFlipX,ci->second.logicalFlipY,ci->second.forceOpaque};
+                                             ci->second.logicalFlipX,ci->second.logicalFlipY,ci->second.forceOpaque,
+                                             ci->second.sampleFormat};
         continue;
       }
     }

@@ -280,6 +280,7 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
       "uniform float4 u_kcolor[4]", "uniform float4 u_tevreg[4]",
       "uniform float4 u_ind_mtx[6]", "uniform float4 u_texcoord_scale[8]", "uniform float4 u_texture_size_bias[8]",
       "uniform float4 u_tex_transform[8]", "uniform float4 u_tex_wrap[8]", "uniform float u_tex_force_opaque[8]",
+      "uniform float u_tex_copy_mode[8]",
       "uniform float4 u_fog_color", "uniform float4 u_fog_params", "uniform float u_fog_range_k[10]",
       "uniform float u_render_viewport_width"};
   if (d.fragmentScissor || d.fogMode != FogMode::None)
@@ -387,8 +388,9 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
       if(!nativeWrap) fs << "gx_wrap_uv(";
       fs << "gx_sample_uv(tev_uv,u_tex_transform[" << unsigned(s.texture) << "])";
       if(!nativeWrap) fs << ",u_tex_wrap[" << unsigned(s.texture) << "].xy)";
-      fs << ");\nraw_tex.a=lerp(raw_tex.a,1.0,u_tex_force_opaque["
-         << unsigned(s.texture) << "]);\n";
+      fs << ");\nif(u_tex_copy_mode[" << unsigned(s.texture)
+         << "]>0.5){float q=min(floor(raw_tex.r*16.0)/15.0,1.0);raw_tex=float4(q,q,q,q);}\n"
+         << "raw_tex.a=lerp(raw_tex.a,1.0,u_tex_force_opaque[" << unsigned(s.texture) << "]);\n";
     } else fs << "float4(1.0);\n";
     fs << "float4 texc=" << swizzle("raw_tex", d.tev.swapTable[s.texSwap]) << ";\nfloat4 raw_ras=";
     if (!tev_stage_uses_raster(s) || s.rasterSource == RasterSource::Zero) fs << "float4(0.0)";

@@ -392,6 +392,9 @@ struct TextureBinding {
   bool flipX = false;
   bool flipY = false;
   bool forceOpaque = false;
+  // Native GXM may keep an EFB copy in RGBA8 storage and reproduce a cheap GX
+  // copy-format conversion while sampling, avoiding a synchronized CPU readback.
+  EfbCopyFormat sampleFormat = EfbCopyFormat::Passthrough;
 };
 
 struct BufferSlice { Handle buffer=InvalidHandle; uint32_t offset=0; uint32_t size=0; };
@@ -479,6 +482,11 @@ struct FrameStats {
   uint64_t nativePipelineUs = 0;
   uint64_t nativeTextureUs = 0;
   uint64_t nativeDrawUs = 0;
+  uint32_t nativeEfbCopies = 0;
+  uint64_t nativeEfbEndSceneUs = 0;
+  uint64_t nativeEfbTransferSubmitUs = 0;
+  uint64_t nativeEfbTransferWaitUs = 0;
+  uint64_t nativeEfbCpuFixupUs = 0;
 };
 
 } // namespace aurora::vita::gfx
