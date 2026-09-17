@@ -61,6 +61,30 @@ std::string comparison(Compare op, const std::string& a, const std::string& b) {
   if (op == Compare::Always) return "true";
   return "(" + a + ops[static_cast<unsigned>(op)] + b + ")";
 }
+std::string alpha_test(const std::string& a, const std::string& b, unsigned op) {
+  // Do not leave a syntactic discard in an unconditional-pass shader or rely
+  // on the runtime compiler to remove its kill metadata.
+  if (a == b) return op < 2 ? a : op == 2 ? "false" : "true";
+  const bool ac = a == "true" || a == "false";
+  const bool bc = b == "true" || b == "false";
+  if (ac && bc) {
+    const bool av = a == "true", bv = b == "true";
+    const bool values[]{av && bv, av || bv, av != bv, av == bv};
+    return values[op] ? "true" : "false";
+  }
+  if (ac || bc) {
+    const auto& value = ac ? b : a;
+    const bool constant = (ac ? a : b) == "true";
+    switch (op) {
+    case 0: return constant ? value : "false";
+    case 1: return constant ? "true" : value;
+    case 2: return constant ? "!(" + value + ")" : value;
+    case 3: return constant ? value : "!(" + value + ")";
+    }
+  }
+  static constexpr const char* operators[]{"&&", "||", "!=", "=="};
+  return a + operators[op] + b;
+}
 void signature(std::ostringstream& stream, const std::vector<std::string>& parameters) {
   for (size_t i = 0; i < parameters.size(); ++i) {
     if (i) stream << ",\n";
@@ -395,8 +419,8 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   const auto& ac = d.tev.alphaCompare;
   const auto a = comparison(ac.comp0, "floor(result.a*255.0+0.5)", std::to_string(ac.ref0)+".0");
   const auto b = comparison(ac.comp1, "floor(result.a*255.0+0.5)", std::to_string(ac.ref1)+".0");
-  static constexpr const char* operators[]{"&&", "||", "!=", "=="};
-  fs << "if(!(" << a << operators[ac.op] << b << ")) discard;\n";
+  const auto predicate = alpha_test(a, b, ac.op);
+  if (predicate != "true") fs << "if(!(" << predicate << ")) discard;\n";
   if (d.dstAlpha >= 0) fs << "result.a=" << d.dstAlpha << ".0/255.0;\n";
   if(d.fogMode!=FogMode::None) {
     fs<<"{float fd="<<(d.reversedZ?"window_position.z":"(1.0-window_position.z)")<<";\nfloat fb="

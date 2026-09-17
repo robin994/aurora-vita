@@ -133,16 +133,7 @@ struct FusedVertexContext {
 };
 
 void pack_gpu_vertex(uint8_t* dst,const CanonicalVertex& src,const VertexLayout& layout) noexcept {
-  for(unsigned ai=0;ai<layout.count;++ai){
-    const auto&a=layout.attributes[ai];
-    if(a.location==0)std::memcpy(dst+a.offset,src.position,sizeof(src.position));
-    else if(a.location==1)std::memcpy(dst+a.offset,src.color0,sizeof(src.color0));
-    else if(a.location==2)std::memcpy(dst+a.offset,src.color1,sizeof(src.color1));
-    else if(a.location>=3&&a.location<3+MaxTextures)std::memcpy(dst+a.offset,src.texcoord[a.location-3],sizeof(src.texcoord[0]));
-    else if(a.location==11)std::memcpy(dst+a.offset,src.normal,sizeof(src.normal));
-    else if(a.location==12)std::memcpy(dst+a.offset,src.binormal,sizeof(src.binormal));
-    else if(a.location==13)std::memcpy(dst+a.offset,src.tangent,sizeof(src.tangent));
-  }
+  pack_gpu_vertex_inline(dst,src,layout);
 }
 
 bool decode_transform_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {

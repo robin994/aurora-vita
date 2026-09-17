@@ -67,7 +67,14 @@ public:
                          EfbCopyFormat format=EfbCopyFormat::Passthrough,bool flipX=false,bool flipY=false) noexcept;
   Handle upload_efb_rgba(Handle existing,uint32_t width,uint32_t height,const void* rgba) noexcept;
   void clear_current(const Color& color,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
-  void execute(const CommandStream& stream) noexcept;void draw(const DrawPacket& d) noexcept;
+  void execute(const CommandStream& stream) noexcept;
+  /* Execute a stable slice of one prepared stream. GXCopyTex uses this to keep
+   * the GameCube ordering boundary without rebuilding or duplicating geometry.
+   * Only the final slice should set finalize=true so pipeline pins survive
+   * across intermediate EFB captures. */
+  void execute_range(const CommandStream& stream,size_t begin,size_t end,
+                     bool finalize=false) noexcept;
+  void draw(const DrawPacket& d) noexcept;
   // Resource uploads happen outside draw() and can change raw vitaGL buffer or
   // texture bindings. DrawSink calls this once per submitted command chunk so the
   // first draw re-establishes only those bindings, without throwing away pipeline

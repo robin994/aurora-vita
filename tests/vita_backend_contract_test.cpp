@@ -108,6 +108,29 @@ void shader_operations() {
     REQUIRE(source.ok());
     REQUIRE(source.fragment.find("WPOS") == std::string::npos);
     REQUIRE(source.fragment.find("window_position.x<u_clip_rect") == std::string::npos);
+    REQUIRE(source.fragment.find("discard") == std::string::npos);
+  }
+  for (unsigned av = 0; av < 2; ++av) for (unsigned bv = 0; bv < 2; ++bv)
+    for (unsigned op = 0; op < 4; ++op) {
+      auto d = basic();
+      d.fragmentScissor = false;
+      d.tev.alphaCompare = {av ? Compare::Always : Compare::Never, 13,
+                           uint8_t(op), bv ? Compare::Always : Compare::Never, 217};
+      const auto shader = gxm::build_tev_cg(d);
+      REQUIRE(shader.ok());
+      const bool pass[]{bool(av && bv), bool(av || bv), av != bv, av == bv};
+      REQUIRE((shader.fragment.find("discard") == std::string::npos) == pass[op]);
+      if (!pass[op]) REQUIRE(shader.fragment.find("if(!(false)) discard;") != std::string::npos);
+    }
+  for (unsigned op = 0; op < 4; ++op) {
+    auto d = basic();
+    d.fragmentScissor = false;
+    d.tev.alphaCompare = {Compare::Less, 91, uint8_t(op), Compare::Less, 91};
+    const auto shader = gxm::build_tev_cg(d);
+    REQUIRE(shader.ok());
+    if (op == 3) REQUIRE(shader.fragment.find("discard") == std::string::npos);
+    else if (op == 2) REQUIRE(shader.fragment.find("if(!(false)) discard;") != std::string::npos);
+    else REQUIRE(shader.fragment.find("if(!((floor(result.a*255.0+0.5)<91.0))) discard;") != std::string::npos);
   }
   {
     auto d = basic();

@@ -4,6 +4,7 @@
 #include "vita_streaming_arena.hpp"
 #include "vita_telemetry.hpp"
 #include "vita_vertex_decode.hpp"
+#include "vita_vertex_pack.hpp"
 #include "vita_vertex_pipeline.hpp"
 #include <cstddef>
 #include <cstdint>

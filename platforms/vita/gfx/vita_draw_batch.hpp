@@ -1,6 +1,7 @@
 #pragma once
 #include "vita_gfx_types.hpp"
 #include <cstring>
+#include "vita_byte_compare.h"
 
 namespace aurora::vita::gfx {
 // Only adjacent, CPU-prepared triangle lists may use this predicate. Their
@@ -20,7 +21,7 @@ inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noex
       a.viewport.znear != b.viewport.znear || a.viewport.zfar != b.viewport.zfar ||
       a.scissor.x != b.scissor.x || a.scissor.y != b.scissor.y ||
       a.scissor.width != b.scissor.width || a.scissor.height != b.scissor.height ||
-      std::memcmp(&a.uniforms, &b.uniforms, sizeof(a.uniforms))) return false;
+      !aurora_vita_bytes_equal(&a.uniforms, &b.uniforms, sizeof(a.uniforms))) return false;
   for (unsigned i = 0; i < MaxTextures; ++i) {
     const auto& x = a.textures[i]; const auto& y = b.textures[i];
     if (x.texture != y.texture || x.source != y.source || x.flipX != y.flipX ||

@@ -148,13 +148,14 @@ void Renderer::clear_current(const Color& color,float depth,bool clearRgb,bool c
   (void)color;(void)depth;(void)clearRgb;(void)clearAlpha;(void)clearDepth;
 #endif
 }
-void Renderer::execute(const CommandStream&s) noexcept {for(const auto&c:s.commands())switch(c.type){case CommandType::Clear:
+void Renderer::execute(const CommandStream&s) noexcept {execute_range(s,0,s.size(),true);}
+void Renderer::execute_range(const CommandStream&s,size_t begin,size_t end,bool finalize) noexcept {const auto&commands=s.commands();begin=std::min(begin,commands.size());end=std::min(std::max(end,begin),commands.size());for(size_t index=begin;index<end;++index){const auto&c=commands[index];switch(c.type){case CommandType::Clear:
   clear_current(c.clear.color,c.clear.depth,c.clear.colorEnable,c.clear.colorEnable,c.clear.depthEnable);break;
 case CommandType::Draw:draw(c.draw);break;case CommandType::SetRenderTarget:if(c.target.target)bind_efb(c.target.target);else bind_default();break;case CommandType::CopyEfb:if(c.copy.destination)blit_efb(c.copy.destination);break;case CommandType::Barrier:
 #if defined(__vita__)
   glFlush();
 #endif
-  break;}pipelines_.clear_pins();pipelines_.trim_to_budget();}
+  break;}}if(finalize){pipelines_.clear_pins();pipelines_.trim_to_budget();}}
 void Renderer::draw(const DrawPacket&d) noexcept {const auto*p=pipelines_.find(d.pipelineKey);if(!p)return;if(p->desc.fixedVertexOnGpu&&!d.fixedVertexUniforms)return;pipelines_.bind(*p,d.uniforms,&stats_,d.fixedVertexUniforms);
 #if defined(__vita__)
   if(!viewportValid_||!same_viewport(cachedViewport_,d.viewport)){const GLint vy=static_cast<GLint>(targetHeight_)-static_cast<GLint>(d.viewport.y+d.viewport.height);glViewport((GLint)d.viewport.x,vy,(GLsizei)d.viewport.width,(GLsizei)d.viewport.height);const float minDepth=std::clamp(std::min(d.viewport.znear,d.viewport.zfar),0.0f,1.0f);const float maxDepth=std::clamp(std::max(d.viewport.znear,d.viewport.zfar),0.0f,1.0f);glDepthRangef(minDepth,maxDepth);cachedViewport_=d.viewport;viewportValid_=true;}

@@ -339,7 +339,13 @@ void Renderer::draw(const DrawPacket& packet) noexcept {
   stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;stats_.nativeDrawUs=s.nativeDrawUs;
 }
 void Renderer::execute(const CommandStream& stream) noexcept {
-  for(const auto& c:stream.commands()) {
+  execute_range(stream,0,stream.size(),true);
+}
+void Renderer::execute_range(const CommandStream& stream,size_t begin,size_t end,bool finalize) noexcept {
+  const auto& commands=stream.commands();
+  begin=std::min(begin,commands.size());end=std::min(std::max(end,begin),commands.size());
+  for(size_t index=begin;index<end;++index) {
+    const auto& c=commands[index];
     if(failed_)break;
     switch(c.type) {
     case CommandType::Clear:clear_current(c.clear.color,c.clear.depth,c.clear.colorEnable,c.clear.colorEnable,c.clear.depthEnable);break;
@@ -350,6 +356,6 @@ void Renderer::execute(const CommandStream& stream) noexcept {
     case CommandType::Barrier:if(!native_->finish())failed_=true;break;
     }
   }
-  pipelines_.clear_pins();pipelines_.trim_to_budget();
+  if(finalize){pipelines_.clear_pins();pipelines_.trim_to_budget();}
 }
 }

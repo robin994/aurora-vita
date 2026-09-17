@@ -48,6 +48,14 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp)
     target_link_libraries(aurora_vita_backend_contract_test PRIVATE aurora::vita_common)
     add_test(NAME vita_backend_contract COMMAND aurora_vita_backend_contract_test)
+    add_executable(aurora_vita_byte_compare_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_byte_compare_test.cpp)
+    target_link_libraries(aurora_vita_byte_compare_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_byte_compare COMMAND aurora_vita_byte_compare_test)
+    add_executable(aurora_vita_vertex_pack_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_vertex_pack_test.cpp)
+    target_link_libraries(aurora_vita_vertex_pack_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_vertex_pack COMMAND aurora_vita_vertex_pack_test)
     add_test(NAME vita_renderer_selection
         COMMAND ${CMAKE_COMMAND}
             -DSELECTION_MODULE=${CMAKE_CURRENT_LIST_DIR}/AuroraVitaRendererSelection.cmake
