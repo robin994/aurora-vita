@@ -191,6 +191,8 @@ struct Renderer::Impl {
     uint32_t width = 0, height = 0, stride = 0;
     uint32_t mipCount = 1;
     bool swizzled = false;
+    SamplerDesc descriptorSampler{};
+    bool descriptorSamplerValid = false;
     bool inFlight = false, depthValid = false;
     ~Texture() {
       if (sync) sceGxmSyncObjectDestroy(sync);
@@ -244,7 +246,10 @@ struct Renderer::Impl {
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
   bool frameActive = false, depthValid = false;
   bool pipelineStateValid = false, viewportValid = false;
+  bool vertexStreamValid = false;
   Viewport cachedViewport{};
+  Handle boundVertexBuffer = 0;
+  size_t boundVertexBase = 0;
   uint8_t textureBindingValidMask = 0;
   std::array<Handle,MaxTextures> boundTextureHandles{};
   std::array<SamplerDesc,MaxTextures> boundTextureSamplers{};
@@ -298,7 +303,8 @@ struct Renderer::Impl {
     if (!check(sceGxmBeginScene(context, flags, rt, nullptr, vertexDependency, sync, cs, ds), "begin native scene")) return false;
     pendingVertexDependency = nullptr;
     pendingFragmentTransferSync = false;
-    pipelineStateValid=false;viewportValid=false;textureBindingValidMask=0;boundPipelineKey=0;
+    pipelineStateValid=false;viewportValid=false;vertexStreamValid=false;
+    textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
     inScene = true;
     return true;
   }
@@ -656,7 +662,8 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s) {
     it->second->inFlight=true;
     return true;
   }
-  auto texture=it->second->descriptor;
+  auto& textureObject=*it->second;
+  auto& texture=textureObject.descriptor;
   const bool point=s.minFilter==Filter::Nearest || s.minFilter==Filter::NearestMipmapNearest || s.minFilter==Filter::NearestMipmapLinear;
   const bool useMips=s.minFilter>Filter::Linear && it->second->mipCount>1;
   const bool trilinear=s.minFilter==Filter::NearestMipmapLinear || s.minFilter==Filter::LinearMipmapLinear;
@@ -666,14 +673,18 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s) {
     if (!it->second->swizzled || mode==WrapMode::Clamp) return SCE_GXM_TEXTURE_ADDR_CLAMP;
     return mode==WrapMode::Repeat?SCE_GXM_TEXTURE_ADDR_REPEAT:SCE_GXM_TEXTURE_ADDR_MIRROR;
   };
-  if(!d.check(sceGxmTextureSetMinFilter(&texture,point?SCE_GXM_TEXTURE_FILTER_POINT:SCE_GXM_TEXTURE_FILTER_LINEAR),"texture min filter") ||
-     !d.check(sceGxmTextureSetMagFilter(&texture,s.magFilter==Filter::Nearest?SCE_GXM_TEXTURE_FILTER_POINT:SCE_GXM_TEXTURE_FILTER_LINEAR),"texture mag filter") ||
-     !d.check(sceGxmTextureSetUAddrMode(&texture,address(s.wrapS)),"texture U wrap") ||
-     !d.check(sceGxmTextureSetVAddrMode(&texture,address(s.wrapT)),"texture V wrap") ||
-     !d.check(sceGxmTextureSetMipmapCount(&texture,mips),"texture mip count") ||
-     !d.check(sceGxmTextureSetMipFilter(&texture,useMips&&trilinear?SCE_GXM_TEXTURE_MIP_FILTER_ENABLED:SCE_GXM_TEXTURE_MIP_FILTER_DISABLED),"texture mip filter") ||
-     !d.check(sceGxmTextureSetLodBias(&texture,bias),"texture LOD bias") ||
-     !d.check(sceGxmSetFragmentTexture(d.context,unit,&texture),"bind fragment texture")) return false;
+  if(!textureObject.descriptorSamplerValid||!same_sampler(textureObject.descriptorSampler,s)) {
+    if(!d.check(sceGxmTextureSetMinFilter(&texture,point?SCE_GXM_TEXTURE_FILTER_POINT:SCE_GXM_TEXTURE_FILTER_LINEAR),"texture min filter") ||
+       !d.check(sceGxmTextureSetMagFilter(&texture,s.magFilter==Filter::Nearest?SCE_GXM_TEXTURE_FILTER_POINT:SCE_GXM_TEXTURE_FILTER_LINEAR),"texture mag filter") ||
+       !d.check(sceGxmTextureSetUAddrMode(&texture,address(s.wrapS)),"texture U wrap") ||
+       !d.check(sceGxmTextureSetVAddrMode(&texture,address(s.wrapT)),"texture V wrap") ||
+       !d.check(sceGxmTextureSetMipmapCount(&texture,mips),"texture mip count") ||
+       !d.check(sceGxmTextureSetMipFilter(&texture,useMips&&trilinear?SCE_GXM_TEXTURE_MIP_FILTER_ENABLED:SCE_GXM_TEXTURE_MIP_FILTER_DISABLED),"texture mip filter") ||
+       !d.check(sceGxmTextureSetLodBias(&texture,bias),"texture LOD bias")) return false;
+    textureObject.descriptorSampler=s;
+    textureObject.descriptorSamplerValid=true;
+  }
+  if(!d.check(sceGxmSetFragmentTexture(d.context,unit,&texture),"bind fragment texture")) return false;
   d.textureBindingValidMask|=static_cast<uint8_t>(1u<<unit);
   d.boundTextureHandles[unit]=handle;d.boundTextureSamplers[unit]=s;
   it->second->inFlight=true;
@@ -831,7 +842,10 @@ bool Renderer::draw(const DrawPacket& packet) {
         vp.y + vp.height * .5f, -vp.height * .5f, (low + high) * .5f, (high - low) * .5f);
     d.cachedViewport=vp;d.viewportValid=true;
   }
-  if (!d.check(sceGxmSetVertexStream(d.context, 0, static_cast<uint8_t*>(vi->second.memory.data()) + base), "bind native vertex stream")) return false;
+  if(!d.vertexStreamValid||d.boundVertexBuffer!=packet.vertices.buffer||d.boundVertexBase!=base) {
+    if (!d.check(sceGxmSetVertexStream(d.context, 0, static_cast<uint8_t*>(vi->second.memory.data()) + base), "bind native vertex stream")) return false;
+    d.vertexStreamValid=true;d.boundVertexBuffer=packet.vertices.buffer;d.boundVertexBase=base;
+  }
   const auto primitive = pipeline.primitive == Primitive::Triangles ? SCE_GXM_PRIMITIVE_TRIANGLES :
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
   if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;

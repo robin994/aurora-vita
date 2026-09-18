@@ -268,6 +268,8 @@ void TextureCache::bind(Handle h,unsigned unit,const SamplerDesc&s) noexcept {au
 #if defined(__vita__)
   glActiveTexture(GL_TEXTURE0+unit);glBindTexture(GL_TEXTURE_2D,e.gl);
   const auto&old=e.sampler;
+  const bool samplerChanged=!e.samplerValid||old.wrapS!=s.wrapS||old.wrapT!=s.wrapT||
+      old.minFilter!=s.minFilter||old.magFilter!=s.magFilter||old.lodBias!=s.lodBias;
   if(!e.samplerValid||old.wrapS!=s.wrapS)glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,wrap(s.wrapS));
   if(!e.samplerValid||old.wrapT!=s.wrapT)glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,wrap(s.wrapT));
   if(!e.samplerValid||old.minFilter!=s.minFilter){const Filter minFilter=!e.hasMipmaps&&mip_filter(s.minFilter)?without_mips(s.minFilter):s.minFilter;glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,filt(minFilter));}
@@ -275,9 +277,15 @@ void TextureCache::bind(Handle h,unsigned unit,const SamplerDesc&s) noexcept {au
   if(!e.samplerValid||old.lodBias!=s.lodBias)glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_LOD_BIAS,vitagl_lod_bias(s.lodBias));
   if(e.explicitMipCount) {
     // GL setters consult their base-level allocation metadata. Reapply the
-    // real count after them, only for Aurora-owned explicit mip backing.
-    if(auto* native=vglGetGxmTexture(GL_TEXTURE_2D))
-      sceGxmTextureSetMipmapCount(native,mip_filter(s.minFilter)?e.explicitMipCount:1);
+    // real count only when a setter could have disturbed it or the requested
+    // mip state changed. Hot rebinds otherwise stay entirely in vitaGL's bind cache.
+    const uint8_t requestedMipCount=mip_filter(s.minFilter)?e.explicitMipCount:1;
+    if(samplerChanged||e.appliedMipCount!=requestedMipCount) {
+      if(auto* native=vglGetGxmTexture(GL_TEXTURE_2D)) {
+        sceGxmTextureSetMipmapCount(native,requestedMipCount);
+        e.appliedMipCount=requestedMipCount;
+      }
+    }
   }
   e.sampler=s;e.samplerValid=true;
 #else
