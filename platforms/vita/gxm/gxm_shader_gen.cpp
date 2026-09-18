@@ -465,6 +465,8 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
       fs << "gx_sample_uv(tev_uv,u_tex_transform[" << unsigned(s.texture) << "])";
       if(!nativeWrap) fs << ",u_tex_wrap[" << unsigned(s.texture) << "].xy)";
       fs << ");\nif(u_tex_copy_mode[" << unsigned(s.texture)
+         << "]>1.5){float a=raw_tex.a;raw_tex=float4(a,a,a,a);}\n"
+         << "else if(u_tex_copy_mode[" << unsigned(s.texture)
          << "]>0.5){float q=min(floor(raw_tex.r*16.0)/15.0,1.0);raw_tex=float4(q,q,q,q);}\n"
          << "raw_tex.a=lerp(raw_tex.a,1.0,u_tex_force_opaque[" << unsigned(s.texture) << "]);\n";
     } else fs << "float4(1.0);\n";

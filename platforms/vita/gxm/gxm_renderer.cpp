@@ -762,7 +762,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
         (static_cast<unsigned>(binding.sampler.wrapS)<<2u)|
         (static_cast<unsigned>(binding.sampler.wrapT)<<4u)|
         (binding.forceOpaque?0x40u:0u)|
-        (binding.sampleFormat==EfbCopyFormat::R4?0x80u:0u));
+        (static_cast<unsigned>(efb_copy_sample_mode(binding.sampleFormat))<<7u));
   }
   const auto& cached=d.fragmentUniformState;
   const auto sameBytes=[](const void* a,const void* b,size_t bytes) noexcept {
@@ -822,7 +822,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     if(p.textureCopyMode) {
       std::array<float,MaxTextures> mode{};
       for(unsigned i=0;i<usedTextureCount;++i)
-        mode[i]=textures&&(*textures)[i].sampleFormat==EfbCopyFormat::R4?1.f:0.f;
+        mode[i]=textures?float(efb_copy_sample_mode((*textures)[i].sampleFormat)):0.f;
       if(!upload(p.textureCopyMode,usedTextureCount,mode.data()))return false;
     }
     auto& next=d.fragmentUniformState;

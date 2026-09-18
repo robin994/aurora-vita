@@ -345,6 +345,13 @@ enum class EfbCopyFormat : uint8_t {
   Unsupported,
   Count,
 };
+inline constexpr uint8_t efb_copy_sample_mode(EfbCopyFormat f) noexcept {
+  switch (f) {
+  case EfbCopyFormat::R4: return 1;
+  case EfbCopyFormat::A8: return 2;
+  default: return 0;
+  }
+}
 inline constexpr bool is_depth_copy_format(EfbCopyFormat f) noexcept {
   return f >= EfbCopyFormat::DepthZ8 && f <= EfbCopyFormat::DepthZ16L;
 }

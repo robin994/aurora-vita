@@ -398,6 +398,9 @@ void native_extended_contract() {
     REQUIRE(copy_efb_rgba8(rgba,2,2,all,3,5,EfbCopyFormat(fmt),false,false,copy));
   REQUIRE(copy_efb_rgba8(rgba,2,2,all,2,2,EfbCopyFormat::RG8,false,false,copy));
   REQUIRE(copy[0]==255 && copy[1]==255 && copy[2]==255 && copy[3]==0);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::Passthrough)==0);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::R4)==1);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::A8)==2);
 
   const char* cg="float4 main(float4 p:POSITION):POSITION{return p;}";
   const auto vh=gxm::gxm_program_source_hash(cg,gxm::ProgramStage::Vertex);

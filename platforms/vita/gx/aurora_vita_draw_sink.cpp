@@ -286,12 +286,21 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   // forcing the GXM backend into its full-frame CPU readback fallback. For the
   // common origin-aligned 1:1 guest copy, source and destination describe the
   // same logical extent, so use the destination's rounded physical extent too.
-  // Other copy shapes keep the conservative mapped-scissor behavior.
+  // Strikers' projected-shadow atlas uses an exact 2:1 guest downscale.  At a
+  // fractional physical scale the independently rounded source can differ by a
+  // pixel (181x180 -> 91x90), which needlessly rejects the native GXM 2x
+  // transfer.  Preserve the mapped origin but snap that known-ratio extent to
+  // exactly twice the physical destination.
   if(g.texCopySrc.x==0 && g.texCopySrc.y==0 && g.texCopySrc.width>0 && g.texCopySrc.height>0 &&
      static_cast<uint32_t>(g.texCopySrc.width)==g.texCopyDstWidth &&
      static_cast<uint32_t>(g.texCopySrc.height)==g.texCopyDstHeight) {
     src.width=static_cast<int32_t>(std::min<uint32_t>(dstW,renderer_->target_width()-static_cast<uint32_t>(src.x)));
     src.height=static_cast<int32_t>(std::min<uint32_t>(dstH,renderer_->target_height()-static_cast<uint32_t>(src.y)));
+  } else if(g.texCopySrc.width>0 && g.texCopySrc.height>0 && src.x>=0 && src.y>=0 &&
+            static_cast<uint32_t>(g.texCopySrc.width)==g.texCopyDstWidth*2u &&
+            static_cast<uint32_t>(g.texCopySrc.height)==g.texCopyDstHeight*2u) {
+    src.width=static_cast<int32_t>(std::min<uint32_t>(dstW*2u,renderer_->target_width()-static_cast<uint32_t>(src.x)));
+    src.height=static_cast<int32_t>(std::min<uint32_t>(dstH*2u,renderer_->target_height()-static_cast<uint32_t>(src.y)));
   }
 #endif
 #if defined(AURORA_VITA_UPSTREAM_STUB)
@@ -333,8 +342,10 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   constexpr bool logicalFlipX=true,logicalFlipY=false;
   const bool forceOpaque=copyFormat==gfx::EfbCopyFormat::RGB565;
   const bool deferR4=copyFormat==gfx::EfbCopyFormat::R4;
-  const auto physicalFormat=(forceOpaque||deferR4)?gfx::EfbCopyFormat::Passthrough:copyFormat;
-  const auto sampleFormat=deferR4?gfx::EfbCopyFormat::R4:gfx::EfbCopyFormat::Passthrough;
+  const bool deferA8=copyFormat==gfx::EfbCopyFormat::A8;
+  const auto physicalFormat=(forceOpaque||deferR4||deferA8)?gfx::EfbCopyFormat::Passthrough:copyFormat;
+  const auto sampleFormat=deferR4?gfx::EfbCopyFormat::R4:
+      (deferA8?gfx::EfbCopyFormat::A8:gfx::EfbCopyFormat::Passthrough);
 #else
   constexpr bool physicalFlipX=true,physicalFlipY=true;
   constexpr bool logicalFlipX=false,logicalFlipY=false;
