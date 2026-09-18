@@ -216,7 +216,18 @@ struct Renderer::Impl {
     std::array<const SceGxmProgramParameter*,MaxTextures> gxTexture{};
     std::array<const SceGxmProgramParameter*,MaxTextures> gxPost{};
     uint8_t textureMask = 0;
+    uint8_t usedTextureCount = 0;
+    uint8_t fixedTextureUniformMask = 0;
+    uint8_t lightTop = 0;
     bool inFlight = false;
+  };
+  struct FragmentUniformState {
+    GpuDrawUniforms uniforms{};
+    Scissor scissor{};
+    std::array<uint16_t,MaxTextures> textureFlags{};
+    uint64_t pipelineKey = 0;
+    uint8_t usedTextureCount = 0;
+    bool valid = false;
   };
   Config config{};
   uint64_t profileFrame = 0;
@@ -253,6 +264,7 @@ struct Renderer::Impl {
   uint8_t textureBindingValidMask = 0;
   std::array<Handle,MaxTextures> boundTextureHandles{};
   std::array<SamplerDesc,MaxTextures> boundTextureSamplers{};
+  FragmentUniformState fragmentUniformState{};
   SceGxmSyncObject* pendingVertexDependency = nullptr;
   bool pendingFragmentTransferSync = false;
   Scissor displayCopySource{};
@@ -304,6 +316,7 @@ struct Renderer::Impl {
     pendingVertexDependency = nullptr;
     pendingFragmentTransferSync = false;
     pipelineStateValid=false;viewportValid=false;vertexStreamValid=false;
+    fragmentUniformState.valid=false;
     textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
     inScene = true;
     return true;
@@ -480,6 +493,9 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   if (!source.ok()) { d.fail(source.error.c_str()); return 0; }
   auto pipeline = std::make_unique<Impl::Pipeline>();
   auto& p = *pipeline; p.desc = desc; p.textureMask = source.textureMask;
+  for(unsigned i=0;i<MaxTextures;++i)if(p.textureMask&(1u<<i))p.usedTextureCount=static_cast<uint8_t>(i+1u);
+  for(const auto& channel:desc.colorChannels)if(channel.lightingEnabled)
+    for(unsigned i=0;i<MaxLights;++i)if(channel.lightMask&(1u<<i))p.lightTop=static_cast<uint8_t>(std::max<unsigned>(p.lightTop,i+1u));
   p.vertexCode = d.compile_stage(source.vertex, SHARK_VERTEX_SHADER, ProgramStage::Vertex);
   p.fragmentCode = d.compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
   if (!p.vertexCode || !p.fragmentCode) return 0;
@@ -546,6 +562,7 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
     p.gxTexture[i]=sceGxmProgramFindParameterByName(vp,name);
     std::snprintf(name,sizeof(name),"u_gx_post%u",i);
     p.gxPost[i]=sceGxmProgramFindParameterByName(vp,name);
+    if(p.gxTexture[i]||p.gxPost[i])p.fixedTextureUniformMask|=static_cast<uint8_t>(1u<<i);
   }
   d.pipelines.emplace(key, std::move(pipeline));
   ++d.stats.pipelineMisses;
@@ -700,9 +717,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(!d.ensure_scene()) return false;
   auto& p=*it->second;
   const auto& pipeline=p.desc;
-  unsigned usedTextureCount=0;
-  for(unsigned i=0;i<MaxTextures;++i)
-    if(p.textureMask&(1u<<i)) usedTextureCount=i+1;
+  const unsigned usedTextureCount=p.usedTextureCount;
   if(!d.pipelineStateValid||d.boundPipelineKey!=key) {
     sceGxmSetVertexProgram(d.context,p.vertex);
     sceGxmSetFragmentProgram(d.context,p.fragment);
@@ -733,57 +748,87 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
               !uploadVertex(p.gxNormal,12,fixedVertex->normal.data())) return false;
     if(!uploadVertex(p.gxMaterial,16,fixedVertex->material[0].data()) ||
        !uploadVertex(p.gxAmbient,16,fixedVertex->ambient[0].data())) return false;
-    unsigned lightTop=0;
-    for(const auto& channel:pipeline.colorChannels)if(channel.lightingEnabled)
-      for(unsigned i=0;i<MaxLights;++i)if(channel.lightMask&(1u<<i))lightTop=std::max(lightTop,i+1u);
-    if(lightTop&&!uploadVertex(p.gxLight,lightTop*20u,fixedVertex->light[0].data())) return false;
-    for(unsigned i=0;i<MaxTextures;++i) {
+    if(p.lightTop&&!uploadVertex(p.gxLight,p.lightTop*20u,fixedVertex->light[0].data())) return false;
+    for(unsigned i=0;i<MaxTextures;++i)if(p.fixedTextureUniformMask&(1u<<i)) {
       if(!uploadVertex(p.gxTexture[i],12,fixedVertex->texture[i].data()) ||
          !uploadVertex(p.gxPost[i],12,fixedVertex->post[i].data())) return false;
     }
   }
-  void* fragment=nullptr;
-  if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
-  const auto upload=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
-    if(!param || !count) return true;
-    count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
-    return d.check(sceGxmSetUniformDataF(fragment,param,0,count,data),"upload fragment uniform");
+  std::array<uint16_t,MaxTextures> textureFlags{};
+  for(unsigned i=0;i<usedTextureCount;++i)if(textures) {
+    const auto& binding=(*textures)[i];
+    textureFlags[i]=static_cast<uint16_t>((binding.flipX?1u:0u)|
+        (binding.flipY?2u:0u)|
+        (static_cast<unsigned>(binding.sampler.wrapS)<<2u)|
+        (static_cast<unsigned>(binding.sampler.wrapT)<<4u)|
+        (binding.forceOpaque?0x40u:0u)|
+        (binding.sampleFormat==EfbCopyFormat::R4?0x80u:0u));
+  }
+  const auto& cached=d.fragmentUniformState;
+  const auto sameBytes=[](const void* a,const void* b,size_t bytes) noexcept {
+    return !bytes||std::memcmp(a,b,bytes)==0;
   };
-  if(!upload(p.kcolor,16,u.kcolor[0].data()) || !upload(p.tevreg,16,u.tevreg[0].data()) || !upload(p.clip,4,clip)) return false;
-  if(!upload(p.fogColor,4,u.fogColor.data()) || !upload(p.fogParams,4,u.fogParams.data()) ||
-     !upload(p.fogRange,10,u.fogRangeK.data()) || !upload(p.viewportWidth,1,&u.renderViewportWidth) ||
-     !upload(p.indirectMatrices,MaxIndMatrices*8,u.indirectMatrices[0].data()) ||
-     !upload(p.texcoordScale,usedTextureCount*4,u.texcoordScale[0].data()) ||
-     !upload(p.textureSizeBias,usedTextureCount*4,u.textureSizeBias[0].data()))return false;
-  if(p.textureTransform) {
-    std::array<std::array<float,4>,MaxTextures> transform{};
-    for(unsigned i=0;i<usedTextureCount;++i) {
-      const bool flipX=textures&&(*textures)[i].flipX;
-      const bool flipY=textures&&(*textures)[i].flipY;
-      transform[i]={flipX?-1.f:1.f,flipY?-1.f:1.f,flipX?1.f:0.f,flipY?1.f:0.f};
+  const bool sameScissor=cached.scissor.x==scissor.x&&cached.scissor.y==scissor.y&&
+      cached.scissor.width==scissor.width&&cached.scissor.height==scissor.height;
+  const bool reuseFragment=cached.valid&&cached.pipelineKey==key&&
+      cached.usedTextureCount==usedTextureCount&&sameScissor&&
+      sameBytes(cached.uniforms.kcolor.data(),u.kcolor.data(),sizeof(u.kcolor))&&
+      sameBytes(cached.uniforms.tevreg.data(),u.tevreg.data(),sizeof(u.tevreg))&&
+      sameBytes(cached.uniforms.fogColor.data(),u.fogColor.data(),sizeof(u.fogColor))&&
+      sameBytes(cached.uniforms.fogParams.data(),u.fogParams.data(),sizeof(u.fogParams))&&
+      sameBytes(cached.uniforms.fogRangeK.data(),u.fogRangeK.data(),sizeof(u.fogRangeK))&&
+      sameBytes(&cached.uniforms.renderViewportWidth,&u.renderViewportWidth,sizeof(u.renderViewportWidth))&&
+      sameBytes(cached.uniforms.indirectMatrices.data(),u.indirectMatrices.data(),sizeof(u.indirectMatrices))&&
+      sameBytes(cached.uniforms.texcoordScale.data(),u.texcoordScale.data(),usedTextureCount*sizeof(u.texcoordScale[0]))&&
+      sameBytes(cached.uniforms.textureSizeBias.data(),u.textureSizeBias.data(),usedTextureCount*sizeof(u.textureSizeBias[0]))&&
+      sameBytes(cached.textureFlags.data(),textureFlags.data(),usedTextureCount*sizeof(textureFlags[0]));
+  if(!reuseFragment) {
+    void* fragment=nullptr;
+    if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
+    const auto upload=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
+      if(!param || !count) return true;
+      count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
+      return d.check(sceGxmSetUniformDataF(fragment,param,0,count,data),"upload fragment uniform");
+    };
+    if(!upload(p.kcolor,16,u.kcolor[0].data()) || !upload(p.tevreg,16,u.tevreg[0].data()) || !upload(p.clip,4,clip)) return false;
+    if(!upload(p.fogColor,4,u.fogColor.data()) || !upload(p.fogParams,4,u.fogParams.data()) ||
+       !upload(p.fogRange,10,u.fogRangeK.data()) || !upload(p.viewportWidth,1,&u.renderViewportWidth) ||
+       !upload(p.indirectMatrices,MaxIndMatrices*8,u.indirectMatrices[0].data()) ||
+       !upload(p.texcoordScale,usedTextureCount*4,u.texcoordScale[0].data()) ||
+       !upload(p.textureSizeBias,usedTextureCount*4,u.textureSizeBias[0].data()))return false;
+    if(p.textureTransform) {
+      std::array<std::array<float,4>,MaxTextures> transform{};
+      for(unsigned i=0;i<usedTextureCount;++i) {
+        const bool flipX=textures&&(*textures)[i].flipX;
+        const bool flipY=textures&&(*textures)[i].flipY;
+        transform[i]={flipX?-1.f:1.f,flipY?-1.f:1.f,flipX?1.f:0.f,flipY?1.f:0.f};
+      }
+      if(!upload(p.textureTransform,usedTextureCount*4,transform[0].data()))return false;
     }
-    if(!upload(p.textureTransform,usedTextureCount*4,transform[0].data()))return false;
-  }
-  if(p.textureWrap) {
-    std::array<std::array<float,4>,MaxTextures> wrap{};
-    for(unsigned i=0;i<usedTextureCount;++i) {
-      const auto wrapS=textures?(*textures)[i].sampler.wrapS:WrapMode::Clamp;
-      const auto wrapT=textures?(*textures)[i].sampler.wrapT:WrapMode::Clamp;
-      wrap[i]={float(static_cast<unsigned>(wrapS)),float(static_cast<unsigned>(wrapT)),0.f,0.f};
+    if(p.textureWrap) {
+      std::array<std::array<float,4>,MaxTextures> wrap{};
+      for(unsigned i=0;i<usedTextureCount;++i) {
+        const auto wrapS=textures?(*textures)[i].sampler.wrapS:WrapMode::Clamp;
+        const auto wrapT=textures?(*textures)[i].sampler.wrapT:WrapMode::Clamp;
+        wrap[i]={float(static_cast<unsigned>(wrapS)),float(static_cast<unsigned>(wrapT)),0.f,0.f};
+      }
+      if(!upload(p.textureWrap,usedTextureCount*4,wrap[0].data()))return false;
     }
-    if(!upload(p.textureWrap,usedTextureCount*4,wrap[0].data()))return false;
-  }
-  if(p.textureForceOpaque) {
-    std::array<float,MaxTextures> opaque{};
-    for(unsigned i=0;i<usedTextureCount;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
-    if(!upload(p.textureForceOpaque,usedTextureCount,opaque.data()))return false;
-  }
-  if(p.textureCopyMode) {
-    std::array<float,MaxTextures> mode{};
-    for(unsigned i=0;i<usedTextureCount;++i)
-      mode[i]=textures&&(*textures)[i].sampleFormat==EfbCopyFormat::R4?1.f:0.f;
-    if(!upload(p.textureCopyMode,usedTextureCount,mode.data()))return false;
-  }
+    if(p.textureForceOpaque) {
+      std::array<float,MaxTextures> opaque{};
+      for(unsigned i=0;i<usedTextureCount;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
+      if(!upload(p.textureForceOpaque,usedTextureCount,opaque.data()))return false;
+    }
+    if(p.textureCopyMode) {
+      std::array<float,MaxTextures> mode{};
+      for(unsigned i=0;i<usedTextureCount;++i)
+        mode[i]=textures&&(*textures)[i].sampleFormat==EfbCopyFormat::R4?1.f:0.f;
+      if(!upload(p.textureCopyMode,usedTextureCount,mode.data()))return false;
+    }
+    auto& next=d.fragmentUniformState;
+    next.uniforms=u;next.scissor=scissor;next.textureFlags=textureFlags;
+    next.pipelineKey=key;next.usedTextureCount=static_cast<uint8_t>(usedTextureCount);next.valid=true;
+  } else ++d.stats.nativeFragmentUniformReuses;
   p.inFlight=true;
   return true;
 }

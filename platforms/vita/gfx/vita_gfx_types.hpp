@@ -491,6 +491,7 @@ struct FrameStats {
   uint64_t nativePipelineUs = 0;
   uint64_t nativeTextureUs = 0;
   uint64_t nativeDrawUs = 0;
+  uint32_t nativeFragmentUniformReuses = 0;
   uint32_t nativeEfbCopies = 0;
   uint64_t nativeEfbEndSceneUs = 0;
   uint64_t nativeEfbTransferSubmitUs = 0;
