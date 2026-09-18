@@ -1131,7 +1131,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
   const uint64_t copyN=++copyTimingCount;
   if(copyN<=8 || (copyN&(copyN-1u))==0)
     std::fprintf(stderr,
-      "[aurora-gxm] efb_2x_timing n=%llu source_finish_us=%llu transfer_submit_us=%llu transfer_wait_us=%llu cpu_fixup_us=%llu total_us=%llu\n",
+      "[aurora-gxm] efb_transfer_timing n=%llu source_finish_us=%llu transfer_submit_us=%llu transfer_wait_us=%llu cpu_fixup_us=%llu total_us=%llu\n",
       static_cast<unsigned long long>(copyN),
       static_cast<unsigned long long>(afterSourceFinish-copyStarted),
       static_cast<unsigned long long>(afterTransferSubmit-afterSourceFinish),

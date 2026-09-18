@@ -279,6 +279,20 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const float sy = logicalFb.y ? static_cast<float>(renderer_->target_height()) / static_cast<float>(logicalFb.y) : 1.f;
   const uint32_t dstW = std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(static_cast<float>(g.texCopyDstWidth) * sx)));
   const uint32_t dstH = std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(static_cast<float>(g.texCopyDstHeight) * sy)));
+  // map_logical_scissor deliberately expands the far edge with ceil() so a
+  // raster scissor never drops a covered pixel. That is the wrong policy for
+  // an unscaled GXCopyTex: at fractional Vita scale (e.g. 256 * 544/480) it
+  // turns a logical 256x256 copy into 384x291 while the destination is 384x290,
+  // forcing the GXM backend into its full-frame CPU readback fallback. For the
+  // common origin-aligned 1:1 guest copy, source and destination describe the
+  // same logical extent, so use the destination's rounded physical extent too.
+  // Other copy shapes keep the conservative mapped-scissor behavior.
+  if(g.texCopySrc.x==0 && g.texCopySrc.y==0 && g.texCopySrc.width>0 && g.texCopySrc.height>0 &&
+     static_cast<uint32_t>(g.texCopySrc.width)==g.texCopyDstWidth &&
+     static_cast<uint32_t>(g.texCopySrc.height)==g.texCopyDstHeight) {
+    src.width=static_cast<int32_t>(std::min<uint32_t>(dstW,renderer_->target_width()-static_cast<uint32_t>(src.x)));
+    src.height=static_cast<int32_t>(std::min<uint32_t>(dstH,renderer_->target_height()-static_cast<uint32_t>(src.y)));
+  }
 #endif
 #if defined(AURORA_VITA_UPSTREAM_STUB)
   const uint32_t rawCopyFormat = 0;
