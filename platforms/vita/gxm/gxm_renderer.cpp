@@ -1013,9 +1013,16 @@ bool Renderer::bind_target(Handle handle) {
   const auto it=d.textures.find(handle);
   if(handle && (it==d.textures.end() || !it->second->target)) return d.fail("unknown render target");
   if(handle==d.boundTarget) return true;
-  // Correctness-first scene dependency: stores depth and completes writes before
-  // an EFB can be sampled or re-entered. Replace with per-scene fences separately.
-  if(!finish()) return false;
+  // Target switches only need GPU ordering, not a CPU-wide finish. End the
+  // current scene and make the next one wait on its fragment sync object. This
+  // preserves render-to-texture and depth ordering while allowing the CPU to
+  // continue preparing the next GX scene in parallel with the GPU.
+  if(d.inScene) {
+    SceGxmSyncObject* previousSync=d.boundTarget?
+        d.textures.at(d.boundTarget)->sync:d.surfaces[d.back].sync;
+    if(!d.end_scene()) return false;
+    d.pendingVertexDependency=previousSync;
+  }
   d.boundTarget=handle;
   return true;
 }
