@@ -404,6 +404,13 @@ struct TextureBinding {
   // Native GXM may keep an EFB copy in RGBA8 storage and reproduce a cheap GX
   // copy-format conversion while sampling, avoiding a synchronized CPU readback.
   EfbCopyFormat sampleFormat = EfbCopyFormat::Passthrough;
+  // Optional source sub-rectangle transform. Defaults preserve ordinary texture
+  // bindings; native EFB blits use it to crop/scale entirely in the fragment
+  // path instead of rewriting UV vertex buffers or touching uncached pixels.
+  float uvScaleX = 1.f;
+  float uvScaleY = 1.f;
+  float uvBiasX = 0.f;
+  float uvBiasY = 0.f;
 };
 
 struct BufferSlice { Handle buffer=InvalidHandle; uint32_t offset=0; uint32_t size=0; };

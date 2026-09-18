@@ -141,6 +141,16 @@ BufferSlice StreamingArena::reserve(bool vertex, size_t bytes, size_t alignment,
     if (vertex) ++vertexOverflows_; else ++indexOverflows_;
     return {};
   }
+  // Native GXM deliberately keeps CpuGpu buffers uncached: VitaSDK exposes no
+  // safe user-mode range writeback primitive for a cached mapped allocation.
+  // Keep the audit's safe fallback (cached staging + one bulk memcpy), but pad
+  // every committed range to the arena alignment so the uncached memcpy starts
+  // and ends on NEON-friendly 16-byte boundaries.
+  const size_t storageEnd=align_up(aligned+bytes,cfg_.alignment);
+  if(storageEnd>capacity) {
+    if(vertex)++vertexOverflows_;else ++indexOverflows_;
+    return {};
+  }
 
   const Handle handle = vertex ? slot.vertex : slot.index;
 #if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
@@ -158,7 +168,7 @@ BufferSlice StreamingArena::reserve(bool vertex, size_t bytes, size_t alignment,
   auto& stage = vertex ? vertexStage_ : indexStage_;
   *writable = stage.data() + aligned;
 #endif
-  offset = aligned + bytes;
+  offset = storageEnd;
   if (vertex) { if (offset > vertexHighWater_) vertexHighWater_ = offset; }
   else { if (offset > indexHighWater_) indexHighWater_ = offset; }
   return {handle, static_cast<uint32_t>(aligned), static_cast<uint32_t>(bytes)};

@@ -233,7 +233,9 @@ Handle EfbManager::capture_from_bound(Handle existing,int32_t x,int32_t y,uint32
       return target;
     }
     if(target!=existing)destroy(target);
-    return 0;
+    // Rare feedback/self-copy or an unsupported hardware edge can still use
+    // the correctness path below. It converts in cached CPU memory and performs
+    // only one bulk upload; the native hot path never edits uncached pixels.
   }
 
   std::vector<uint8_t> pixels,copy;
