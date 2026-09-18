@@ -186,7 +186,11 @@ aurora::gx::PipelineConfig build_current_pipeline_config(GXPrimitive primitive, 
 }
 
 gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noexcept {
-  return translate_pipeline(build_current_pipeline_config(static_cast<GXPrimitive>(primitive), static_cast<GXVtxFmt>(fmt)));
+  auto out=translate_pipeline(build_current_pipeline_config(static_cast<GXPrimitive>(primitive), static_cast<GXVtxFmt>(fmt)));
+  const auto& g=aurora::gx::g_gxState;
+  for(unsigned ch=0;ch<out.colorChannels.size();++ch)
+    out.colorChannels[ch].lightMask=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
+  return out;
 }
 
 gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept {
@@ -458,11 +462,19 @@ void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUni
                                   const gfx::PipelineDesc& pipeline) noexcept {
   const auto& g=aurora::gx::g_gxState;
   state.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(g.currentPnMtx,state.postexMatrices.size()-1));
-  if(state.currentPnMatrix<aurora::gx::MaxPnMtx)
-    copy_matrix(state.postexMatrices[state.currentPnMatrix],g.pnMtx[state.currentPnMatrix].pos);
-  else {
+  const auto requirements=gfx::vertex_pipeline_requirements(pipeline);
+  const auto copyPn=[&](unsigned i) noexcept {
+    copy_matrix(state.postexMatrices[i],g.pnMtx[i].pos);
+    if(requirements.needNormal)copy_matrix(state.normalMatrices[i],g.pnMtx[i].nrm);
+  };
+  if(pipeline.fixedVertexIndexedPn) {
+    for(unsigned i=0;i<aurora::gx::MaxPnMtx;++i)copyPn(i);
+  } else if(state.currentPnMatrix<aurora::gx::MaxPnMtx) {
+    copyPn(state.currentPnMatrix);
+  } else {
     const unsigned tex=state.currentPnMatrix-aurora::gx::MaxPnMtx;
     if(tex<aurora::gx::MaxTexMtx)copy_matrix(state.postexMatrices[state.currentPnMatrix],g.texMtxs[tex]);
+    if(requirements.needNormal)copy_matrix(state.normalMatrices.back(),g.pnMtx.back().nrm);
   }
 
   const uint8_t texgenMask=gfx::pipeline_texgen_compute_mask(pipeline);
@@ -480,9 +492,18 @@ void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUni
   uniforms.mvp=state.projection;
 
   const uint8_t colorMask=gfx::pipeline_raster_color_mask(pipeline);
+  uint32_t requiredLights=0;
   for(unsigned ch=0;ch<4;++ch)if(colorMask&(1u<<(ch&1u))) {
+    state.channelAmbient[ch]=copy_vec4(g.colorChannelState[ch].ambColor);
     state.channelMaterial[ch]=copy_vec4(g.colorChannelState[ch].matColor);
+    uniforms.channelAmbient[ch]=state.channelAmbient[ch];
     uniforms.channelMaterial[ch]=state.channelMaterial[ch];
+    if(pipeline.colorChannels[ch].lightingEnabled)requiredLights|=pipeline.colorChannels[ch].lightMask;
+  }
+  for(unsigned i=0;i<gfx::MaxLights;++i)if(requiredLights&(1u<<i)) {
+    const auto& s=g.lights[i];auto& d=state.lights[i];
+    d.position=copy_vec4(s.pos);d.direction=copy_vec4(s.dir);d.color=copy_vec4(s.color);
+    d.cosAtt=copy_vec4(s.cosAtt);d.distAtt=copy_vec4(s.distAtt);uniforms.lights[i]=d;
   }
   for(unsigned i=0;i<4;++i) {
     uniforms.tevreg[i]=copy_vec4(g.colorRegs[i]);

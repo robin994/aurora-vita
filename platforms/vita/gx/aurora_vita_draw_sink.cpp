@@ -414,6 +414,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if(staticGeometry_){
       translatedGpuPipeline_=translatedPipeline_;
       translatedGpuPipeline_.fixedVertexOnGpu=true;
+      translatedGpuPipeline_.fixedVertexIndexedPn=gfx::vertex_layout_has_semantic(
+          translatedLayout_,gfx::VertexSemantic::PnMatrixIndex);
       translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
     }
     translatedTextureMask_=gfx::pipeline_sampled_texture_mask(translatedPipeline_);
@@ -482,14 +484,14 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const bool fixedCandidate=staticGeometry_&&vertexCount>=48&&rawIndices==nullptr&&indexCount==0&&
       source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&source!=gfx::SourcePrimitive::Points&&
       gfx::supports_fixed_vertex_gpu(pipeline,layout,translatedVertexState_);
-  // Fixed-PN GXM draws consume only the current position/material/texgen state
-  // plus fragment uniforms. Avoid copying normal palettes and light tables that
-  // the native vertex shader cannot use by construction.
+  // The GPU vertex path copies only the state its generated shader can consume.
+  // Indexed-PN and lit draws include their position/normal palettes and lights;
+  // unsupported bump/dynamic-tex-matrix cases remain on the CPU path.
   if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty||
      (translatedVertexStateLightweight_&&!fixedCandidate)){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     if(fixedCandidate) {
-      translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,pipeline);
+      translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_);
       translatedVertexStateLightweight_=true;
     } else {
       translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
@@ -507,12 +509,13 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     const bool debugGpu=telemetry_&&telemetry_->split_vertex_phases()&&debugGpuDraws++<4;
     if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe begin count=%u primitive=%u key=%llx\n",vertexCount,primitive,static_cast<unsigned long long>(translatedPipelineKey));
 #endif
-    auto key=fixedPipelineKeys_.find(translatedPipelineKey);
+    const uint64_t gpuPipelineDescKey=gfx::pipeline_key(translatedGpuPipeline_);
+    auto key=fixedPipelineKeys_.find(gpuPipelineDescKey);
     if(key!=fixedPipelineKeys_.end()&&renderer_->pipelines().find(key->second))fixedPipelineKey=key->second;
     else{
       gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::PipelineResolve);
       fixedPipelineKey=renderer_->create_pipeline(translatedGpuPipeline_);
-      if(fixedPipelineKey)fixedPipelineKeys_[translatedPipelineKey]=fixedPipelineKey;
+      if(fixedPipelineKey)fixedPipelineKeys_[gpuPipelineDescKey]=fixedPipelineKey;
     }
 #if defined(__vita__)
     if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe pipeline=%llx\n",static_cast<unsigned long long>(fixedPipelineKey));
@@ -726,7 +729,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   bool enqueued=false;
   if(gpuGeometry){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
-    fixedVertexUniforms_.push_back(gfx::fixed_vertex_uniforms(pipeline,vertexState));
+    fixedVertexUniforms_.push_back(gfx::fixed_vertex_uniforms(translatedGpuPipeline_,vertexState));
     gfx::DrawPacket packet{};
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;

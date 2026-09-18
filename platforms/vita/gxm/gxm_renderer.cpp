@@ -209,7 +209,8 @@ struct Renderer::Impl {
     const SceGxmProgramParameter *mvp = nullptr, *kcolor = nullptr, *tevreg = nullptr, *clip = nullptr;
     const SceGxmProgramParameter *fogColor=nullptr,*fogParams=nullptr,*fogRange=nullptr,*viewportWidth=nullptr;
     const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr,*textureTransform=nullptr,*textureWrap=nullptr,*textureForceOpaque=nullptr,*textureCopyMode=nullptr;
-    const SceGxmProgramParameter *gxPosition=nullptr,*gxMaterial=nullptr;
+    const SceGxmProgramParameter *gxPosition=nullptr,*gxNormal=nullptr,*gxMaterial=nullptr,*gxAmbient=nullptr,*gxLight=nullptr;
+    const SceGxmProgramParameter *gxPositionPalette=nullptr,*gxNormalPalette=nullptr;
     std::array<const SceGxmProgramParameter*,MaxTextures> gxTexture{};
     std::array<const SceGxmProgramParameter*,MaxTextures> gxPost{};
     uint8_t textureMask = 0;
@@ -490,7 +491,8 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
     else if (a.location <= 10) std::snprintf(name, sizeof(name), "a_tex%u", unsigned(a.location - 3));
     else if (a.location == 11) std::snprintf(name, sizeof(name), "a_normal");
     else if (a.location == 12) std::snprintf(name, sizeof(name), "a_binormal");
-    else std::snprintf(name, sizeof(name), "a_tangent");
+    else if (a.location == 13) std::snprintf(name, sizeof(name), "a_tangent");
+    else std::snprintf(name, sizeof(name), "a_pn_mtx");
     const auto* parameter = sceGxmProgramFindParameterByName(vp, name);
     if (!parameter) continue; // Optimized out, no hardware stream binding needed.
     if (sceGxmProgramParameterGetCategory(parameter) != SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE) {
@@ -526,7 +528,12 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.textureForceOpaque=sceGxmProgramFindParameterByName(fp,"u_tex_force_opaque");
   p.textureCopyMode=sceGxmProgramFindParameterByName(fp,"u_tex_copy_mode");
   p.gxPosition=sceGxmProgramFindParameterByName(vp,"u_gx_position");
+  p.gxNormal=sceGxmProgramFindParameterByName(vp,"u_gx_normal");
+  p.gxPositionPalette=sceGxmProgramFindParameterByName(vp,"u_gx_position_palette");
+  p.gxNormalPalette=sceGxmProgramFindParameterByName(vp,"u_gx_normal_palette");
   p.gxMaterial=sceGxmProgramFindParameterByName(vp,"u_gx_material");
+  p.gxAmbient=sceGxmProgramFindParameterByName(vp,"u_gx_ambient");
+  p.gxLight=sceGxmProgramFindParameterByName(vp,"u_gx_light");
   for(unsigned i=0;i<MaxTextures;++i) {
     char name[32];
     std::snprintf(name,sizeof(name),"u_gx_texture%u",i);
@@ -708,8 +715,17 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(p.mvp && !uploadVertex(p.mvp,16,u.mvp.data())) return false;
   if(pipeline.fixedVertexOnGpu) {
     if(!fixedVertex) return d.fail("missing fixed GX vertex uniforms");
-    if(!uploadVertex(p.gxPosition,12,fixedVertex->position.data()) ||
-       !uploadVertex(p.gxMaterial,16,fixedVertex->material[0].data())) return false;
+    if(pipeline.fixedVertexIndexedPn) {
+      if(!uploadVertex(p.gxPositionPalette,120,fixedVertex->positionPalette[0].data()) ||
+         !uploadVertex(p.gxNormalPalette,120,fixedVertex->normalPalette[0].data())) return false;
+    } else if(!uploadVertex(p.gxPosition,12,fixedVertex->position.data()) ||
+              !uploadVertex(p.gxNormal,12,fixedVertex->normal.data())) return false;
+    if(!uploadVertex(p.gxMaterial,16,fixedVertex->material[0].data()) ||
+       !uploadVertex(p.gxAmbient,16,fixedVertex->ambient[0].data())) return false;
+    unsigned lightTop=0;
+    for(const auto& channel:pipeline.colorChannels)if(channel.lightingEnabled)
+      for(unsigned i=0;i<MaxLights;++i)if(channel.lightMask&(1u<<i))lightTop=std::max(lightTop,i+1u);
+    if(lightTop&&!uploadVertex(p.gxLight,lightTop*20u,fixedVertex->light[0].data())) return false;
     for(unsigned i=0;i<MaxTextures;++i) {
       if(!uploadVertex(p.gxTexture[i],12,fixedVertex->texture[i].data()) ||
          !uploadVertex(p.gxPost[i],12,fixedVertex->post[i].data())) return false;

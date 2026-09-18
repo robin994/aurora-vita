@@ -230,14 +230,15 @@ std::string validate_pipeline(const gfx::PipelineDesc& d) {
   if (!stride || stride % 4) return "vertex stride must be a nonzero multiple of four";
   for (unsigned i = 0; i < d.layout.count; ++i) {
     const auto& a = d.layout.attributes[i];
-    if (a.location > 13 || supplied & (1u << a.location) || a.stride != stride || !a.components || a.components > 4 ||
+    if (a.location > 14 || supplied & (1u << a.location) || a.stride != stride || !a.components || a.components > 4 ||
         a.scalar > VertexScalar::U16) return "invalid or duplicate vertex attribute";
     const unsigned scalar = a.scalar == VertexScalar::F32 ? 4 : (a.scalar == VertexScalar::U16 || a.scalar == VertexScalar::S16 ? 2 : 1);
     if (a.offset % scalar || static_cast<unsigned>(a.offset) + a.components * scalar > stride)
       return "vertex attribute exceeds its stride or is misaligned";
     if (a.location == 0 && (a.components != 4 || a.scalar != VertexScalar::F32)) return "position must be float4";
     if (a.location >= 3 && a.location <= 10 && a.components != 3) return "prepared texture coordinates must have three components";
-    if (a.location >= 11 && a.components != 3) return "fixed GX basis inputs must have three components";
+    if (a.location >= 11 && a.location <= 13 && a.components != 3) return "fixed GX basis inputs must have three components";
+    if (a.location == 14 && (a.components != 1 || a.scalar != VertexScalar::U8)) return "GX PN matrix selector must be u8";
     if ((a.location == 1 || a.location == 2) && a.components != 4) return "prepared colors must have four components";
     supplied |= 1u << a.location;
   }
@@ -265,6 +266,62 @@ std::string fixed_vertex_source_cg(TexGenSource source) {
     return i<MaxTextures?"float4(a_tex"+std::to_string(i)+".xy,1.0,1.0)":"float4(0.0,0.0,1.0,1.0)";
   }
   }
+}
+
+bool fixed_vertex_lighting(const PipelineDesc& d) noexcept {
+  for(const auto& c:d.colorChannels)if(c.lightingEnabled)return true;
+  return false;
+}
+
+void emit_fixed_channel_cg(std::ostringstream& vs,const PipelineDesc& d,unsigned ch,
+                           unsigned color,bool alpha) {
+  const auto& c=d.colorChannels[ch];
+  const std::string n=std::to_string(color);
+  const std::string sw=alpha?".a":".rgb";
+  const std::string mat=c.materialSource==ColorSource::Vertex?
+      "a_color"+n:"u_gx_material["+std::to_string(ch)+"]";
+  if(!c.lightingEnabled) {
+    if(c.materialSource==ColorSource::Vertex)
+      vs<<"v_color"<<n<<sw<<"="<<mat<<sw<<";\n";
+    else if(alpha)
+      vs<<"gxi=clamp("<<mat<<".a*255.0,0.0,255.0);v_color"<<n<<".a=floor(gxi+0.5)/255.0;\n";
+    else
+      vs<<"gxq=clamp("<<mat<<".rgb*255.0,0.0,255.0);v_color"<<n<<".rgb=floor(gxq+0.5)/255.0;\n";
+    return;
+  }
+  const std::string amb=c.ambientSource==ColorSource::Vertex?
+      "a_color"+n:"u_gx_ambient["+std::to_string(ch)+"]";
+  vs<<"{float4 gx_lit="<<amb<<";\n";
+  for(unsigned li=0;li<MaxLights;++li)if(c.lightMask&(1u<<li)) {
+    const unsigned b=li*5u;
+    vs<<"{float3 gx_ldir=u_gx_light["<<b<<"].xyz-mv;float gx_dist2=dot(gx_ldir,gx_ldir);"
+         "float gx_dist=sqrt(max(gx_dist2,0.00000000000000000001));gx_ldir*=1.0/gx_dist;float gx_attn=1.0;\n";
+    if(c.attenuation==AttenuationFn::Spot) {
+      vs<<"float gx_cos=max(0.0,dot(gx_ldir,u_gx_light["<<b+1<<"].xyz));"
+           "float gx_ca=u_gx_light["<<b+3<<"].x+u_gx_light["<<b+3<<"].y*gx_cos+u_gx_light["<<b+3<<"].z*gx_cos*gx_cos;"
+           "float gx_da=u_gx_light["<<b+4<<"].x+u_gx_light["<<b+4<<"].y*gx_dist+u_gx_light["<<b+4<<"].z*gx_dist2;"
+           "gx_attn=gx_da!=0.0?max(0.0,gx_ca/gx_da):0.0;\n";
+    } else if(c.attenuation==AttenuationFn::Specular) {
+      vs<<"float gx_spec=dot(gx_nrm,gx_ldir)>=0.0?max(0.0,dot(gx_nrm,u_gx_light["<<b+1<<"].xyz)):0.0;"
+           "float gx_ca=u_gx_light["<<b+3<<"].x+u_gx_light["<<b+3<<"].y*gx_spec+u_gx_light["<<b+3<<"].z*gx_spec*gx_spec;"
+           "float3 gx_da3=u_gx_light["<<b+4<<"].xyz;";
+      if(c.diffuse!=DiffuseFn::None)
+        vs<<"float gx_dal=sqrt(dot(gx_da3,gx_da3));gx_da3=gx_dal>0.0000000001?gx_da3/gx_dal:float3(0.0);";
+      vs<<"float gx_da=max(0.0,gx_da3.x+gx_da3.y*gx_spec+gx_da3.z*gx_spec*gx_spec);"
+           "gx_attn=gx_da!=0.0?max(0.0,gx_ca/gx_da):0.0;\n";
+    }
+    if(c.diffuse==DiffuseFn::Signed)
+      vs<<"float gx_diff=dot(gx_ldir,gx_nrm);\n";
+    else if(c.diffuse==DiffuseFn::Clamp)
+      vs<<"float gx_diff=max(0.0,dot(gx_ldir,gx_nrm));\n";
+    else
+      vs<<"float gx_diff=1.0;\n";
+    vs<<"gx_lit+=u_gx_light["<<b+2<<"]*(gx_attn*gx_diff);}\n";
+  }
+  if(alpha)
+    vs<<"gxi=clamp(("<<mat<<"*clamp(gx_lit,0.0,1.0)).a*255.0,0.0,255.0);v_color"<<n<<".a=floor(gxi+0.5)/255.0;}\n";
+  else
+    vs<<"gxq=clamp(("<<mat<<"*clamp(gx_lit,0.0,1.0)).rgb*255.0,0.0,255.0);v_color"<<n<<".rgb=floor(gxq+0.5)/255.0;}\n";
 }
 
 ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
@@ -302,8 +359,19 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))vp.push_back("float3 a_normal : TEXCOORD8");
     if(fixedInputs&vertex_semantic_bit(VertexSemantic::Binormal))vp.push_back("float3 a_binormal : TEXCOORD9");
     if(fixedInputs&vertex_semantic_bit(VertexSemantic::Tangent))vp.push_back("float3 a_tangent : TEXCOORD10");
-    vp.push_back("uniform float4 u_gx_position[3]");
+    if(d.fixedVertexIndexedPn) {
+      vp.push_back("float a_pn_mtx : TEXCOORD11");
+      vp.push_back("uniform float4 u_gx_position_palette[30]");
+      if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))vp.push_back("uniform float4 u_gx_normal_palette[30]");
+    } else {
+      vp.push_back("uniform float4 u_gx_position[3]");
+      if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))vp.push_back("uniform float4 u_gx_normal[3]");
+    }
     vp.push_back("uniform float4 u_gx_material[4]");
+    if(fixed_vertex_lighting(d)) {
+      vp.push_back("uniform float4 u_gx_ambient[4]");
+      vp.push_back("uniform float4 u_gx_light[40]");
+    }
   }
   for (unsigned i = 0; i < MaxTextures; ++i) {
     const auto n = std::to_string(i);
@@ -324,9 +392,20 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   }
   vs << "void main(\n"; signature(vs, vp); vs << "){\n";
   if(d.fixedVertexOnGpu) {
-    vs << "float4 object_pos=float4(a_position.xyz,1.0);\n"
-          "float3 mv=float3(dot(u_gx_position[0],object_pos),dot(u_gx_position[1],object_pos),dot(u_gx_position[2],object_pos));\n"
-          "float4 p=u_mvp[0]*mv.x+u_mvp[1]*mv.y+u_mvp[2]*mv.z+u_mvp[3]*a_position.w;\n";
+    vs << "float4 object_pos=float4(a_position.xyz,1.0);\n";
+    if(d.fixedVertexIndexedPn) {
+      vs << "int gxmi=(int)clamp(floor(a_pn_mtx+0.5),0.0,9.0)*3;\n"
+            "float3 mv=float3(dot(u_gx_position_palette[gxmi],object_pos),dot(u_gx_position_palette[gxmi+1],object_pos),dot(u_gx_position_palette[gxmi+2],object_pos));\n";
+      if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))
+        vs << "float3 gx_nrm=float3(dot(u_gx_normal_palette[gxmi].xyz,a_normal),dot(u_gx_normal_palette[gxmi+1].xyz,a_normal),dot(u_gx_normal_palette[gxmi+2].xyz,a_normal));"
+              "float gx_nl2=dot(gx_nrm,gx_nrm);gx_nrm=gx_nl2>0.00000000000000000001?gx_nrm/sqrt(gx_nl2):float3(0.0);\n";
+    } else {
+      vs << "float3 mv=float3(dot(u_gx_position[0],object_pos),dot(u_gx_position[1],object_pos),dot(u_gx_position[2],object_pos));\n";
+      if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))
+        vs << "float3 gx_nrm=float3(dot(u_gx_normal[0].xyz,a_normal),dot(u_gx_normal[1].xyz,a_normal),dot(u_gx_normal[2].xyz,a_normal));"
+              "float gx_nl2=dot(gx_nrm,gx_nrm);gx_nrm=gx_nl2>0.00000000000000000001?gx_nrm/sqrt(gx_nl2):float3(0.0);\n";
+    }
+    vs << "float4 p=u_mvp[0]*mv.x+u_mvp[1]*mv.y+u_mvp[2]*mv.z+u_mvp[3]*a_position.w;\n";
   } else {
     vs << "float4 p=";
     if (d.positionIsClipSpace) vs << "a_position;\n";
@@ -339,11 +418,8 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   if(d.fixedVertexOnGpu) {
     vs << "float3 gxq;float gxi;\n";
     for(unsigned i=0;i<2;++i)if(out.colorMask&(1u<<i)) {
-      const auto n=std::to_string(i);
-      if(d.colorChannels[i].materialSource==ColorSource::Vertex)vs<<"v_color"<<n<<".rgb=a_color"<<n<<".rgb;\n";
-      else vs<<"gxq=clamp(u_gx_material["<<i<<"].rgb*255.0,0.0,255.0);v_color"<<n<<".rgb=floor(gxq+0.5)/255.0;\n";
-      if(d.colorChannels[i+2].materialSource==ColorSource::Vertex)vs<<"v_color"<<n<<".a=a_color"<<n<<".a;\n";
-      else vs<<"gxi=clamp(u_gx_material["<<i+2<<"].a*255.0,0.0,255.0);v_color"<<n<<".a=floor(gxi+0.5)/255.0;\n";
+      emit_fixed_channel_cg(vs,d,i,i,false);
+      emit_fixed_channel_cg(vs,d,i+2,i,true);
     }
     for(unsigned i=0;i<MaxTextures;++i)if(out.texcoordMask&(1u<<i)) {
       const auto n=std::to_string(i);

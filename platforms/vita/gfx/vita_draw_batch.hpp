@@ -10,9 +10,13 @@ inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noex
   if (!a.pipelineKey || a.pipelineKey != b.pipelineKey ||
       a.absoluteVertexIndices || b.absoluteVertexIndices ||
       a.firstVertex || b.firstVertex || a.instanceCount != 1 || b.instanceCount != 1 ||
-      a.fixedVertexUniforms || b.fixedVertexUniforms || !a.indexCount || !b.indexCount ||
+      !a.indexCount || !b.indexCount ||
       a.indexCount % 3 || b.indexCount % 3 || !a.vertexCount || !b.vertexCount ||
       uint64_t(a.vertexCount) + b.vertexCount >= 64000u) return false;
+  if (a.fixedVertexUniforms != b.fixedVertexUniforms) {
+    if (!a.fixedVertexUniforms || !b.fixedVertexUniforms ||
+        !aurora_vita_bytes_equal(a.fixedVertexUniforms,b.fixedVertexUniforms,sizeof(FixedVertexUniforms))) return false;
+  }
   if (a.vertices.buffer != b.vertices.buffer || a.indices.buffer != b.indices.buffer ||
       uint64_t(a.vertices.offset) + a.vertices.size != b.vertices.offset ||
       uint64_t(a.indices.offset) + a.indices.size != b.indices.offset) return false;

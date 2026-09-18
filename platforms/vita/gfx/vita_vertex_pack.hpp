@@ -38,6 +38,7 @@ inline void pack_gpu_vertex_inline(uint8_t* dst, const CanonicalVertex& src,
     else if (a.location == 11) detail::copy_vertex_words<3>(dst+a.offset, src.normal);
     else if (a.location == 12) detail::copy_vertex_words<3>(dst+a.offset, src.binormal);
     else if (a.location == 13) detail::copy_vertex_words<3>(dst+a.offset, src.tangent);
+    else if (a.location == 14) dst[a.offset]=src.pnMatrixIndex;
   }
 }
 }

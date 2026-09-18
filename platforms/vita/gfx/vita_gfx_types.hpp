@@ -130,6 +130,7 @@ struct ColorChannelDesc {
   DiffuseFn diffuse = DiffuseFn::None;
   AttenuationFn attenuation = AttenuationFn::None;
   bool lightingEnabled = false;
+  uint8_t lightMask = 0;
 };
 struct LightUniform {
   std::array<float,4> position{{0,0,0,1}};
@@ -210,7 +211,8 @@ struct PipelineDesc {
   bool positionIsClipSpace = false; // CPU-expanded GX lines/points already contain clip-space xyzw.
   bool fragmentScissor = true; // Native GXM may omit clipping only for the complete target.
   uint8_t nativeTextureWrapMask = 0; // Swizzled samplers perform wrapping/filtering at seams.
-  bool fixedVertexOnGpu = false; // Raw object-space inputs; fixed PN/unlit GX transform in the shader.
+  bool fixedVertexOnGpu = false; // Raw object-space inputs; GX vertex processing runs in the shader.
+  bool fixedVertexIndexedPn = false; // Per-vertex GX PNMTXIDX selects the 10-entry position/normal palette.
   VertexLayout layout{};
   std::array<TexGenDesc, MaxTextures> texgens{};
   uint8_t texgenCount = 0;
@@ -400,9 +402,16 @@ struct TextureBinding {
 struct BufferSlice { Handle buffer=InvalidHandle; uint32_t offset=0; uint32_t size=0; };
 struct FixedVertexUniforms {
   std::array<float,12> position{{1,0,0,0, 0,1,0,0, 0,0,1,0}};
+  std::array<float,12> normal{{1,0,0,0, 0,1,0,0, 0,0,1,0}};
+  std::array<std::array<float,12>,10> positionPalette{};
+  std::array<std::array<float,12>,10> normalPalette{};
   std::array<std::array<float,12>,MaxTextures> texture{};
   std::array<std::array<float,12>,MaxTextures> post{};
   std::array<std::array<float,4>,4> material{};
+  std::array<std::array<float,4>,4> ambient{};
+  // Five vec4s per GX light: position, direction, color, cosine attenuation,
+  // distance attenuation. Channel light masks are baked into PipelineDesc.
+  std::array<std::array<float,4>,MaxLights*5> light{};
 };
 struct DrawUniforms {
   std::array<float, 16> mvp{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};

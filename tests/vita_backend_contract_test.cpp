@@ -251,6 +251,24 @@ void projection_contract() {
   REQUIRE(source.ok());
   REQUIRE(source.vertex.find("u_gx_texture0[3]") != std::string::npos);
   REQUIRE(source.vertex.find("a_tex0 : TEXCOORD0") != std::string::npos);
+
+  auto indexedLit=basic();
+  indexedLit.fixedVertexOnGpu=true;
+  indexedLit.fixedVertexIndexedPn=true;
+  indexedLit.colorChannels[0].lightingEnabled=true;
+  indexedLit.colorChannels[0].lightMask=0x03;
+  indexedLit.colorChannels[0].diffuse=DiffuseFn::Clamp;
+  indexedLit.colorChannels[0].attenuation=AttenuationFn::Spot;
+  indexedLit.layout=fixed_vertex_gpu_layout(indexedLit);
+  source=gxm::build_tev_cg(indexedLit);
+  REQUIRE(source.ok());
+  REQUIRE(source.vertex.find("a_pn_mtx : TEXCOORD11") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_position_palette[30]") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_normal_palette[30]") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_light[40]") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_ambient[4]") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_light[2]") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_light[7]") != std::string::npos);
   // Check the shared projection's depth contract independently of GPU execution.
   for (const bool reversed : {false, true}) {
     for (const float fraction : {0.f, .25f, .5f, 1.f}) {
