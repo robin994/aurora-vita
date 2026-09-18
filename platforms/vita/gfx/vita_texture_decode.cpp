@@ -1,4 +1,5 @@
 #include "vita_texture_decode.hpp"
+#include "vita_cpu_workers.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -68,6 +69,31 @@ void put(std::vector<uint8_t>& out, uint32_t w, uint32_t h, uint32_t x, uint32_t
 size_t blocks(uint32_t n, uint32_t b) { return (n+b-1)/b; }
 uint8_t reverse_cmpr_selector_pairs(uint8_t v) noexcept {
   return static_cast<uint8_t>(((v&0xc0u)>>6)|((v&0x30u)>>2)|((v&0x0cu)<<2)|((v&0x03u)<<6));
+}
+struct CmprTranscodeJob {
+  const uint8_t* src=nullptr;
+  uint8_t* dst=nullptr;
+  uint32_t macroTilesX=0;
+  uint32_t dstBlocksX=0;
+  uint32_t dstBlocksY=0;
+};
+bool transcode_cmpr_range(void* opaque,size_t begin,size_t end,uint32_t) noexcept {
+  auto& job=*static_cast<CmprTranscodeJob*>(opaque);
+  for(size_t tile=begin;tile<end;++tile){
+    const uint32_t macroX=static_cast<uint32_t>(tile%job.macroTilesX);
+    const uint32_t macroY=static_cast<uint32_t>(tile/job.macroTilesX);
+    const auto* macro=job.src+tile*32u;
+    for(unsigned sub=0;sub<4;sub++){
+      const uint32_t bx=macroX*2u+(sub&1u);
+      const uint32_t by=macroY*2u+(sub>>1u);
+      if(bx>=job.dstBlocksX||by>=job.dstBlocksY)continue;
+      const auto* in=macro+sub*8u;
+      auto* dst=job.dst+(static_cast<size_t>(by)*job.dstBlocksX+bx)*8u;
+      dst[0]=in[1];dst[1]=in[0];dst[2]=in[3];dst[3]=in[2];
+      for(unsigned y=0;y<4;y++)dst[4+y]=reverse_cmpr_selector_pairs(in[4+y]);
+    }
+  }
+  return true;
 }
 void cmpr_block(const uint8_t* src, std::vector<uint8_t>& out, uint32_t w, uint32_t h, uint32_t ox, uint32_t oy) {
   const uint16_t c0v=be16(src), c1v=be16(src+2);
@@ -170,27 +196,13 @@ bool transcode_cmpr_to_dxt1(const TextureDesc& d,std::vector<uint8_t>& out) noex
   const uint32_t dstBlocksX=static_cast<uint32_t>(blocks(d.width,4));
   const uint32_t dstBlocksY=static_cast<uint32_t>(blocks(d.height,4));
   out.assign(static_cast<size_t>(dstBlocksX)*dstBlocksY*8u,0);
-  const auto* src=static_cast<const uint8_t*>(d.data);
-  size_t srcOffset=0;
-  for(uint32_t my=0;my<d.height;my+=8){
-    for(uint32_t mx=0;mx<d.width;mx+=8){
-      // GX CMPR stores four 4x4 BC1-like blocks inside each 8x8 macro tile
-      // (TL, TR, BL, BR). DXT1 expects a globally linear 4x4 block grid.
-      for(unsigned sub=0;sub<4;sub++){
-        const uint32_t bx=mx/4u+(sub&1u);
-        const uint32_t by=my/4u+(sub>>1u);
-        const auto* in=src+srcOffset+sub*8u;
-        if(bx>=dstBlocksX||by>=dstBlocksY)continue;
-        auto* dst=out.data()+(static_cast<size_t>(by)*dstBlocksX+bx)*8u;
-        // GX endpoints are big-endian; S3TC stores the two RGB565 endpoints LE.
-        dst[0]=in[1];dst[1]=in[0];dst[2]=in[3];dst[3]=in[2];
-        // GX consumes selector pairs MSB-first per row; DXT1 consumes them LSB-first.
-        for(unsigned y=0;y<4;y++)dst[4+y]=reverse_cmpr_selector_pairs(in[4+y]);
-      }
-      srcOffset+=32u;
-    }
-  }
-  return true;
+  const uint32_t macroTilesX=static_cast<uint32_t>(blocks(d.width,8));
+  const uint32_t macroTilesY=static_cast<uint32_t>(blocks(d.height,8));
+  CmprTranscodeJob job{static_cast<const uint8_t*>(d.data),out.data(),macroTilesX,dstBlocksX,dstBlocksY};
+  // Each 8x8 GX macro tile maps to four independent DXT1 blocks, so larger
+  // textures can use the same persistent Vita worker pool as vertex preparation
+  // without adding synchronization inside the transcode loop.
+  return cpu_parallel_for(static_cast<size_t>(macroTilesX)*macroTilesY,transcode_cmpr_range,&job);
 }
 
 bool decode_texture_rgba8(const TextureDesc& d,std::vector<uint8_t>& out) noexcept {
