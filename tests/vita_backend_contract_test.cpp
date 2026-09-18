@@ -439,7 +439,14 @@ int main() {
       REQUIRE(seen.size()==w*h);
     }
     d.width=3; REQUIRE(!gxm::prepare_swizzled_texture(d).ok());
-    d.width=4;d.mipCount=2; REQUIRE(!gxm::prepare_swizzled_texture(d).ok());
+    std::array<uint8_t,80> mipPixels{};
+    for(unsigned i=0;i<16;++i)for(unsigned c=0;c<4;++c)mipPixels[i*4+c]=uint8_t(i);
+    for(unsigned i=0;i<4;++i)for(unsigned c=0;c<4;++c)mipPixels[64+i*4+c]=uint8_t(100+i);
+    d.width=d.height=4;d.mipCount=2;d.data=mipPixels.data();d.dataSize=mipPixels.size();
+    const auto mips=gxm::prepare_swizzled_texture(d);
+    REQUIRE(mips.ok());REQUIRE(mips.mipCount==2);REQUIRE(mips.pixels.size()==80);
+    const uint8_t expectedMip1[]{100,102,101,103};
+    for(unsigned i=0;i<4;++i)REQUIRE(mips.pixels[64+i*4]==expectedMip1[i]);
     auto p=basic(); p.tev.stages[0].texture=0;p.tev.stages[0].texCoord=0;
     p.tev.stages[0].color.d=TevColorArg::TexColor;
     const auto normalKey=pipeline_key(p);p.nativeTextureWrapMask=1;

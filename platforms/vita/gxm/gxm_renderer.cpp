@@ -176,6 +176,70 @@ bool same_sampler(const SamplerDesc& a,const SamplerDesc& b) noexcept {
 bool same_viewport(const Viewport& a,const Viewport& b) noexcept {
   return a.x==b.x&&a.y==b.y&&a.width==b.width&&a.height==b.height&&a.znear==b.znear&&a.zfar==b.zfar;
 }
+void swizzle_units(const uint8_t* linear,uint32_t width,uint32_t height,size_t unitBytes,
+                   std::vector<uint8_t>& out) {
+  out.resize(size_t(width)*height*unitBytes);
+  unsigned shared=0;
+  while((1u<<shared)<std::min(width,height))++shared;
+  const auto spread=[shared](uint32_t value,unsigned axis) {
+    uint32_t result=0;
+    for(unsigned bit=0;bit<shared;++bit)result|=((value>>bit)&1u)<<(bit*2u+axis);
+    return result|((value>>shared)<<(shared*2u));
+  };
+  std::vector<uint32_t> xOffsets(width);
+  for(uint32_t x=0;x<width;++x)xOffsets[x]=spread(x,1);
+  for(uint32_t y=0;y<height;++y) {
+    const uint32_t yOffset=spread(y,0);
+    for(uint32_t x=0;x<width;++x)
+      std::memcpy(out.data()+size_t(xOffsets[x]|yOffset)*unitBytes,
+                  linear+(size_t(y)*width+x)*unitBytes,unitBytes);
+  }
+}
+struct NativeTextureUpload {
+  std::vector<uint8_t> pixels;
+  SceGxmTextureFormat format=SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR;
+  uint32_t stride=0;
+  bool swizzled=false;
+  bool valid=false;
+};
+NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
+  NativeTextureUpload out;
+  if(desc.mipCount>1||desc.generateMipmaps)return out;
+  if(desc.format==TextureFormat::CMPR) {
+    if(!transcode_cmpr_to_dxt1(desc,out.pixels))return out;
+    out.format=SCE_GXM_TEXTURE_FORMAT_UBC1_ABGR;
+    out.stride=desc.width;
+    out.valid=true;
+    return out;
+  }
+  NativeTextureFormat native=NativeTextureFormat::None;
+  std::vector<uint8_t> tight;
+  if(!transcode_texture_native(desc,native,tight))return out;
+  size_t bpp=0;
+  switch(native) {
+  case NativeTextureFormat::Intensity8:
+    out.format=SCE_GXM_TEXTURE_FORMAT_U8_RRRR;bpp=1;break;
+  case NativeTextureFormat::LuminanceAlpha8:
+    out.format=SCE_GXM_TEXTURE_FORMAT_A8L8;bpp=2;break;
+  case NativeTextureFormat::Rgb565:
+    out.format=SCE_GXM_TEXTURE_FORMAT_R5G6B5;bpp=2;break;
+  default:return out;
+  }
+  const bool pow2=(desc.width&(desc.width-1u))==0&&(desc.height&(desc.height-1u))==0;
+  if(pow2) {
+    swizzle_units(tight.data(),desc.width,desc.height,bpp,out.pixels);
+    out.stride=desc.width;out.swizzled=true;
+  } else {
+    const uint32_t stride=(desc.width+7u)&~7u;
+    out.pixels.assign(size_t(stride)*desc.height*bpp,0);
+    for(uint32_t y=0;y<desc.height;++y)
+      std::memcpy(out.pixels.data()+size_t(y)*stride*bpp,
+                  tight.data()+size_t(y)*desc.width*bpp,size_t(desc.width)*bpp);
+    out.stride=stride;
+  }
+  out.valid=true;
+  return out;
+}
 } // namespace
 
 struct Renderer::Impl {
@@ -611,15 +675,42 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
   if (!d.initialized || !desc.data || !desc.width || desc.width > 4096 || !desc.height || desc.height > 4096 || !d.nextHandle) {
     d.fail("texture upload requires a bounded image"); return 0;
   }
-  const size_t encoded = encoded_texture_size(desc.width, desc.height, desc.format);
+  const size_t encoded = encoded_mip_chain_size(desc.width, desc.height, desc.format,
+                                                std::max<uint8_t>(desc.mipCount,1));
   if (!encoded || desc.dataSize < encoded) { d.fail("truncated encoded texture"); return 0; }
   const uint64_t key = texture_key(desc);
   if (desc.cacheable) {
     const auto it = d.textureCache.find(key);
     if (it != d.textureCache.end()) { ++d.stats.textureHits; return it->second; }
   }
+  auto native=prepare_native_texture(desc);
+  if(native.valid&&!native.pixels.empty()&&d.has_budget(native.pixels.size())) {
+    auto owned=std::make_unique<Impl::Texture>();
+    auto& texture=*owned;
+    texture.width=desc.width;texture.height=desc.height;texture.stride=native.stride;
+    texture.mipCount=1;texture.swizzled=native.swizzled;
+    if(d.alloc(texture.memory,native.pixels.size(),MemoryKind::GpuResource)) {
+      std::memcpy(texture.memory.data(),native.pixels.data(),native.pixels.size());
+      const int nativeResult=native.swizzled?
+          sceGxmTextureInitSwizzled(&texture.descriptor,texture.memory.data(),native.format,
+                                    desc.width,desc.height,1):
+          sceGxmTextureInitLinear(&texture.descriptor,texture.memory.data(),native.format,
+                                  desc.width,desc.height,1);
+      if(nativeResult>=0) {
+        d.resourceBytes+=texture.memory.size();
+        const Handle handle=d.nextHandle++;
+        d.textures.emplace(handle,std::move(owned));
+        if(desc.cacheable)d.textureCache.emplace(key,handle);
+        ++d.stats.textureMisses;++d.stats.textureUploads;
+        return handle;
+      }
+      std::fprintf(stderr,
+          "[aurora-gxm] native GX texture format unsupported fmt=%u gxm=0x%08x; falling back to RGBA8\n",
+          static_cast<unsigned>(desc.format),unsigned(nativeResult));
+    }
+  }
   const bool swizzled=(desc.width&(desc.width-1u))==0 &&
-      (desc.height&(desc.height-1u))==0 && desc.mipCount<=1 && !desc.generateMipmaps;
+      (desc.height&(desc.height-1u))==0;
   auto pixels=swizzled?prepare_swizzled_texture(desc):prepare_linear_texture(desc);
   if(!pixels.ok()) {d.fail(pixels.error.c_str());return 0;}
   const uint32_t rowBytes = ((desc.width + 7u) & ~7u) * 4u;
