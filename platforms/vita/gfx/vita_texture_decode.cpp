@@ -95,6 +95,62 @@ bool transcode_cmpr_range(void* opaque,size_t begin,size_t end,uint32_t) noexcep
   }
   return true;
 }
+struct NativeTranscodeJob {
+  const uint8_t* src=nullptr;
+  uint8_t* dst=nullptr;
+  uint32_t width=0;
+  uint32_t height=0;
+  uint32_t tilesX=0;
+  uint32_t tileWidth=0;
+  uint32_t tileHeight=0;
+  TextureFormat format=TextureFormat::RGBA8888;
+};
+bool transcode_native_range(void* opaque,size_t begin,size_t end,uint32_t) noexcept {
+  auto& job=*static_cast<NativeTranscodeJob*>(opaque);
+  const auto put8=[&](uint32_t x,uint32_t y,uint8_t value) noexcept {
+    if(x<job.width&&y<job.height)job.dst[static_cast<size_t>(y)*job.width+x]=value;
+  };
+  const auto put16=[&](uint32_t x,uint32_t y,uint8_t lo,uint8_t hi) noexcept {
+    if(x>=job.width||y>=job.height)return;
+    const size_t offset=(static_cast<size_t>(y)*job.width+x)*2u;
+    job.dst[offset]=lo;job.dst[offset+1]=hi;
+  };
+  for(size_t tileIndex=begin;tileIndex<end;++tileIndex){
+    const uint32_t tileX=static_cast<uint32_t>(tileIndex%job.tilesX);
+    const uint32_t tileY=static_cast<uint32_t>(tileIndex/job.tilesX);
+    const uint32_t bx=tileX*job.tileWidth,by=tileY*job.tileHeight;
+    const auto* tile=job.src+tileIndex*32u;
+    size_t p=0;
+    switch(job.format){
+    case TextureFormat::I4:
+      for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){
+        const uint8_t v=tile[p++];
+        put8(bx+x,by+y,expand4(v>>4));put8(bx+x+1,by+y,expand4(v&15));
+      }
+      break;
+    case TextureFormat::I8:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++)put8(bx+x,by+y,tile[p++]);
+      break;
+    case TextureFormat::IA4:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){
+        const uint8_t v=tile[p++];put16(bx+x,by+y,expand4(v&15),expand4(v>>4));
+      }
+      break;
+    case TextureFormat::IA8:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){
+        const uint8_t a=tile[p++],i=tile[p++];put16(bx+x,by+y,i,a);
+      }
+      break;
+    case TextureFormat::RGB565:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){
+        const uint8_t hi=tile[p++],lo=tile[p++];put16(bx+x,by+y,lo,hi);
+      }
+      break;
+    default:return false;
+    }
+  }
+  return true;
+}
 void cmpr_block(const uint8_t* src, std::vector<uint8_t>& out, uint32_t w, uint32_t h, uint32_t ox, uint32_t oy) {
   const uint16_t c0v=be16(src), c1v=be16(src+2);
   std::array<RGBA,4> c{}; c[0]=decode_rgb565(c0v); c[1]=decode_rgb565(c1v);
@@ -158,33 +214,31 @@ bool transcode_texture_native(const TextureDesc&d,NativeTextureFormat&format,std
   const size_t need=encoded_texture_size(d.width,d.height,d.format);
   if(d.dataSize&&d.dataSize<need)return false;
   out.assign(static_cast<size_t>(d.width)*d.height*bpp,0);
-  const auto*s=static_cast<const uint8_t*>(d.data);size_t off=0;
-  auto put8=[&](uint32_t x,uint32_t y,uint8_t v) noexcept {if(x<d.width&&y<d.height)out[static_cast<size_t>(y)*d.width+x]=v;};
-  auto put16=[&](uint32_t x,uint32_t y,uint8_t lo,uint8_t hi) noexcept {if(x<d.width&&y<d.height){const size_t p=(static_cast<size_t>(y)*d.width+x)*2u;out[p]=lo;out[p+1]=hi;}};
+  uint32_t tileWidth=0,tileHeight=0;
   switch(d.format){
   case TextureFormat::I4:
     format=NativeTextureFormat::Intensity8;
-    for(uint32_t by=0;by<d.height;by+=8)for(uint32_t bx=0;bx<d.width;bx+=8){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){const uint8_t v=tile[p++];put8(bx+x,by+y,expand4(v>>4));put8(bx+x+1,by+y,expand4(v&15));}off+=32;}
-    return true;
+    tileWidth=8;tileHeight=8;break;
   case TextureFormat::I8:
     format=NativeTextureFormat::Intensity8;
-    for(uint32_t by=0;by<d.height;by+=4)for(uint32_t bx=0;bx<d.width;bx+=8){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++)put8(bx+x,by+y,tile[p++]);off+=32;}
-    return true;
+    tileWidth=8;tileHeight=4;break;
   case TextureFormat::IA4:
     format=NativeTextureFormat::LuminanceAlpha8;
-    for(uint32_t by=0;by<d.height;by+=4)for(uint32_t bx=0;bx<d.width;bx+=8){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){const uint8_t v=tile[p++];put16(bx+x,by+y,expand4(v&15),expand4(v>>4));}off+=32;}
-    return true;
+    tileWidth=8;tileHeight=4;break;
   case TextureFormat::IA8:
     format=NativeTextureFormat::LuminanceAlpha8;
-    for(uint32_t by=0;by<d.height;by+=4)for(uint32_t bx=0;bx<d.width;bx+=4){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){const uint8_t a=tile[p++],i=tile[p++];put16(bx+x,by+y,i,a);}off+=32;}
-    return true;
+    tileWidth=4;tileHeight=4;break;
   case TextureFormat::RGB565:
     format=NativeTextureFormat::Rgb565;
-    for(uint32_t by=0;by<d.height;by+=4)for(uint32_t bx=0;bx<d.width;bx+=4){const auto*tile=s+off;size_t p=0;for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){const uint8_t hi=tile[p++],lo=tile[p++];put16(bx+x,by+y,lo,hi);}off+=32;}
-    return true;
+    tileWidth=4;tileHeight=4;break;
   default:break;
   }
-  format=NativeTextureFormat::None;out.clear();return false;
+  if(!tileWidth||!tileHeight){format=NativeTextureFormat::None;out.clear();return false;}
+  const uint32_t tilesX=static_cast<uint32_t>(blocks(d.width,tileWidth));
+  const uint32_t tilesY=static_cast<uint32_t>(blocks(d.height,tileHeight));
+  NativeTranscodeJob job{static_cast<const uint8_t*>(d.data),out.data(),d.width,d.height,
+                         tilesX,tileWidth,tileHeight,d.format};
+  return cpu_parallel_for(static_cast<size_t>(tilesX)*tilesY,transcode_native_range,&job);
 }
 
 bool transcode_cmpr_to_dxt1(const TextureDesc& d,std::vector<uint8_t>& out) noexcept {
