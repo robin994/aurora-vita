@@ -142,14 +142,16 @@ bool PipelineCache::evict_one() noexcept {
 void PipelineCache::set_max_entries(size_t n) noexcept {maxEntries_=n;trim_to_budget();}
 void PipelineCache::trim_to_budget() noexcept {while(maxEntries_ && map_.size()>maxEntries_ && evict_one()) {}}
 const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& desc,FrameStats* stats) noexcept {
-  const auto key=pipeline_key(desc);
+  PipelineDesc nativeDesc=desc;
+  nativeDesc.fragmentScissor=false;
+  const auto key=pipeline_key(nativeDesc);
   auto it=map_.find(key);
   if(it!=map_.end()) {it->second.lastUsed=++useSequence_;if(stats)++stats->pipelineHits;return &it->second;}
   if(stats)++stats->pipelineMisses;
   if(!native_ || failedKeys_.contains(key))return nullptr;
   if(maxEntries_ && map_.size()>=maxEntries_)evict_one();
-  if(!native_->create_pipeline(desc)) {failedKeys_.insert(key);++compileFailures_;return nullptr;}
-  CompiledPipeline p{};p.key=key;p.desc=desc;p.lastUsed=++useSequence_;
+  if(!native_->create_pipeline(nativeDesc)) {failedKeys_.insert(key);++compileFailures_;return nullptr;}
+  CompiledPipeline p{};p.key=key;p.desc=nativeDesc;p.lastUsed=++useSequence_;
   const auto result=map_.emplace(key,std::move(p));
   highWaterEntries_=std::max(highWaterEntries_,map_.size());
   return &result.first->second;
@@ -346,7 +348,9 @@ void Renderer::draw(const DrawPacket& packet) noexcept {
   if(!native_->draw(packet)) {failed_=true;return;}
   const auto& s=native_->stats();stats_.drawCalls=s.drawCalls;stats_.triangles=s.triangles;
   stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;stats_.nativeDrawUs=s.nativeDrawUs;
+  stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
+  stats_.nativeSceneCount=s.nativeSceneCount;
 }
 void Renderer::execute(const CommandStream& stream) noexcept {
   execute_range(stream,0,stream.size(),true);

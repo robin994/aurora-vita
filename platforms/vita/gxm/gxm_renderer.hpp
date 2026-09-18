@@ -10,6 +10,7 @@ struct Config {
   uint32_t width = 960;
   uint32_t height = 544;
   uint32_t displayBuffers = 3;
+  uint32_t scenesPerFrame = 8;
   size_t parameterBufferBytes = 4 * 1024 * 1024;
   size_t resourceBudgetBytes = 24 * 1024 * 1024;
   size_t cdramPoolBytes = 64 * 1024 * 1024;
@@ -59,7 +60,8 @@ public:
   bool bind_pipeline(uint64_t key,const gfx::GpuDrawUniforms& uniforms,const gfx::Scissor& scissor={},
                      const gfx::FixedVertexUniforms* fixedVertex=nullptr,
                      const std::array<gfx::TextureBinding,gfx::MaxTextures>* textures=nullptr);
-  bool bind_texture(gfx::Handle handle,unsigned unit,const gfx::SamplerDesc& sampler);
+  bool bind_texture(gfx::Handle handle,unsigned unit,const gfx::SamplerDesc& sampler,
+                    bool requireNativeWrap=false);
   bool end_frame(bool present = true);
   // Diagnostic synchronization/readback, never part of the normal frame loop.
   bool readback_rgba8(std::vector<uint8_t>& pixels);

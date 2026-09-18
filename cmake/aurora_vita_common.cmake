@@ -20,11 +20,7 @@ if (VITA OR CMAKE_SYSTEM_NAME STREQUAL "Vita" OR CMAKE_CXX_COMPILER MATCHES "arm
     endif()
     target_compile_options(aurora_vita_common PRIVATE
         -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
-        -mtune=cortex-a9 -mfpu=neon -fsigned-char)
-    # Both standalone backends use VitaSDK's default wchar/enum ABI. Keep only
-    # the historical vitaGL floating-point optimization backend-specific.
-    if (AURORA_VITA_RENDERER STREQUAL "VITAGL")
-        target_compile_options(aurora_vita_common PRIVATE -ffast-math)
-    endif ()
+        -mcpu=cortex-a9 -mfpu=neon-vfpv3 -mfloat-abi=hard -fsigned-char
+        -fno-math-errno -funsafe-math-optimizations -fno-signed-zeros -ffp-contract=fast)
     target_link_libraries(aurora_vita_common PUBLIC SceLibKernel_stub pthread m)
 endif ()

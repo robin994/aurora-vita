@@ -21,7 +21,8 @@ target_compile_definitions(aurora_vita_gxm_backend PUBLIC AURORA_VITA_RENDERER_G
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE AURORA_VITA_DIRECT_STREAM_WRITE=0)
 target_compile_options(aurora_vita_gxm_backend PRIVATE
     -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
-    -mtune=cortex-a9 -mfpu=neon -fsigned-char)
+    -mcpu=cortex-a9 -mfpu=neon-vfpv3 -mfloat-abi=hard -fsigned-char
+    -fno-math-errno -funsafe-math-optimizations -fno-signed-zeros -ffp-contract=fast)
 target_link_libraries(aurora_vita_gxm_backend PUBLIC aurora::vita_common
     vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
     SceGxm_stub SceDisplay_stub SceSysmodule_stub SceLibKernel_stub SceCtrl_stub
