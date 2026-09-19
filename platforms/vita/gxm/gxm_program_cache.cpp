@@ -1,5 +1,7 @@
 #include "gxm_program_cache.hpp"
+#include <cstdlib>
 #include <cstdio>
+#include <dirent.h>
 #include <psp2/io/stat.h>
 
 namespace aurora::vita::gxm {
@@ -75,5 +77,29 @@ void ProgramBinaryCache::save(uint64_t sourceHash, ProgramStage stage,
     if (std::rename(temporary.c_str(), path.c_str()) == 0) return;
   }
   std::remove(temporary.c_str());
+}
+
+size_t ProgramBinaryCache::preload(std::vector<PreloadedProgram>& programs, size_t maxPrograms) noexcept {
+  programs.clear();
+  if (root_.empty() || !maxPrograms) return 0;
+  DIR* dir = opendir(root_.c_str());
+  if (!dir) return 0;
+  while (programs.size() < maxPrograms) {
+    const dirent* entry = readdir(dir);
+    if (!entry) break;
+    const char* name = entry->d_name;
+    if (!name || (name[0] != 'v' && name[0] != 'f') || name[1] != '-') continue;
+    char* end = nullptr;
+    const uint64_t hash = std::strtoull(name + 2, &end, 16);
+    if (!hash || !end || std::strcmp(end, ".gxp") != 0) continue;
+    const ProgramStage stage = name[0] == 'v' ? ProgramStage::Vertex : ProgramStage::Fragment;
+    PreloadedProgram program{};
+    program.sourceHash = hash;
+    program.stage = stage;
+    if (!load(hash, stage, program.words) || program.words.empty()) continue;
+    programs.push_back(std::move(program));
+  }
+  closedir(dir);
+  return programs.size();
 }
 } // namespace aurora::vita::gxm

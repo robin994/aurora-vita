@@ -18,6 +18,12 @@ struct GxmProgramCacheHeader {
 };
 static_assert(sizeof(GxmProgramCacheHeader) == 32);
 
+struct PreloadedProgram {
+  uint64_t sourceHash = 0;
+  ProgramStage stage = ProgramStage::Vertex;
+  std::vector<uint32_t> words;
+};
+
 inline uint64_t gxm_program_source_hash(const char* source, ProgramStage stage) noexcept {
   static constexpr char contract[] = "aurora-gxm-cg-gxp-v1";
   auto hash = gfx::program_cache_hash(contract, sizeof(contract));
@@ -40,6 +46,7 @@ public:
   bool load(uint64_t sourceHash, ProgramStage stage, std::vector<uint32_t>& words) noexcept;
   void save(uint64_t sourceHash, ProgramStage stage, const std::vector<uint32_t>& words,
             size_t byteLength) noexcept;
+  size_t preload(std::vector<PreloadedProgram>& programs, size_t maxPrograms = 1024) noexcept;
   uint32_t hits() const noexcept { return hits_; }
   uint32_t misses() const noexcept { return misses_; }
 private:

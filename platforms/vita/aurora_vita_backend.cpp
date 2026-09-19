@@ -227,6 +227,7 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.displayBuffers=c.vgl_display_buffer_count;
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
+  rc.nativeScenesPerFrame=std::max(c.gxm_scenes_per_frame,1u);
   // The native budget covers persistent streaming buffers as well as textures.
   rc.nativeResourceBudget=c.texture_cache_budget+c.static_geometry_budget+
       (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
@@ -236,8 +237,13 @@ bool initialize(const BackendConfig& c) noexcept {
   // default so games do not need renderer-specific configuration files.
   rc.programBinaryCachePath=c.program_binary_cache_path ? c.program_binary_cache_path :
       "ux0:data/aurora-vita/program_cache";
+  rc.pipelineWarmupPath=c.pipeline_warmup_path ? c.pipeline_warmup_path :
+      "ux0:data/aurora-vita/pipeline_hot_v1.bin";
+  rc.pipelinePrewarmLimit=c.pipeline_prewarm_limit;
 #else
   rc.programBinaryCachePath=c.program_binary_cache_path;
+  rc.pipelineWarmupPath=c.pipeline_warmup_path;
+  rc.pipelinePrewarmLimit=c.pipeline_prewarm_limit;
 #endif
   g_renderer=std::make_unique<gfx::Renderer>(rc);
   if(!g_renderer->initialize()) {

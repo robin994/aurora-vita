@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace aurora::vita::gfx {
 struct CompiledPipeline {
@@ -46,6 +47,9 @@ public:
   void clear() noexcept;
   void invalidate_bound() noexcept{bound_=0;boundPipeline_=nullptr;fixedStateValid_=false;}
   void set_max_entries(size_t maxEntries) noexcept;
+  void configure_hot_manifest(const char* path,size_t prewarmLimit=192) noexcept;
+  size_t prewarm_hot(FrameStats* stats=nullptr) noexcept;
+  void save_hot_manifest() noexcept;
   void pin(uint64_t key) noexcept { if(key) pinned_.insert(key); }
   void clear_pins() noexcept { pinned_.clear(); }
   void trim_to_budget() noexcept;
@@ -62,7 +66,9 @@ private:
 #endif
   bool evict_one() noexcept;
   void destroy_pipeline(CompiledPipeline& pipeline) noexcept;
+  struct HotRecord { PipelineDesc desc{}; uint64_t hits=0; };
   NodeHashMap<uint64_t,CompiledPipeline> map_;
+  NodeHashMap<uint64_t,HotRecord> hot_;
   FlatHashSet<uint64_t> pinned_{};
   // Shader failures are deterministic for a pipeline description. Retrying the
   // same broken TEV program every draw causes severe stalls and repeated compiler
@@ -77,5 +83,8 @@ private:
   size_t highWaterEntries_=0;
   uint64_t compileFailures_=0;
   uint64_t evictions_=0;
+  std::string hotManifestPath_{};
+  size_t prewarmLimit_=192;
+  bool hotDirty_=false;
 };
 } // namespace aurora::vita::gfx

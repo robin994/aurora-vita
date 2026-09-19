@@ -358,6 +358,8 @@ struct Renderer::Impl {
   bool efbCopyFlipX = false, efbCopyFlipY = false, efbCopyGeometryValid = false;
   ProgramBinaryCache programCache;
   uint32_t stageMemoryHits = 0, stageCompiles = 0;
+  uint64_t sceneWindowSum = 0;
+  uint32_t sceneWindowFrames = 0;
 
   uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
   uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
@@ -575,6 +577,20 @@ bool Renderer::initialize(const Config& config) {
   shark_install_log_cb(shader_log);
   shark_set_warnings_level(SHARK_WARN_HIGH);
   d.programCache.configure(config.programCachePath);
+  {
+    const uint64_t preloadStarted=sceKernelGetProcessTimeWide();
+    std::vector<PreloadedProgram> preloaded;
+    const size_t count=d.programCache.preload(preloaded);
+    for(auto& cached:preloaded) {
+      auto compiled=std::make_shared<Impl::CompiledStage>();
+      compiled->code=std::move(cached.words);
+      d.stageCache.emplace(cached.sourceHash,std::move(compiled));
+    }
+    if(count)
+      std::fprintf(stderr,"[aurora-gxm] stage_preload programs=%u us=%llu\n",
+          static_cast<unsigned>(count),
+          static_cast<unsigned long long>(sceKernelGetProcessTimeWide()-preloadStarted));
+  }
   d.initialized = true;
   PipelineDesc clear{};
   clear.reversedZ = false; clear.cull = CullMode::None; clear.depthFunc = Compare::Always;
@@ -1120,6 +1136,18 @@ bool Renderer::end_frame(bool present) {
       static_cast<unsigned long long>(afterQueue-afterEnd),
       static_cast<unsigned long long>(afterQueue-timingStart));
   d.stats.cpuFrameUs = sceKernelGetProcessTimeWide() - d.frameStarted;
+  d.sceneWindowSum += d.stats.nativeSceneCount;
+  ++d.sceneWindowFrames;
+  if(d.stats.nativeSceneCount>d.config.scenesPerFrame)
+    std::fprintf(stderr,"[aurora-gxm] scene_budget_exceeded scenes=%u budget=%u\n",
+        d.stats.nativeSceneCount,d.config.scenesPerFrame);
+  if(d.sceneWindowFrames>=120u) {
+    const double avg=double(d.sceneWindowSum)/double(d.sceneWindowFrames);
+    if(avg>double(d.config.scenesPerFrame))
+      std::fprintf(stderr,"[aurora-gxm] scene_budget_average avg=%.2f budget=%u\n",
+          avg,d.config.scenesPerFrame);
+    d.sceneWindowSum=0;d.sceneWindowFrames=0;
+  }
   if (d.profileDraws) log_memory_state("profile-frame");
   return true;
 }

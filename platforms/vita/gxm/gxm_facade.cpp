@@ -5,11 +5,26 @@
 #include "gfx/vita_efb_copy.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <limits>
+#include <type_traits>
+#include <vector>
 
 // The same GX DrawSink and preparation/streaming code link these implementations
 // instead of the vitaGL resource classes. No frontend or FIFO is duplicated.
 namespace aurora::vita::gfx {
+namespace {
+constexpr uint32_t PipelineHotMagic=0x48505641u; // "AVPH"
+constexpr uint32_t PipelineHotVersion=1;
+struct PipelineHotHeader {
+  uint32_t magic=PipelineHotMagic,version=PipelineHotVersion,descSize=sizeof(PipelineDesc),count=0;
+};
+struct PipelineHotDiskRecord {
+  uint64_t key=0,hits=0;
+  PipelineDesc desc{};
+};
+static_assert(std::is_trivially_copyable_v<PipelineDesc>);
+}
 BufferPool::~BufferPool() { clear(); }
 Handle BufferPool::create_vertex(const void* data,size_t bytes,bool dynamic) noexcept {
   if(!native_) return 0;
@@ -141,8 +156,70 @@ bool PipelineCache::evict_one() noexcept {
 }
 void PipelineCache::set_max_entries(size_t n) noexcept {maxEntries_=n;trim_to_budget();}
 void PipelineCache::trim_to_budget() noexcept {while(maxEntries_ && map_.size()>maxEntries_ && evict_one()) {}}
+void PipelineCache::configure_hot_manifest(const char* path,size_t prewarmLimit) noexcept {
+  hotManifestPath_=path&&*path?path:"";prewarmLimit_=prewarmLimit;hot_.clear();hotDirty_=false;
+  if(hotManifestPath_.empty())return;
+  FILE* file=std::fopen(hotManifestPath_.c_str(),"rb");
+  if(!file)return;
+  PipelineHotHeader header{};
+  if(std::fread(&header,sizeof(header),1,file)!=1||header.magic!=PipelineHotMagic||
+      header.version!=PipelineHotVersion||header.descSize!=sizeof(PipelineDesc)||header.count>2048u){
+    std::fclose(file);return;
+  }
+  for(uint32_t i=0;i<header.count;++i){
+    PipelineHotDiskRecord disk{};
+    if(std::fread(&disk,sizeof(disk),1,file)!=1)break;
+    if(!disk.key||pipeline_key(disk.desc)!=disk.key)continue;
+    hot_[disk.key]=HotRecord{disk.desc,disk.hits};
+  }
+  std::fclose(file);
+  if(!hot_.empty())std::fprintf(stderr,"[aurora-gxm] pipeline_manifest loaded=%u prewarm_limit=%u\n",
+      static_cast<unsigned>(hot_.size()),static_cast<unsigned>(prewarmLimit_));
+}
+size_t PipelineCache::prewarm_hot(FrameStats* stats) noexcept {
+  if(!native_||hot_.empty()||!prewarmLimit_)return 0;
+  std::vector<std::pair<uint64_t,HotRecord*>> ordered;ordered.reserve(hot_.size());
+  for(auto& [key,record]:hot_)ordered.emplace_back(key,&record);
+  std::sort(ordered.begin(),ordered.end(),[](const auto&a,const auto&b){return a.second->hits>b.second->hits;});
+  size_t warmed=0;
+  for(const auto& [key,record]:ordered){
+    if(warmed>=prewarmLimit_||map_.size()>=maxEntries_)break;
+    if(map_.contains(key))continue;
+    if(!native_->create_pipeline(record->desc)){failedKeys_.insert(key);++compileFailures_;continue;}
+    CompiledPipeline p{};p.key=key;p.desc=record->desc;p.lastUsed=++useSequence_;
+    map_.emplace(key,std::move(p));++warmed;
+    if(stats)++stats->pipelineHits;
+  }
+  highWaterEntries_=std::max(highWaterEntries_,map_.size());
+  if(warmed)std::fprintf(stderr,"[aurora-gxm] pipeline_prewarm warmed=%u resident=%u\n",
+      static_cast<unsigned>(warmed),static_cast<unsigned>(map_.size()));
+  return warmed;
+}
+void PipelineCache::save_hot_manifest() noexcept {
+  if(!hotDirty_||hotManifestPath_.empty()||hot_.empty())return;
+  std::vector<std::pair<uint64_t,const HotRecord*>> ordered;ordered.reserve(hot_.size());
+  for(const auto& [key,record]:hot_)ordered.emplace_back(key,&record);
+  std::sort(ordered.begin(),ordered.end(),[](const auto&a,const auto&b){return a.second->hits>b.second->hits;});
+  if(ordered.size()>512u)ordered.resize(512u);
+  const std::string temporary=hotManifestPath_+".tmp";
+  FILE* file=std::fopen(temporary.c_str(),"wb");if(!file)return;
+  PipelineHotHeader header{};header.count=static_cast<uint32_t>(ordered.size());
+  bool ok=std::fwrite(&header,sizeof(header),1,file)==1;
+  for(const auto& [key,record]:ordered){
+    PipelineHotDiskRecord disk{};disk.key=key;disk.hits=record->hits;disk.desc=record->desc;
+    ok=ok&&std::fwrite(&disk,sizeof(disk),1,file)==1;
+  }
+  ok=ok&&std::fclose(file)==0;
+  if(ok){std::remove(hotManifestPath_.c_str());ok=std::rename(temporary.c_str(),hotManifestPath_.c_str())==0;}
+  if(!ok){std::remove(temporary.c_str());return;}
+  hotDirty_=false;
+  std::fprintf(stderr,"[aurora-gxm] pipeline_manifest saved=%u\n",header.count);
+}
 const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& desc,FrameStats* stats) noexcept {
   const auto key=pipeline_key(desc);
+  auto hotIt=hot_.find(key);
+  if(hotIt==hot_.end())hotIt=hot_.emplace(key,HotRecord{desc,0}).first;
+  ++hotIt->second.hits;hotDirty_=true;
   auto it=map_.find(key);
   if(it!=map_.end()) {it->second.lastUsed=++useSequence_;if(stats)++stats->pipelineHits;return &it->second;}
   if(stats)++stats->pipelineMisses;
@@ -165,6 +242,7 @@ void PipelineCache::bind(const CompiledPipeline& p,const GpuDrawUniforms& u,Fram
   bound_=p.key;boundPipeline_=const_cast<CompiledPipeline*>(&p);
 }
 void PipelineCache::clear() noexcept {
+  save_hot_manifest();
   if(native_)native_->finish();
   for(auto& [_,p]:map_)destroy_pipeline(p);
   map_.clear();pinned_.clear();failedKeys_.clear();invalidate_bound();
@@ -274,6 +352,7 @@ Renderer::~Renderer() {shutdown();}
 bool Renderer::initialize() noexcept {
   if(initialized_)return true;
   gxm::Config c{};c.width=cfg_.width;c.height=cfg_.height;c.displayBuffers=cfg_.displayBuffers;
+  c.scenesPerFrame=std::max(cfg_.nativeScenesPerFrame,1u);
   c.waitVblank=cfg_.waitVblank;c.resourceBudgetBytes=cfg_.nativeResourceBudget;
   c.cdramPoolBytes=cfg_.nativeCdramPoolBytes;
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
@@ -282,6 +361,8 @@ bool Renderer::initialize() noexcept {
   c.maxPipelines=cfg_.pipelineBudget+16; // Native clear/blit variants are not GX cache entries.
   if(!native_->initialize(c))return false;
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=native_.get();
+  pipelines_.configure_hot_manifest(cfg_.pipelineWarmupPath,cfg_.pipelinePrewarmLimit);
+  pipelines_.prewarm_hot();
   targetWidth_=cfg_.width;targetHeight_=cfg_.height;initialized_=true;failed_=false;
   return true;
 }
@@ -296,7 +377,10 @@ void Renderer::begin_frame() noexcept {
   pipelines_.clear_pins();pipelines_.trim_to_budget();stats_={};
   failed_=!native_->begin_frame();boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;
 }
-void Renderer::end_frame() noexcept {textures_.trim(frame_);++frame_;}
+void Renderer::end_frame() noexcept {
+  textures_.trim(frame_);++frame_;
+  if((frame_%300u)==0) pipelines_.save_hot_manifest();
+}
 bool Renderer::present(bool display) noexcept {
   const bool ok=native_->end_frame(display);failed_=failed_||!ok;
   // Include internal clears, copies and the final display scene. The last GX
