@@ -259,8 +259,8 @@ std::string fixed_vertex_source_cg(TexGenSource source) {
   case TexGenSource::Normal:return "float4(a_normal,1.0)";
   case TexGenSource::Binormal:return "float4(a_binormal,1.0)";
   case TexGenSource::Tangent:return "float4(a_tangent,1.0)";
-  case TexGenSource::Color0:return "a_color0";
-  case TexGenSource::Color1:return "a_color1";
+  case TexGenSource::Color0:return "v_color0";
+  case TexGenSource::Color1:return "v_color1";
   default: {
     const unsigned i=static_cast<unsigned>(source)-static_cast<unsigned>(TexGenSource::Tex0);
     return i<MaxTextures?"float4(a_tex"+std::to_string(i)+".xy,1.0,1.0)":"float4(0.0,0.0,1.0,1.0)";
@@ -330,7 +330,7 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   if (!out.error.empty()) return out;
   out.textureMask = pipeline_sampled_texture_mask(d);
   out.texcoordMask = pipeline_texcoord_mask(d);
-  out.colorMask = pipeline_raster_color_mask(d);
+  out.colorMask = d.fixedVertexOnGpu ? vertex_pipeline_requirements(d).colorMask : pipeline_raster_color_mask(d);
   std::ostringstream vs, fs;
   std::vector<std::string> vp{"float4 a_position : POSITION", "out float4 v_position : POSITION"};
   std::vector<std::string> fp{"uniform float4 u_clip_rect",

@@ -492,7 +492,7 @@ void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUni
   std::memcpy(state.projection.data(),&glProj,sizeof(glProj));
   uniforms.mvp=state.projection;
 
-  const uint8_t colorMask=gfx::pipeline_raster_color_mask(pipeline);
+  const uint8_t colorMask=requirements.colorMask;
   uint32_t requiredLights=0;
   for(unsigned ch=0;ch<4;++ch)if(colorMask&(1u<<(ch&1u))) {
     state.channelAmbient[ch]=copy_vec4(g.colorChannelState[ch].ambColor);

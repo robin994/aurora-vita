@@ -47,7 +47,7 @@ inline VertexSemanticMask fixed_vertex_gpu_inputs(const PipelineDesc& pipeline) 
   const auto requirements=vertex_pipeline_requirements(pipeline);
   if(requirements.needNormal)mask|=vertex_semantic_bit(VertexSemantic::Normal);
   if(pipeline.fixedVertexIndexedPn)mask|=vertex_semantic_bit(VertexSemantic::PnMatrixIndex);
-  const uint8_t colors=pipeline_raster_color_mask(pipeline);
+  const uint8_t colors=vertex_pipeline_requirements(pipeline).colorMask;
   for (unsigned i=0;i<2;++i) if (colors&(1u<<i)) {
     if (pipeline.colorChannels[i].materialSource==ColorSource::Vertex ||
         pipeline.colorChannels[i+2].materialSource==ColorSource::Vertex ||
