@@ -38,6 +38,11 @@ Use `pipeline_warmup_path` to override the manifest location.
 `gxm_scenes_per_frame` defaults to 5 and should remain above the title's measured peak native
 scene count.
 
+`gxm_lit_fixed_vertex_gpu` defaults to **false**. When enabled, eligible immutable lit geometry
+can keep GX lighting/texgen work on the native GXM vertex path. Treat it as an A/B experiment
+against the CPU vertex path and validate lighting, matrix updates, normals, texgen, and animation
+before enabling it per-title.
+
 ## GXM experimental flags
 
 ### `AURORA_VITA_NATIVE_CMPR`

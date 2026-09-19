@@ -39,6 +39,7 @@ These are members of `aurora::vita::BackendConfig`, not CMake options.
 | `render_width`, `render_height` | `0, 0` | Common | Experimental resolution scaling. Zero follows display extent. Reduced resolution must be checked against GXCopyTex shadows, UI, crop, and aspect handling. |
 | `gxm_d16_depth` | `false` | GXM | Experimental. D16 can reduce depth bandwidth/memory but GX exposes higher depth precision; validate z-fighting and depth effects. |
 | `gxm_scenes_per_frame` | `5` | GXM | Native render-target scene budget. Keep high enough for the title's observed peak scene count; lowering it without measurements can increase stalls or fail scene submission. |
+| `gxm_lit_fixed_vertex_gpu` | `false` | GXM | Experimental lit fixed-vertex GPU path for eligible immutable geometry. Keep disabled as the correctness control until lighting/texgen parity is verified on hardware. |
 | `static_geometry_budget` | `0` | Common, primarily GXM | Experimental GPU fixed-geometry cache. Zero is the conservative default. Enable only for categories validated against the CPU path. |
 | `pipeline_warmup_path` | `nullptr` | Backend-specific | GXM: null selects `ux0:data/aurora-vita/pipeline_hot_v1.bin`; VitaGL: null disables manifest persistence/prewarm. |
 | `pipeline_prewarm_limit` | `192` | Common | Maximum hot pipelines compiled/resident during startup prewarm when a warmup manifest is configured. |

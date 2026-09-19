@@ -1145,7 +1145,7 @@ bool Renderer::end_frame(bool present) {
       const double avgQueue=double(d.displayQueueWindowSum)/double(d.displayQueueWindowFrames);
       const double avgCpu=double(d.cpuFrameWindowSum)/double(d.displayQueueWindowFrames);
       const double blockedPct=100.0*double(d.displayQueueBlockedFrames)/double(d.displayQueueWindowFrames);
-      std::fprintf(stderr,
+      AURORA_VITA_LOG_INFO(
           "[aurora-gxm] display_queue_profile avg_us=%.1f max_us=%llu blocked_pct=%.1f cpu_frame_avg_us=%.1f classification=%s\n",
           avgQueue,static_cast<unsigned long long>(d.displayQueueWindowMax),blockedPct,avgCpu,
           blockedPct>=10.0?"gpu_backpressure":"cpu_or_frontend_bound");
