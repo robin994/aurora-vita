@@ -500,7 +500,12 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   const auto a = comparison(ac.comp0, "floor(result.a*255.0+0.5)", std::to_string(ac.ref0)+".0");
   const auto b = comparison(ac.comp1, "floor(result.a*255.0+0.5)", std::to_string(ac.ref1)+".0");
   const auto predicate = alpha_test(a, b, ac.op);
-  if (predicate != "true") fs << "if(!(" << predicate << ")) discard;\n";
+  // vitaShaRK can enter an internal-error state when Cg contains an
+  // unconditional kill ("if(!(false)) discard"). Preserve GX semantics by
+  // marking the pipeline as side-effect-free instead; the native renderer then
+  // disables color/depth writes while compiling this shader without a kill.
+  if (predicate == "false") out.discardAll = true;
+  else if (predicate != "true") fs << "if(!(" << predicate << ")) discard;\n";
   if (d.dstAlpha >= 0) fs << "result.a=" << d.dstAlpha << ".0/255.0;\n";
   if(d.fogMode!=FogMode::None) {
     fs<<"{float fd="<<(d.reversedZ?"window_position.z":"(1.0-window_position.z)")<<";\nfloat fb="

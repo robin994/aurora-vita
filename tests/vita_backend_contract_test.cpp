@@ -119,8 +119,9 @@ void shader_operations() {
       const auto shader = gxm::build_tev_cg(d);
       REQUIRE(shader.ok());
       const bool pass[]{bool(av && bv), bool(av || bv), av != bv, av == bv};
-      REQUIRE((shader.fragment.find("discard") == std::string::npos) == pass[op]);
-      if (!pass[op]) REQUIRE(shader.fragment.find("if(!(false)) discard;") != std::string::npos);
+      REQUIRE(shader.fragment.find("if(!(false)) discard;") == std::string::npos);
+      REQUIRE(shader.discardAll == !pass[op]);
+      REQUIRE(shader.fragment.find("discard") == std::string::npos);
     }
   for (unsigned op = 0; op < 4; ++op) {
     auto d = basic();
@@ -129,7 +130,10 @@ void shader_operations() {
     const auto shader = gxm::build_tev_cg(d);
     REQUIRE(shader.ok());
     if (op == 3) REQUIRE(shader.fragment.find("discard") == std::string::npos);
-    else if (op == 2) REQUIRE(shader.fragment.find("if(!(false)) discard;") != std::string::npos);
+    else if (op == 2) {
+      REQUIRE(shader.discardAll);
+      REQUIRE(shader.fragment.find("discard") == std::string::npos);
+    }
     else REQUIRE(shader.fragment.find("if(!((floor(result.a*255.0+0.5)<91.0))) discard;") != std::string::npos);
   }
   {

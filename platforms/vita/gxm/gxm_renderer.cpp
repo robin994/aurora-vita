@@ -111,6 +111,10 @@ void* patch_alloc(void*, SceSize bytes) { return std::malloc(bytes); }
 void patch_free(void*, void* p) { std::free(p); }
 void shader_log(const char* message, shark_log_level level, int line) {
   std::fprintf(stderr, "[aurora-gxm][shader] level=%d line=%d %s\n", int(level), line, message ? message : "");
+  if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader.log", "a")) {
+    std::fprintf(file, "level=%d line=%d %s\n", int(level), line, message ? message : "");
+    std::fclose(file);
+  }
 }
 SceGxmAttributeFormat attribute_format(VertexScalar s, bool normalized) {
   switch (s) {
@@ -450,7 +454,30 @@ struct Renderer::Impl {
     const uint64_t started = sceKernelGetProcessTimeWide();
     uint32_t size = uint32_t(source.size());
     const SceGxmProgram* program = shark_compile_shader(source.c_str(), &size, type);
-    if (!program || !size) { shark_clear_output(); fail("Cg compilation failed; see shader diagnostics"); return {}; }
+    if (!program || !size) {
+      const char stageChar = stage == ProgramStage::Vertex ? 'v' : 'f';
+      std::fprintf(stderr,
+          "[aurora-gxm] stage_compile_fail stage=%c hash=%016llx source_bytes=%u\n",
+          stageChar, static_cast<unsigned long long>(sourceHash),
+          static_cast<unsigned>(source.size()));
+      if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader_failures.log", "a")) {
+        std::fprintf(file, "stage=%c hash=%016llx source_bytes=%u\n",
+            stageChar, static_cast<unsigned long long>(sourceHash),
+            static_cast<unsigned>(source.size()));
+        std::fclose(file);
+      }
+      char path[128];
+      std::snprintf(path, sizeof(path),
+          "ux0:data/SmashMeleeVita/shader_fail-%c-%016llx.cg", stageChar,
+          static_cast<unsigned long long>(sourceHash));
+      if (FILE* file = std::fopen(path, "wb")) {
+        std::fwrite(source.data(), 1, source.size(), file);
+        std::fclose(file);
+      }
+      shark_clear_output();
+      fail("Cg compilation failed; see shader diagnostics");
+      return {};
+    }
     // Compiler output belongs to vitaShaRK. Registered headers must outlive the
     // patched programs, so take an aligned owned copy before clearing output.
     compiled->code.resize((size + 3u) / 4u);
@@ -577,6 +604,14 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   if (d.pipelines.size() >= d.config.maxPipelines) { d.fail("native pipeline budget exhausted"); return 0; }
   const auto source = build_tev_cg(nativeDesc);
   if (!source.ok()) { d.fail(source.error.c_str()); return 0; }
+  if (source.discardAll) {
+    nativeDesc.depthTest = false;
+    nativeDesc.depthWrite = false;
+    nativeDesc.colorWrite = false;
+    nativeDesc.alphaWrite = false;
+    nativeDesc.blendMode = BlendMode::None;
+    nativeDesc.dstAlpha = -1;
+  }
   auto pipeline = std::make_unique<Impl::Pipeline>();
   auto& p = *pipeline; p.desc = nativeDesc; p.textureMask = source.textureMask;
   for(unsigned i=0;i<MaxTextures;++i)if(p.textureMask&(1u<<i))p.usedTextureCount=static_cast<uint8_t>(i+1u);

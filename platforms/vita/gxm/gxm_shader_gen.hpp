@@ -10,6 +10,7 @@ struct ShaderSources {
   uint8_t textureMask = 0;
   uint8_t texcoordMask = 0;
   uint8_t colorMask = 0;
+  bool discardAll = false;
   bool ok() const noexcept { return error.empty() && !vertex.empty() && !fragment.empty(); }
 };
 // Native Cg emission from the shared TEV description, not a GLSL transpiler.
