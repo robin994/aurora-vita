@@ -27,12 +27,13 @@ This baseline intentionally favors correctness over peak throughput.
 For a quiet shipping build set `config.log_level = RuntimeLogLevel::Silent`. Explicit telemetry,
 coverage, and trace paths still write if configured.
 
-GXM uses a persistent compiled-program cache by default at
-`ux0:data/aurora-vita/program_cache`. Set
-`BackendConfig::program_binary_cache_path` to override that location.
+GXM uses a persistent per-title compiled-program cache by default at
+`ux0:data/aurora-vita/<TITLE_ID>/program_cache`. Set
+`BackendConfig::program_binary_cache_path` to override that location, or
+`data_root_path` to move all Aurora-owned persistent data for the title.
 
 It also uses a hot-pipeline manifest by default at
-`ux0:data/aurora-vita/pipeline_hot_v1.bin`. `pipeline_prewarm_limit` defaults to 192.
+`ux0:data/aurora-vita/<TITLE_ID>/pipeline_hot_v1.bin`. `pipeline_prewarm_limit` defaults to 192.
 Use `pipeline_warmup_path` to override the manifest location.
 
 `gxm_scenes_per_frame` defaults to 5 and should remain above the title's measured peak native

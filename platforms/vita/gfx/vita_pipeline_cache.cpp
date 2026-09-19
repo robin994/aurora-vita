@@ -2,6 +2,7 @@
 #include "vita_gl_util.hpp"
 #include "vita_pipeline_key.hpp"
 #include "vita_shader_gen.hpp"
+#include "../vita_data_paths.hpp"
 #include "../vita_log.hpp"
 #include <cstring>
 #include <cstdio>
@@ -23,10 +24,12 @@ void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSource
   if(!runtime_log_enabled(RuntimeLogLevel::Error))return;
   // Failure artifacts are intentionally overwrite-by-key: a recurring broken
   // pipeline must not grow storage without bound during a long Mario Kart run.
-  sceIoMkdir("ux0:data/aurora-vita",0777);
-  char base[128];
-  std::snprintf(base,sizeof(base),"ux0:data/aurora-vita/shader_fail_%016llx",(unsigned long long)key);
-  char path[160];
+  const auto root=data_path("shader_failures");
+  if(root.empty())return;
+  ensure_directory_tree(root.c_str());
+  char base[192];
+  std::snprintf(base,sizeof(base),"%s/shader_fail_%016llx",root.c_str(),(unsigned long long)key);
+  char path[224];
   std::snprintf(path,sizeof(path),"%s.vert.glsl",base);write_failure_blob(path,src.vertex.data(),src.vertex.size());
   std::snprintf(path,sizeof(path),"%s.frag.glsl",base);write_failure_blob(path,src.fragment.data(),src.fragment.size());
   std::snprintf(path,sizeof(path),"%s.compiler.log",base);write_failure_blob(path,diagnostics.data(),diagnostics.size());

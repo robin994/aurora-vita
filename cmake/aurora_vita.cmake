@@ -75,9 +75,9 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(aurora_vita_cpu_workers_test PRIVATE Threads::Threads)
     add_test(NAME vita_cpu_workers COMMAND aurora_vita_cpu_workers_test)
     # The host shim intentionally exercises 8,000 semaphore round-trips. macOS
-    # scheduling can make that take roughly a minute even when every per-wait
-    # 3-second lost-wake guard passes, so keep CTest from pre-empting a valid run.
-    set_tests_properties(vita_cpu_workers PROPERTIES TIMEOUT 120)
+    # scheduling can take several minutes even when every per-wait 3-second
+    # lost-wake guard passes, so keep CTest from pre-empting a valid run.
+    set_tests_properties(vita_cpu_workers PROPERTIES TIMEOUT 420)
     add_test(NAME vita_renderer_selection
         COMMAND ${CMAKE_COMMAND}
             -DSELECTION_MODULE=${CMAKE_CURRENT_LIST_DIR}/AuroraVitaRendererSelection.cmake

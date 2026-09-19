@@ -7,6 +7,10 @@
 
 namespace aurora::vita {
 
+#ifndef AURORA_VITA_RUNTIME_LOGGING
+#define AURORA_VITA_RUNTIME_LOGGING 1
+#endif
+
 enum class RuntimeLogLevel : uint8_t {
   Silent = 0,
   Error = 1,
@@ -14,8 +18,8 @@ enum class RuntimeLogLevel : uint8_t {
   Debug = 3,
 };
 
-inline std::atomic<uint8_t> g_runtimeLogLevel{
-    static_cast<uint8_t>(RuntimeLogLevel::Info)};
+#if AURORA_VITA_RUNTIME_LOGGING
+inline std::atomic<uint8_t> g_runtimeLogLevel{static_cast<uint8_t>(RuntimeLogLevel::Info)};
 
 inline void set_runtime_log_level(RuntimeLogLevel level) noexcept {
   g_runtimeLogLevel.store(static_cast<uint8_t>(level), std::memory_order_relaxed);
@@ -40,11 +44,37 @@ inline void runtime_logf(RuntimeLogLevel level, const char* format, ...) noexcep
   va_end(args);
 }
 
+inline void runtime_logf_unchecked(const char* format, ...) noexcept {
+  if (!format) return;
+  va_list args;
+  va_start(args, format);
+  std::vfprintf(stderr, format, args);
+  va_end(args);
+}
+#else
+inline void set_runtime_log_level(RuntimeLogLevel) noexcept {}
+inline RuntimeLogLevel runtime_log_level() noexcept { return RuntimeLogLevel::Silent; }
+inline constexpr bool runtime_log_enabled(RuntimeLogLevel) noexcept { return false; }
+inline void runtime_logf(RuntimeLogLevel, const char*, ...) noexcept {}
+inline void runtime_logf_unchecked(const char*, ...) noexcept {}
+#endif
+
 } // namespace aurora::vita
 
+#if AURORA_VITA_RUNTIME_LOGGING
+#define AURORA_VITA_LOG_AT(level_, ...) do { \
+  if (::aurora::vita::runtime_log_enabled(level_)) \
+    ::aurora::vita::runtime_logf_unchecked(__VA_ARGS__); \
+} while (false)
+
 #define AURORA_VITA_LOG_ERROR(...) \
-  ::aurora::vita::runtime_logf(::aurora::vita::RuntimeLogLevel::Error, __VA_ARGS__)
+  AURORA_VITA_LOG_AT(::aurora::vita::RuntimeLogLevel::Error, __VA_ARGS__)
 #define AURORA_VITA_LOG_INFO(...) \
-  ::aurora::vita::runtime_logf(::aurora::vita::RuntimeLogLevel::Info, __VA_ARGS__)
+  AURORA_VITA_LOG_AT(::aurora::vita::RuntimeLogLevel::Info, __VA_ARGS__)
 #define AURORA_VITA_LOG_DEBUG(...) \
-  ::aurora::vita::runtime_logf(::aurora::vita::RuntimeLogLevel::Debug, __VA_ARGS__)
+  AURORA_VITA_LOG_AT(::aurora::vita::RuntimeLogLevel::Debug, __VA_ARGS__)
+#else
+#define AURORA_VITA_LOG_ERROR(...) do {} while (false)
+#define AURORA_VITA_LOG_INFO(...) do {} while (false)
+#define AURORA_VITA_LOG_DEBUG(...) do {} while (false)
+#endif

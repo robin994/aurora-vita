@@ -25,6 +25,40 @@ cfg.log_level = aurora::vita::RuntimeLogLevel::Silent;
 This is separate from the top-level Aurora `AuroraConfig::logLevel`, which controls the generic
 Aurora logger. A full port that wants completely quiet normal operation should configure both.
 
+For performance builds, prefer the stronger compile-time switch:
+
+```sh
+cmake --preset vita-gxm -DAURORA_VITA_RUNTIME_LOGGING=OFF
+```
+
+or the equivalent VitaGL preset. With this option disabled, Aurora Vita log macros are compiled out
+and their arguments are not evaluated. This removes even the runtime log-level branch from hot
+paths. Explicit `telemetry_log_path`, `coverage_log_path`, and `trace_log_path` outputs remain
+caller-controlled diagnostics and are not silently disabled by this build option.
+
+## Zero-console performance snapshot
+
+For profiling a shipping-style build without console/file logging, read:
+
+```cpp
+const auto perf = aurora::vita::performance_snapshot();
+```
+
+Important fields:
+
+- `frameUs` — complete Aurora Vita frame time.
+- `rendererCpuFrameUs` — native renderer CPU frame time.
+- `displayQueueLastUs`, `displayQueueAverageUs`, `displayQueueMaxUs` — CPU time spent in
+  `sceGxmDisplayQueueAddEntry`.
+- `displayQueueBlockedPercent` — percentage of presented frames where that call exceeded 500 us.
+- `gpuBackpressureLikely` — becomes true after at least 30 samples when blocked frames reach 10%.
+- `nativePipelineUs`, `nativeTextureUs`, `nativeDrawUs` — sampled native submission phases;
+  consult `nativeTimingsSampled` because these are intentionally sampled rather than timed every frame.
+- EFB copy and scene counters/timings are included in the same snapshot.
+
+This API does not print or write anything, so a port can sample it selectively or forward it through
+its own low-overhead transport such as a batched UDP diagnostic channel.
+
 ## Display and raster extent
 
 | Field | Default | Notes |
@@ -62,6 +96,7 @@ Lowering the threshold wakes workers for smaller draws and can lose performance 
 |---|---:|---|
 | `texture_cache_budget` | 24 MiB | Shared texture residency budget. |
 | `static_geometry_budget` | 0 | Experimental fixed/GPU geometry path. Keep zero as conservative control. |
+| `static_geometry_min_vertices` | 48 | Minimum immutable display-list draw size eligible for fixed/GPU geometry caching. Lower only after measuring hit rate and resident bytes. |
 
 ## VitaGL memory pools
 
@@ -90,25 +125,44 @@ Do not reduce it as a generic memory optimization without hardware telemetry.
 
 ## Shader/program binary cache
 
-`program_binary_cache_path` has backend-specific behavior:
+`data_root_path=nullptr` automatically resolves a per-title root on Vita:
 
-- **VitaGL:** `nullptr` disables the experimental program-binary disk cache. Set a path to opt in.
-- **GXM:** `nullptr` uses Aurora's default persistent cache directory,
-  `ux0:data/aurora-vita/program_cache`. Set a path to override that location.
+```text
+ux0:data/aurora-vita/<TITLE_ID>/
+```
+
+Aurora derives `TITLE_ID` from the current Vita application. This is the default storage boundary
+for renderer-owned persistent data, so two games using Aurora Vita do not share shader caches or
+pipeline manifests.
+
+With no explicit override, both backends save program binaries under:
+
+```text
+ux0:data/aurora-vita/<TITLE_ID>/program_cache/
+```
+
+GXM and VitaGL then add their own ABI/version directory below that root. Set
+`program_binary_cache_path` only when a port deliberately wants another location.
 
 When comparing first-use shader compilation or menu/loading time, record whether the cache was cold
 or warm and do not mix the two populations.
 
 ## Pipeline manifest and prewarm
 
-`pipeline_warmup_path` and `pipeline_prewarm_limit` control the hot-pipeline manifest:
+`pipeline_warmup_path` and `pipeline_prewarm_limit` control the native GXM hot-pipeline manifest.
+With a null path, GXM uses:
 
-- **GXM:** a null path selects `ux0:data/aurora-vita/pipeline_hot_v1.bin`.
-- **VitaGL:** a null path disables manifest persistence/prewarm.
-- `pipeline_prewarm_limit=192` limits how many hot pipelines are restored/compiled during startup.
+```text
+ux0:data/aurora-vita/<TITLE_ID>/pipeline_hot_v1.bin
+```
+
+`pipeline_prewarm_limit=192` limits how many hot pipelines are restored/compiled during startup.
 
 Prewarm trades startup/loading work and memory residency for fewer first-use pipeline stalls during
 gameplay. Compare cold and warm boots separately.
+
+Automatic shader failure artifacts also live under the same per-title root, in
+`shader_failures/`, instead of a project-specific or global Aurora directory.
 
 ## Diagnostics
 

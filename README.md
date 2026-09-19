@@ -57,6 +57,14 @@ memory tuning, and runtime logging (`BackendConfig::log_level`, including a full
 mode). Experimental options can change framebuffer output or synchronization behavior,
 so they should be validated on real hardware before becoming a port default.
 
+For performance/release builds where even the runtime log-level check is unwanted, configure
+`-DAURORA_VITA_RUNTIME_LOGGING=OFF`. Aurora Vita also exposes
+`performance_snapshot()` so CPU/GPU timing can be sampled without printing logs.
+
+Persistent shader/program caches and pipeline warmup data are isolated automatically per title under
+`ux0:data/aurora-vita/<TITLE_ID>/` on Vita. This keeps Aurora-owned cache files separate from each
+homebrew's custom `ux0:data/<game-folder>/` layout. Ports normally should not override this root.
+
 See the [Aurora Vita Wiki](docs/wiki/Home.md) for:
 
 - the complete [experimental flag matrix](docs/wiki/Experimental-Flags.md);

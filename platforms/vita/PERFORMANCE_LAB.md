@@ -84,10 +84,14 @@ emboss, dynamic palettes, expanded primitives and hardware image equivalence
 remain validation/extension work. Keep this option disabled in normal builds
 until actual GPU output and sustained performance have been checked.
 
-## Experimental program-binary disk cache (default OFF)
+## Program-binary disk cache (per-title by default)
 
-`BackendConfig::program_binary_cache_path = nullptr` disables disk caching.
-When enabled, binaries are keyed by both complete shader sources and the
+On Vita, `BackendConfig::program_binary_cache_path = nullptr` now resolves automatically to
+`ux0:data/aurora-vita/<TITLE_ID>/program_cache`. Both GXM and VitaGL persist their compiled
+program cache there by default, using backend/ABI-specific subdirectories. A port may still supply
+an explicit path to override the default.
+
+Binaries are keyed by both complete shader sources and the
 attribute binding contract. A versioned header checks lengths, source identity,
 private serializer bounds and an integrity checksum before loading. Writes use
 a temporary file and a rename inside the dedicated cache directory.
@@ -97,7 +101,8 @@ SHA-256 fingerprint in the executable. A separate cache directory is used for
 each archive fingerprint. Builds without a known fingerprint do not deserialize
 cached programs. These are implementation-specific vitaGL binaries, not a
 portable shader format. Treat the directory as a local, application-generated
-cache rather than accepting arbitrary external program binaries.
+cache rather than accepting arbitrary external program binaries. Per-title storage is a required
+best practice so two games using Aurora Vita cannot overwrite or reuse each other's renderer cache.
 
 Cache files were observed being created on hardware. A complete cold/warm 3D
 comparison and a reliable warm-load run are still outstanding; no reduction in

@@ -3,6 +3,7 @@
 #include "gxm_program_cache.hpp"
 #include "gxm_shader_gen.hpp"
 #include "gxm_texture_layout.hpp"
+#include "../vita_data_paths.hpp"
 #include "../vita_log.hpp"
 #include "gfx/vita_pipeline_key.hpp"
 #include "gfx/vita_texture_decode.hpp"
@@ -65,10 +66,10 @@ void log_memory_state(const char* phase) {
       freeResult >= 0 ? freeMemory.size_phycont : -1,
       unsigned(freeResult));
 
-  // Keep a lightweight persistent copy as well. The game redirects its own
-  // diagnostics to runtime.log, while the native renderer writes to stderr;
-  // on retail hardware that stream is not always captured by VitaCompanion.
-  if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_memory.log", "a")) {
+  // Keep a lightweight persistent copy under the current title's Aurora root.
+  const auto memoryLog=data_path("diagnostics/gxm_memory.log");
+  if(!memoryLog.empty())ensure_parent_directory(memoryLog.c_str());
+  if (!memoryLog.empty()) if (FILE* file = std::fopen(memoryLog.c_str(), "a")) {
     std::fprintf(file,
         "phase=%s cdram=%llu peak=%llu allocs=%u pool=%llu pool_used=%llu pool_peak=%llu "
         "user=%llu peak=%llu allocs=%u phycont=%llu peak=%llu allocs=%u "
@@ -115,7 +116,9 @@ void shader_log(const char* message, shark_log_level level, int line) {
   if(!runtime_log_enabled(RuntimeLogLevel::Debug))return;
   AURORA_VITA_LOG_DEBUG("[aurora-gxm][shader] level=%d line=%d %s\n",
                         int(level),line,message?message:"");
-  if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader.log", "a")) {
+  const auto shaderLog=data_path("diagnostics/gxm_shader.log");
+  if(!shaderLog.empty())ensure_parent_directory(shaderLog.c_str());
+  if (!shaderLog.empty()) if (FILE* file = std::fopen(shaderLog.c_str(), "a")) {
     std::fprintf(file, "level=%d line=%d %s\n", int(level), line, message ? message : "");
     std::fclose(file);
   }
@@ -485,19 +488,26 @@ struct Renderer::Impl {
           "[aurora-gxm] stage_compile_fail stage=%c hash=%016llx source_bytes=%u\n",
           stageChar, static_cast<unsigned long long>(sourceHash),
           static_cast<unsigned>(source.size()));
-      if (runtime_log_enabled(RuntimeLogLevel::Error)) if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader_failures.log", "a")) {
-        std::fprintf(file, "stage=%c hash=%016llx source_bytes=%u\n",
-            stageChar, static_cast<unsigned long long>(sourceHash),
-            static_cast<unsigned>(source.size()));
-        std::fclose(file);
-      }
-      char path[128];
-      std::snprintf(path, sizeof(path),
-          "ux0:data/SmashMeleeVita/shader_fail-%c-%016llx.cg", stageChar,
-          static_cast<unsigned long long>(sourceHash));
-      if (runtime_log_enabled(RuntimeLogLevel::Error)) if (FILE* file = std::fopen(path, "wb")) {
-        std::fwrite(source.data(), 1, source.size(), file);
-        std::fclose(file);
+      if (runtime_log_enabled(RuntimeLogLevel::Error)) {
+        const auto failureRoot=data_path("shader_failures");
+        if(!failureRoot.empty()) {
+          ensure_directory_tree(failureRoot.c_str());
+          const auto failureLog=failureRoot+"/gxm_shader_failures.log";
+          if (FILE* file=std::fopen(failureLog.c_str(),"a")) {
+            std::fprintf(file,"stage=%c hash=%016llx source_bytes=%u\n",
+                stageChar,static_cast<unsigned long long>(sourceHash),
+                static_cast<unsigned>(source.size()));
+            std::fclose(file);
+          }
+          char fileName[96];
+          std::snprintf(fileName,sizeof(fileName),"shader_fail-%c-%016llx.cg",stageChar,
+              static_cast<unsigned long long>(sourceHash));
+          const auto failureSource=failureRoot+"/"+fileName;
+          if (FILE* file=std::fopen(failureSource.c_str(),"wb")) {
+            std::fwrite(source.data(),1,source.size(),file);
+            std::fclose(file);
+          }
+        }
       }
       shark_clear_output();
       fail("Cg compilation failed; see shader diagnostics");

@@ -4,6 +4,7 @@
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_texture_decode.hpp"
+#include "vita_data_paths.hpp"
 #if !defined(AURORA_VITA_RENDERER_GXM)
 #include "gfx/vita_gl_util.hpp"
 #endif
@@ -40,11 +41,14 @@ bool g_coverageEnabled=false;
 bool g_traceEnabled=false;
 uint64_t g_frame=0,g_start=0,g_last=0;
 uint64_t g_displayQueueLastUs=0,g_displayQueueTotalUs=0,g_displayQueueMaxUs=0,g_displayQueueSamples=0;
+uint64_t g_displayQueueBlockedSamples=0;
 std::unique_ptr<gfx::Renderer> g_renderer;
 std::unique_ptr<gxbridge::DrawSink> g_drawSink;
 gfx::Telemetry g_telemetry;
 integration::FeatureCoverage g_coverage;
 std::unique_ptr<integration::FrameTrace> g_trace;
+std::string g_programCachePath;
+std::string g_pipelineWarmupPath;
 InitFailure g_initFailure=InitFailure::None;
 char g_initFailureDetail[384]{};
 struct PendingDisplayClear {
@@ -74,8 +78,7 @@ bool path_exists(const char* path) noexcept {
 
 void ensure_parent_dir(const char* path) noexcept {
   if (!path) return;
-  // Probe/runtime paths use ux0:data/aurora-vita/*.log. Creating the known parent is harmless if it exists.
-  sceIoMkdir("ux0:data/aurora-vita", 0777);
+  ensure_parent_directory(path);
 }
 #else
 void ensure_parent_dir(const char*) noexcept {}
@@ -85,6 +88,9 @@ void emit_periodic_diagnostics() noexcept {
   if (!g_telemetryEnabled || !g_drawSink) return;
   const uint32_t period = g_config.diagnostics_period_frames;
   if (period == 0 || (g_frame % period) != 0) return;
+  const bool writeConsole=runtime_log_enabled(RuntimeLogLevel::Info);
+  const bool writeFile=g_config.telemetry_log_path&&*g_config.telemetry_log_path;
+  if(!writeConsole&&!writeFile)return;
   const auto frameLine = g_telemetry.format_frame();
   const auto memLine = g_drawSink->memory_budget().format();
   const auto& rs=g_renderer->stats();
@@ -111,9 +117,9 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(rs.nativeEfbCpuFixupUs),
       g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u,
       g_config.profile_split_vertex_phases?1u:0u);
-  runtime_logf(RuntimeLogLevel::Info,"%s\n%s\n%s\n",
-               frameLine.c_str(),rendererLine,memLine.c_str());
-  if (g_config.telemetry_log_path) {
+  if(writeConsole)
+    AURORA_VITA_LOG_INFO("%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str());
+  if (writeFile) {
     ensure_parent_dir(g_config.telemetry_log_path);
     g_telemetry.append_frame_log(g_config.telemetry_log_path);
     FILE* fp = std::fopen(g_config.telemetry_log_path, "ab");
@@ -133,7 +139,13 @@ bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
   g_displayQueueLastUs=g_displayQueueTotalUs=g_displayQueueMaxUs=g_displayQueueSamples=0;
+  g_displayQueueBlockedSamples=0;
   set_runtime_log_level(c.log_level);
+  configure_data_root(c.data_root_path);
+  g_programCachePath=c.program_binary_cache_path&&*c.program_binary_cache_path?
+      c.program_binary_cache_path:data_path("program_cache");
+  g_pipelineWarmupPath=c.pipeline_warmup_path&&*c.pipeline_warmup_path?
+      c.pipeline_warmup_path:data_path("pipeline_hot_v1.bin");
   const uint32_t renderWidth=c.render_width?c.render_width:c.width;
   const uint32_t renderHeight=c.render_height?c.render_height:c.height;
   if(!renderWidth||!renderHeight||renderWidth>c.width||renderHeight>c.height) {
@@ -146,7 +158,7 @@ bool initialize(const BackendConfig& c) noexcept {
   aurora::vita::render_size::configure(renderWidth,renderHeight,c.width,c.height);
   gfx::set_texture_decode_diagnostics(c.texture_decode_diagnostics);
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
-  gfx::configure_program_binary_cache(c.program_binary_cache_path);
+  gfx::configure_program_binary_cache(g_programCachePath.empty()?nullptr:g_programCachePath.c_str());
 #endif
   g_telemetryEnabled=c.diagnostics||c.telemetry_log_path;
   g_coverageEnabled=c.diagnostics||c.coverage_log_path;
@@ -217,20 +229,20 @@ bool initialize(const BackendConfig& c) noexcept {
                         static_cast<int>(g_config.vgl_ram_threshold),
                         SCE_GXM_MULTISAMPLE_NONE);
   if(resolutionFallback){
-    runtime_logf(RuntimeLogLevel::Error,
-                 "[aurora-vita] vitaGL framebuffer resolution fallback requested=%ux%u\n",
-                 g_config.width,g_config.height);
+    AURORA_VITA_LOG_ERROR(
+        "[aurora-vita] vitaGL framebuffer resolution fallback requested=%ux%u\n",
+        g_config.width,g_config.height);
   }
-  runtime_logf(RuntimeLogLevel::Info,
-               "[aurora-vita] vitaGL pools mode=%s ram=%llu/%llu cdram=%llu/%llu phycont=%llu/%llu circular=%u display_buffers=%u\n",
-              explicitPools?"fixed":"threshold",
-              static_cast<unsigned long long>(vglMemFree(VGL_MEM_RAM)),
-              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_RAM)),
-              static_cast<unsigned long long>(vglMemFree(VGL_MEM_VRAM)),
-              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_VRAM)),
-              static_cast<unsigned long long>(vglMemFree(VGL_MEM_SLOW)),
-              static_cast<unsigned long long>(vglMemTotal(VGL_MEM_SLOW)),
-              g_config.vgl_circular_pool_size,g_config.vgl_display_buffer_count);
+  AURORA_VITA_LOG_INFO(
+      "[aurora-vita] vitaGL pools mode=%s ram=%llu/%llu cdram=%llu/%llu phycont=%llu/%llu circular=%u display_buffers=%u\n",
+      explicitPools?"fixed":"threshold",
+      static_cast<unsigned long long>(vglMemFree(VGL_MEM_RAM)),
+      static_cast<unsigned long long>(vglMemTotal(VGL_MEM_RAM)),
+      static_cast<unsigned long long>(vglMemFree(VGL_MEM_VRAM)),
+      static_cast<unsigned long long>(vglMemTotal(VGL_MEM_VRAM)),
+      static_cast<unsigned long long>(vglMemFree(VGL_MEM_SLOW)),
+      static_cast<unsigned long long>(vglMemTotal(VGL_MEM_SLOW)),
+      g_config.vgl_circular_pool_size,g_config.vgl_display_buffer_count);
   vglWaitVblankStart(g_config.wait_vblank?GL_TRUE:GL_FALSE);
   glViewport(0,0,g_config.width,g_config.height);
   glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
@@ -245,17 +257,14 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.nativeResourceBudget=c.texture_cache_budget+c.static_geometry_budget+
       (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
 #if defined(AURORA_VITA_RENDERER_GXM)
-  // Native Cg/GXP compilation is expensive enough to stall first-use gameplay.
-  // Keep the generic override, but make the validated GXM cache persistent by
-  // default so games do not need renderer-specific configuration files.
-  rc.programBinaryCachePath=c.program_binary_cache_path ? c.program_binary_cache_path :
-      "ux0:data/aurora-vita/program_cache";
-  rc.pipelineWarmupPath=c.pipeline_warmup_path ? c.pipeline_warmup_path :
-      "ux0:data/aurora-vita/pipeline_hot_v1.bin";
+  // Program binaries and hot-pipeline manifests are per title by default so
+  // unrelated games cannot consume each other's cache entries or storage.
+  rc.programBinaryCachePath=g_programCachePath.empty()?nullptr:g_programCachePath.c_str();
+  rc.pipelineWarmupPath=g_pipelineWarmupPath.empty()?nullptr:g_pipelineWarmupPath.c_str();
   rc.pipelinePrewarmLimit=c.pipeline_prewarm_limit;
 #else
-  rc.programBinaryCachePath=c.program_binary_cache_path;
-  rc.pipelineWarmupPath=c.pipeline_warmup_path;
+  rc.programBinaryCachePath=g_programCachePath.empty()?nullptr:g_programCachePath.c_str();
+  rc.pipelineWarmupPath=g_pipelineWarmupPath.empty()?nullptr:g_pipelineWarmupPath.c_str();
   rc.pipelinePrewarmLimit=c.pipeline_prewarm_limit;
 #endif
   g_renderer=std::make_unique<gfx::Renderer>(rc);
@@ -266,18 +275,18 @@ bool initialize(const BackendConfig& c) noexcept {
     return false;
   }
   if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices)) {
-    runtime_logf(RuntimeLogLevel::Error,
-                 "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
+    AURORA_VITA_LOG_ERROR(
+        "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
-  runtime_logf(RuntimeLogLevel::Info,
-               "[aurora-vita] render config display=%ux%u internal=%ux%u native_cmpr=%u direct_stream=%u scratch_dynamic=%u scratch_stream=%u gpu_vertex_stride=%u gpu_geometry_mb=%llu stream_v=%llu stream_i=%llu slots=%u\n",
-               c.width,c.height,renderWidth,renderHeight,
-               AURORA_VITA_NATIVE_CMPR?1u:0u,AURORA_VITA_DIRECT_STREAM_WRITE?1u:0u,
-               c.vgl_scratch_dynamic?1u:0u,c.vgl_scratch_stream?1u:0u,
-               static_cast<unsigned>(sizeof(gfx::GpuVertex)),
-               static_cast<unsigned long long>(c.static_geometry_budget/(1024u*1024u)),
-               static_cast<unsigned long long>(c.stream_vertex_bytes),
-               static_cast<unsigned long long>(c.stream_index_bytes),c.stream_slots);
+  AURORA_VITA_LOG_INFO(
+      "[aurora-vita] render config display=%ux%u internal=%ux%u native_cmpr=%u direct_stream=%u scratch_dynamic=%u scratch_stream=%u gpu_vertex_stride=%u gpu_geometry_mb=%llu stream_v=%llu stream_i=%llu slots=%u\n",
+      c.width,c.height,renderWidth,renderHeight,
+      AURORA_VITA_NATIVE_CMPR?1u:0u,AURORA_VITA_DIRECT_STREAM_WRITE?1u:0u,
+      c.vgl_scratch_dynamic?1u:0u,c.vgl_scratch_stream?1u:0u,
+      static_cast<unsigned>(sizeof(gfx::GpuVertex)),
+      static_cast<unsigned long long>(c.static_geometry_budget/(1024u*1024u)),
+      static_cast<unsigned long long>(c.stream_vertex_bytes),
+      static_cast<unsigned long long>(c.stream_index_bytes),c.stream_slots);
   g_telemetry.reset(); g_coverage.reset(); g_trace=std::make_unique<integration::FrameTrace>(c.trace_capacity);
   g_telemetry.set_split_vertex_phases(c.profile_split_vertex_phases);
   gxbridge::DrawSinkConfig dc{};
@@ -361,6 +370,7 @@ void end_frame() noexcept {
     g_displayQueueLastUs=queueUs;
     g_displayQueueTotalUs+=queueUs;
     g_displayQueueMaxUs=std::max(g_displayQueueMaxUs,queueUs);
+    if(queueUs>500u)++g_displayQueueBlockedSamples;
     ++g_displayQueueSamples;
   }
   if (g_telemetryEnabled) {
@@ -390,6 +400,32 @@ uint64_t frame_index() noexcept{return g_frame;}
 uint64_t last_frame_time_us() noexcept{return g_last;}
 uint32_t width() noexcept{return g_config.width;}
 uint32_t height() noexcept{return g_config.height;}
+PerformanceSnapshot performance_snapshot() noexcept {
+  PerformanceSnapshot out{};
+  out.frameIndex=g_frame;
+  out.frameUs=g_last;
+  out.displayQueueLastUs=g_displayQueueLastUs;
+  out.displayQueueAverageUs=g_displayQueueSamples?g_displayQueueTotalUs/g_displayQueueSamples:0;
+  out.displayQueueMaxUs=g_displayQueueMaxUs;
+  out.displayQueueSamples=g_displayQueueSamples;
+  out.displayQueueBlockedPercent=g_displayQueueSamples?
+      static_cast<uint32_t>((g_displayQueueBlockedSamples*100u)/g_displayQueueSamples):0u;
+  out.gpuBackpressureLikely=out.displayQueueSamples>=30u&&out.displayQueueBlockedPercent>=10u;
+  if(!g_renderer)return out;
+  const auto& stats=g_renderer->stats();
+  out.rendererCpuFrameUs=stats.cpuFrameUs;
+  out.nativeTimingsSampled=stats.nativeTimingsSampled;
+  out.nativePipelineUs=stats.nativePipelineUs;
+  out.nativeTextureUs=stats.nativeTextureUs;
+  out.nativeDrawUs=stats.nativeDrawUs;
+  out.nativeSceneCount=stats.nativeSceneCount;
+  out.nativeEfbCopies=stats.nativeEfbCopies;
+  out.nativeEfbEndSceneUs=stats.nativeEfbEndSceneUs;
+  out.nativeEfbTransferSubmitUs=stats.nativeEfbTransferSubmitUs;
+  out.nativeEfbTransferWaitUs=stats.nativeEfbTransferWaitUs;
+  out.nativeEfbCpuFixupUs=stats.nativeEfbCpuFixupUs;
+  return out;
+}
 gfx::Renderer& renderer() noexcept{return *g_renderer;}
 gxbridge::DrawSink& draw_sink() noexcept{return *g_drawSink;}
 gfx::Telemetry& telemetry() noexcept{return g_telemetry;}

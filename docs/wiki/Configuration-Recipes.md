@@ -4,6 +4,10 @@ These recipes are starting points, not universal performance presets.
 
 ## Conservative GXM control
 
+```sh
+cmake --preset vita-gxm -DAURORA_VITA_RUNTIME_LOGGING=OFF
+```
+
 ```cmake
 set(AURORA_VITA_RENDERER GXM CACHE STRING "" FORCE)
 set(AURORA_VITA_NATIVE_CMPR OFF CACHE BOOL "" FORCE)
@@ -21,6 +25,8 @@ cfg.diagnostics = false;
 ```
 
 Use this control when investigating rendering regressions.
+Persistent renderer caches use `ux0:data/aurora-vita/<TITLE_ID>/` automatically; leave
+`data_root_path` null unless the port deliberately needs another Aurora-owned location.
 
 ## GXM texture experiment
 

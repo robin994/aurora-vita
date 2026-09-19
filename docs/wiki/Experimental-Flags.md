@@ -13,6 +13,7 @@ The values below reflect the current code, not historical recommendations in old
 | `AURORA_VITA_BACKEND_ONLY` | `OFF` | Common | Integration | Builds the standalone Vita graphics backend without the full desktop stack. |
 | `AURORA_VITA_SDL3_NATIVE` | `ON` on Vita, otherwise `OFF` | Common/VitaGL | Integration | Enables SDL3 native Vita platform services. It is not valid as a GXM SDL probe path. |
 | `AURORA_VITA_LTO` | `ON` on Vita, otherwise `OFF` | Common | Performance | Enables fat LTO objects and requests LTO at final link. Benchmark link time, binary size, and runtime. |
+| `AURORA_VITA_RUNTIME_LOGGING` | `ON` | Common | Performance / release | Compile-time hard switch for Aurora Vita console logging. Set `OFF` for the lowest-overhead release build; all `AURORA_VITA_LOG_*` call sites compile out and log arguments are not evaluated. Explicit telemetry/coverage/trace files remain separate. |
 | `AURORA_VITA_WITH_GX_FRONTEND` | `OFF` | Common | Integration | Builds the Dawn-free Dolphin GX/VI frontend used by native Vita ports. |
 | `AURORA_VITA_WITH_UPSTREAM_GX` | `OFF` | VitaGL/desktop integration | Experimental integration | Compiles the Vita bridge against upstream Aurora GX structs. Not supported for native GXM and not intended for Vita runtime while upstream GX still owns Dawn. |
 | `AURORA_VITA_BUILD_PROBE` | `OFF` | Common | Validation | Builds the standalone probe for the selected renderer. |
@@ -41,7 +42,9 @@ These are members of `aurora::vita::BackendConfig`, not CMake options.
 | `gxm_scenes_per_frame` | `5` | GXM | Native render-target scene budget. Keep high enough for the title's observed peak scene count; lowering it without measurements can increase stalls or fail scene submission. |
 | `gxm_lit_fixed_vertex_gpu` | `false` | GXM | Experimental lit fixed-vertex GPU path for eligible immutable geometry. Keep disabled as the correctness control until lighting/texgen parity is verified on hardware. |
 | `static_geometry_budget` | `0` | Common, primarily GXM | Experimental GPU fixed-geometry cache. Zero is the conservative default. Enable only for categories validated against the CPU path. |
-| `pipeline_warmup_path` | `nullptr` | Backend-specific | GXM: null selects `ux0:data/aurora-vita/pipeline_hot_v1.bin`; VitaGL: null disables manifest persistence/prewarm. |
+| `static_geometry_min_vertices` | `48` | Common, primarily GXM | Minimum immutable display-list vertex count eligible for the fixed-vertex GPU cache. Lower values increase cache coverage and memory pressure; dynamic/untracked sources keep the conservative 48-vertex floor. |
+| `data_root_path` | `nullptr` | Common | Null automatically resolves to `ux0:data/aurora-vita/<TITLE_ID>`. Override only when a port intentionally owns a different writable data root. |
+| `pipeline_warmup_path` | `nullptr` | GXM | Null selects `<data_root>/pipeline_hot_v1.bin` for the native GXM hot-pipeline manifest. An explicit path overrides the per-title default. |
 | `pipeline_prewarm_limit` | `192` | Common | Maximum hot pipelines compiled/resident during startup prewarm when a warmup manifest is configured. |
 | `profile_split_vertex_phases` | `false` | Common | Profiling-only. Changes execution/cache behavior; do not compare its FPS directly with fused mode. |
 | `diagnostic_draw_limit` | `0` | Common | Diagnostic. Caps submitted GX draw packets for framebuffer bisection. |
@@ -52,7 +55,7 @@ These are members of `aurora::vita::BackendConfig`, not CMake options.
 | `coverage_log_path` | `nullptr` | Common | Enables feature-coverage output. |
 | `trace_log_path` | `nullptr` | Common | Enables frame trace output. |
 | `trace_capacity` | `4096` | Common | Trace buffer sizing. |
-| `program_binary_cache_path` | `nullptr` | Backend-specific | VitaGL: null disables the disk cache. GXM: null selects the default persistent cache at `ux0:data/aurora-vita/program_cache`; an explicit path overrides it. |
+| `program_binary_cache_path` | `nullptr` | Common | Null selects `<data_root>/program_cache` for both GXM and VitaGL. Backend ABI/version subdirectories keep incompatible binary formats separate. |
 
 See [Runtime tuning](Runtime-Tuning.md) for memory, worker, cache, and buffer sizing fields.
 

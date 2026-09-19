@@ -171,6 +171,7 @@ ClipPoint project_for_diag(const std::array<float,16>& m,const gfx::CanonicalVer
 void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::VertexTransformState& state,
                              const gfx::PipelineDesc& pipeline,const uint8_t* rawVertices,size_t rawBytes,
                              const gfx::VertexDecodeLayout& layout,uint32_t inputVertices) noexcept {
+  if(!runtime_log_enabled(RuntimeLogLevel::Debug))return;
   // Runtime.log is intentionally sampled: enough to diagnose the first stadium /
   // character meshes without turning logging itself into the new performance issue.
   static uint32_t logged=0;
@@ -461,7 +462,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto& layout = translatedLayout_;
 #if defined(__vita__)
   static bool memoryProfileLogged=false;
-  if(!memoryProfileLogged&&telemetry_&&telemetry_->split_vertex_phases()&&vertexCount>=100) {
+  if(!memoryProfileLogged&&runtime_log_enabled(RuntimeLogLevel::Debug)&&
+      telemetry_&&telemetry_->split_vertex_phases()&&vertexCount>=100) {
     memoryProfileLogged=true;
     const void* sourceArray=nullptr;
     for(unsigned i=0;i<layout.count;++i)if(layout.attributes[i].array.data){sourceArray=layout.attributes[i].array.data;break;}

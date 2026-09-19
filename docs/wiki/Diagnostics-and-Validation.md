@@ -62,6 +62,11 @@ For each experimental switch compare at least:
 7. Record scene count, EFB copies, stream recycles, uploads and cache hit/miss metrics.
 8. Capture a screenshot/framebuffer reference when testing a visual-path flag.
 
+For CPU/GPU-bound diagnosis without perturbing the console path, use
+`aurora::vita::performance_snapshot()` with `AURORA_VITA_RUNTIME_LOGGING=OFF`.
+`sceGxmDisplayQueueAddEntry` should normally be close to immediate; sustained values above the
+500 us blocked-frame threshold indicate display-queue/GPU backpressure.
+
 ## Accepting a flag
 
 An experimental flag should become a project default only when:

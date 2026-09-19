@@ -9,6 +9,7 @@
 #include "gfx/vita_draw_batch.hpp"
 #include "gfx/vita_hash_map.hpp"
 #include "vita_log.hpp"
+#include "vita_data_paths.hpp"
 #include "gxm/gxm_texture_layout.hpp"
 #include "gxm/gxm_program_cache.hpp"
 #include <array>
@@ -425,10 +426,14 @@ void native_extended_contract() {
 }
 } // namespace
 int main() {
+#if AURORA_VITA_RUNTIME_LOGGING
   set_runtime_log_level(RuntimeLogLevel::Silent);
   REQUIRE(runtime_log_level()==RuntimeLogLevel::Silent);
   REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Error));
   REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Info));
+  int logSideEffects=0;
+  AURORA_VITA_LOG_DEBUG("suppressed=%d\n",++logSideEffects);
+  REQUIRE(logSideEffects==0);
   set_runtime_log_level(RuntimeLogLevel::Error);
   REQUIRE(runtime_log_enabled(RuntimeLogLevel::Error));
   REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Info));
@@ -436,6 +441,23 @@ int main() {
   REQUIRE(runtime_log_enabled(RuntimeLogLevel::Error));
   REQUIRE(runtime_log_enabled(RuntimeLogLevel::Info));
   REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Debug));
+  AURORA_VITA_LOG_DEBUG("suppressed=%d\n",++logSideEffects);
+  REQUIRE(logSideEffects==0);
+#else
+  REQUIRE(runtime_log_level()==RuntimeLogLevel::Silent);
+  REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Error));
+  int logSideEffects=0;
+  AURORA_VITA_LOG_ERROR("compiled_out=%d\n",++logSideEffects);
+  REQUIRE(logSideEffects==0);
+#endif
+  REQUIRE(sanitize_title_id("pcse-12345")=="PCSE-12345");
+  REQUIRE(sanitize_title_id("../PCSE00001")=="PCSE00001");
+  REQUIRE(data_root_for_title("PCSE00001")=="ux0:data/aurora-vita/PCSE00001");
+  REQUIRE(data_root_for_title("").empty());
+  configure_data_root("ux0:data/aurora-vita/TEST00001");
+  REQUIRE(data_root()=="ux0:data/aurora-vita/TEST00001");
+  REQUIRE(data_path("program_cache")=="ux0:data/aurora-vita/TEST00001/program_cache");
+  REQUIRE(data_path("/shader_failures")=="ux0:data/aurora-vita/TEST00001/shader_failures");
   {
     TextureDesc d{}; d.format=TextureFormat::RGBA8888; d.mipCount=1;
     d.width=d.height=4;

@@ -29,6 +29,7 @@ else ()
 endif ()
 option(AURORA_VITA_SDL3_NATIVE "Use SDL3 native Vita platform services while Aurora/vitaGL owns rendering" ${_aurora_vita_sdl3_native_default})
 option(AURORA_VITA_LTO "Compile Vita renderer objects with fat LTO and request LTO at final link" ${_aurora_vita_lto_default})
+option(AURORA_VITA_RUNTIME_LOGGING "Compile Aurora Vita runtime console logging" ON)
 
 if (AURORA_VITA_BACKEND_ONLY)
   if (NOT AURORA_ENABLE_VITA_BACKEND)

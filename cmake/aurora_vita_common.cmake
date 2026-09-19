@@ -24,6 +24,7 @@ if (NOT TARGET robin_hood)
 endif ()
 
 add_library(aurora_vita_common STATIC
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/vita_data_paths.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_cpu_workers.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_memory_revision.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_vertex_decode.cpp
@@ -39,6 +40,11 @@ target_include_directories(aurora_vita_common PUBLIC
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx)
 target_link_libraries(aurora_vita_common PUBLIC xxhash robin_hood)
+if (AURORA_VITA_RUNTIME_LOGGING)
+    target_compile_definitions(aurora_vita_common PUBLIC AURORA_VITA_RUNTIME_LOGGING=1)
+else ()
+    target_compile_definitions(aurora_vita_common PUBLIC AURORA_VITA_RUNTIME_LOGGING=0)
+endif ()
 if (VITA OR CMAKE_SYSTEM_NAME STREQUAL "Vita" OR CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi")
     target_compile_definitions(aurora_vita_common PUBLIC __vita__=1)
     if(AURORA_VITA_PORT_ABI STREQUAL "GAMECUBE")

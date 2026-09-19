@@ -17,6 +17,27 @@ enum class InitFailure : uint8_t {
   RendererInitFailed,
   DrawSinkInitFailed,
 };
+struct PerformanceSnapshot {
+  uint64_t frameIndex=0;
+  uint64_t frameUs=0;
+  uint64_t rendererCpuFrameUs=0;
+  uint64_t displayQueueLastUs=0;
+  uint64_t displayQueueAverageUs=0;
+  uint64_t displayQueueMaxUs=0;
+  uint64_t displayQueueSamples=0;
+  uint32_t displayQueueBlockedPercent=0;
+  bool gpuBackpressureLikely=false;
+  bool nativeTimingsSampled=false;
+  uint64_t nativePipelineUs=0;
+  uint64_t nativeTextureUs=0;
+  uint64_t nativeDrawUs=0;
+  uint32_t nativeSceneCount=0;
+  uint32_t nativeEfbCopies=0;
+  uint64_t nativeEfbEndSceneUs=0;
+  uint64_t nativeEfbTransferSubmitUs=0;
+  uint64_t nativeEfbTransferWaitUs=0;
+  uint64_t nativeEfbCpuFixupUs=0;
+};
 struct BackendConfig {
   uint32_t width=960,height=544;
   // Zero follows the display extent, preserving the validated raster scale.
@@ -76,6 +97,9 @@ struct BackendConfig {
   // fixed-vertex GPU cache. Dynamic/untracked sources retain the conservative
   // 48-vertex floor in DrawSink regardless of this value.
   uint32_t static_geometry_min_vertices=48;
+  // Null automatically resolves to ux0:data/aurora-vita/<TITLE_ID> on Vita.
+  // Override only when a port intentionally owns a different writable root.
+  const char* data_root_path=nullptr;
   const char* program_binary_cache_path=nullptr;
   const char* pipeline_warmup_path=nullptr;
   size_t pipeline_prewarm_limit=192;
@@ -99,6 +123,7 @@ bool begin_frame() noexcept;void end_frame() noexcept;void shutdown() noexcept;
 void discard_present() noexcept;
 void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
 uint64_t frame_index() noexcept;uint64_t last_frame_time_us() noexcept;uint32_t width() noexcept;uint32_t height() noexcept;
+PerformanceSnapshot performance_snapshot() noexcept;
 gfx::Renderer& renderer() noexcept;
 gxbridge::DrawSink& draw_sink() noexcept;
 gfx::Telemetry& telemetry() noexcept;

@@ -18,8 +18,10 @@ Current VitaGL texture defaults are intentionally more aggressive than GXM:
 
 If debugging a texture regression, disable native texture options first to establish an RGBA/conservative control path.
 
-`BackendConfig::program_binary_cache_path` is opt-in on VitaGL: the default `nullptr` disables
-the experimental disk cache.
+VitaGL now persists its program binary cache automatically per title under
+`ux0:data/aurora-vita/<TITLE_ID>/program_cache`. Its vitaGL ABI fingerprint remains part of the
+cache directory, so binaries from incompatible vitaGL builds are not reused. Set
+`program_binary_cache_path` only to override the automatic per-title location.
 
 Use `BackendConfig::log_level = RuntimeLogLevel::Silent` to suppress Aurora Vita runtime logging in
 a shipping build. Shader compile/link failures remain queryable through the normal error paths.
