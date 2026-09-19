@@ -39,6 +39,7 @@ bool g_telemetryEnabled=false;
 bool g_coverageEnabled=false;
 bool g_traceEnabled=false;
 uint64_t g_frame=0,g_start=0,g_last=0;
+uint64_t g_displayQueueLastUs=0,g_displayQueueTotalUs=0,g_displayQueueMaxUs=0,g_displayQueueSamples=0;
 std::unique_ptr<gfx::Renderer> g_renderer;
 std::unique_ptr<gxbridge::DrawSink> g_drawSink;
 gfx::Telemetry g_telemetry;
@@ -125,6 +126,7 @@ extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
+  g_displayQueueLastUs=g_displayQueueTotalUs=g_displayQueueMaxUs=g_displayQueueSamples=0;
   set_runtime_log_level(c.log_level);
   const uint32_t renderWidth=c.render_width?c.render_width:c.width;
   const uint32_t renderHeight=c.render_height?c.render_height:c.height;
@@ -347,6 +349,13 @@ void end_frame() noexcept {
   g_renderer->present(!g_discardPresent);
   const uint64_t end = now_us();
   g_last=end-g_start;
+  if(!g_discardPresent) {
+    const uint64_t queueUs=g_renderer->stats().nativeDisplayQueueAddUs;
+    g_displayQueueLastUs=queueUs;
+    g_displayQueueTotalUs+=queueUs;
+    g_displayQueueMaxUs=std::max(g_displayQueueMaxUs,queueUs);
+    ++g_displayQueueSamples;
+  }
   if (g_telemetryEnabled) {
     g_telemetry.add_time(gfx::TelemetryPhase::Present,end-presentStart);
     g_telemetry.end_frame(g_last);
@@ -385,6 +394,21 @@ size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept{
   const size_t invalidated=g_renderer->invalidate_texture_source_range(start,bytes);
   if(invalidated&&g_drawSink)g_drawSink->invalidate_texture_resolve_cache();
   return invalidated;
+}
+
+// benchmark.c keeps this hook weak so non-Aurora builds do not need to provide
+// it.  On Vita provide a strong implementation backed by the actual CPU time
+// spent in sceGxmDisplayQueueAddEntry.  Values are reported in nanoseconds to
+// match the benchmark API used by desktop backends.
+extern "C" void aurora_gpu_frame_time(unsigned long long* lastNs,
+                                       unsigned long long* meanNs,
+                                       unsigned long long* maxNs,
+                                       unsigned long long* count) {
+  const uint64_t meanUs=g_displayQueueSamples?g_displayQueueTotalUs/g_displayQueueSamples:0;
+  if(lastNs)*lastNs=g_displayQueueLastUs*1000ull;
+  if(meanNs)*meanNs=meanUs*1000ull;
+  if(maxNs)*maxNs=g_displayQueueMaxUs*1000ull;
+  if(count)*count=g_displayQueueSamples;
 }
 
 } // namespace aurora::vita

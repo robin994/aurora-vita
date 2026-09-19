@@ -409,7 +409,16 @@ struct Renderer::Impl {
     SceGxmSyncObject* vertexDependency = pendingVertexDependency;
     if (vertexDependency) flags |= SCE_GXM_SCENE_VERTEX_WAIT_FOR_DEPENDENCY;
     if (pendingFragmentTransferSync) flags |= SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC;
-    if (!check(sceGxmBeginScene(context, flags, rt, nullptr, vertexDependency, sync, cs, ds), "begin native scene")) return false;
+    const int beginResult=sceGxmBeginScene(context,flags,rt,nullptr,vertexDependency,sync,cs,ds);
+    if(beginResult<0) {
+      AURORA_VITA_LOG_ERROR(
+          "[aurora-gxm] begin_scene_fail code=0x%08x flags=0x%x context=%p rt=%p bound=%llu "
+          "vertex_dep=%p fragment_dep=%p color=%p depth=%p front=%u back=%u\n",
+          unsigned(beginResult),flags,static_cast<void*>(context),static_cast<void*>(rt),
+          static_cast<unsigned long long>(boundTarget),static_cast<void*>(vertexDependency),
+          static_cast<void*>(sync),static_cast<void*>(cs),static_cast<void*>(ds),front,back);
+      return fail("begin native scene",beginResult);
+    }
     ++stats.nativeSceneCount;
     pendingVertexDependency = nullptr;
     pendingFragmentTransferSync = false;
