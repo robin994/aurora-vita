@@ -88,11 +88,13 @@ void emit_periodic_diagnostics() noexcept {
   const auto frameLine = g_telemetry.format_frame();
   const auto memLine = g_drawSink->memory_budget().format();
   const auto& rs=g_renderer->stats();
-  char rendererLine[512];
+  char rendererLine[768];
   std::snprintf(rendererLine,sizeof(rendererLine),
       "[AURORA-VITA][RENDERER] frame=%llu display=%ux%u internal=%ux%u scenes=%u sampled=%u "
       "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu display_queue_us=%llu "
-      "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u d16=%u gpu_geometry=%u split_vertex_phases=%u",
+      "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u "
+      "efb_end_us=%llu efb_submit_us=%llu efb_wait_us=%llu efb_fixup_us=%llu "
+      "d16=%u gpu_geometry=%u split_vertex_phases=%u",
       static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
       g_config.render_width?g_config.render_width:g_config.width,
@@ -103,6 +105,10 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(rs.nativeDrawUs),
       static_cast<unsigned long long>(rs.nativeDisplayQueueAddUs),
       rs.nativeVertexUniformReuses,rs.nativeFragmentUniformReuses,rs.nativeEfbCopies,
+      static_cast<unsigned long long>(rs.nativeEfbEndSceneUs),
+      static_cast<unsigned long long>(rs.nativeEfbTransferSubmitUs),
+      static_cast<unsigned long long>(rs.nativeEfbTransferWaitUs),
+      static_cast<unsigned long long>(rs.nativeEfbCpuFixupUs),
       g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u,
       g_config.profile_split_vertex_phases?1u:0u);
   runtime_logf(RuntimeLogLevel::Info,"%s\n%s\n%s\n",
