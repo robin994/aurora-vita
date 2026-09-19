@@ -582,20 +582,6 @@ bool Renderer::initialize(const Config& config) {
   shark_install_log_cb(shader_log);
   shark_set_warnings_level(SHARK_WARN_HIGH);
   d.programCache.configure(config.programCachePath);
-  {
-    const uint64_t preloadStarted=sceKernelGetProcessTimeWide();
-    std::vector<PreloadedProgram> preloaded;
-    const size_t count=d.programCache.preload(preloaded);
-    for(auto& cached:preloaded) {
-      auto compiled=std::make_shared<Impl::CompiledStage>();
-      compiled->code=std::move(cached.words);
-      d.stageCache.emplace(cached.sourceHash,std::move(compiled));
-    }
-    if(count)
-      std::fprintf(stderr,"[aurora-gxm] stage_preload programs=%u us=%llu\n",
-          static_cast<unsigned>(count),
-          static_cast<unsigned long long>(sceKernelGetProcessTimeWide()-preloadStarted));
-  }
   d.initialized = true;
   PipelineDesc clear{};
   clear.reversedZ = false; clear.cull = CullMode::None; clear.depthFunc = Compare::Always;
