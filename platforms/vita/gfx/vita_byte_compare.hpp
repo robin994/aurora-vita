@@ -40,42 +40,26 @@ inline bool byte_spans_equal(const void* lhs, const void* rhs, size_t bytes) noe
 #endif
 }
 
-// Candidate lookup only: exact cache reuse is still guarded by
-// byte_spans_equal(). On Vita hash four words at once so large display-list
-// records do not spend several milliseconds in scalar FNV every frame.
-inline uint32_t byte_span_hash(const void* source, size_t bytes) noexcept {
-  constexpr uint32_t Seed=0x9e3779b1u;
-  constexpr uint32_t Prime=0x85ebca6bu;
+inline uint64_t byte_span_hash_seed(const void* source,size_t bytes,uint64_t seed) noexcept {
   const auto* p=static_cast<const uint8_t*>(source);
-  const uint64_t original=static_cast<uint64_t>(bytes);
-  uint32_t h=Seed^static_cast<uint32_t>(original)^static_cast<uint32_t>(original>>32);
-  if(!p)return h;
-#if defined(__vita__) && defined(__ARM_NEON)
-  uint32x4_t acc={0x243f6a88u,0x85a308d3u,0x13198a2eu,0x03707344u};
-  const uint32x4_t mul=vdupq_n_u32(Prime);
-  while(bytes>=16) {
-    const auto words=vreinterpretq_u32_u8(vld1q_u8(p));
-    acc=vmulq_u32(veorq_u32(acc,words),mul);
-    acc=vextq_u32(acc,acc,1);
-    p+=16;bytes-=16;
+  uint64_t h=seed^(uint64_t(bytes)*0x9e3779b185ebca87ull);
+  while(p&&bytes>=8) {
+    uint64_t word=0;std::memcpy(&word,p,sizeof(word));
+    word^=word>>33;word*=0xff51afd7ed558ccdull;word^=word>>33;
+    h^=word;h=(h<<27)|(h>>37);h=h*5u+0x52dce729u;
+    p+=8;bytes-=8;
   }
-  alignas(16) uint32_t lanes[4];
-  vst1q_u32(lanes,acc);
-  h^=lanes[0]+0x9e3779b9u;
-  h=(h^lanes[1])*Prime;
-  h=(h^lanes[2])*Prime;
-  h=(h^lanes[3])*Prime;
-#else
-  while(bytes>=4) {
-    uint32_t word;
-    std::memcpy(&word,p,sizeof(word));
-    h=(h^word)*Prime;
-    p+=4;bytes-=4;
-  }
-#endif
-  while(bytes--)h=(h^*p++)*Prime;
-  h^=h>>16;h*=0x7feb352du;h^=h>>15;h*=0x846ca68bu;h^=h>>16;
+  uint64_t tail=0;
+  if(p&&bytes)std::memcpy(&tail,p,bytes);
+  h^=tail+0x9e3779b97f4a7c15ull;
+  h^=h>>33;h*=0xc4ceb9fe1a85ec53ull;h^=h>>33;
   return h;
+}
+// Candidate lookup only: exact cache reuse is still guarded by
+// byte_spans_equal(). Keep the hash self-contained so VitaSDK consumers do not
+// need an extra xxHash header/library dependency.
+inline uint64_t byte_span_hash(const void* source, size_t bytes) noexcept {
+  return byte_span_hash_seed(source,bytes,0x165667b19e3779f9ull);
 }
 
 } // namespace aurora::vita::gfx

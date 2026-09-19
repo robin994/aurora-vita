@@ -32,6 +32,7 @@ struct MemoryBudgetSnapshot {
   uint64_t pipelineCompileFailures = 0;
   uint64_t pipelineEvictions = 0;
   size_t staticGeometryBytes=0,staticGeometryEntries=0;
+  uint64_t staticGeometryHits=0,staticGeometryMisses=0,staticGeometryLookupFallbacks=0;
   uint64_t streamRecycles = 0;
   uint64_t gpuSyncs = 0;
 

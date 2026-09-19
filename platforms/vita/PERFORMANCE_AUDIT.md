@@ -6,6 +6,40 @@
 > di `PERFORMANCE_LAB.md`: una build che compila e un overlay a 60 FPS non sono prove
 > di 60 FPS sostenuti in gameplay.
 
+## Stato implementazione
+
+Il piano operativo e' stato integrato nel branch Vita. In particolare:
+
+- A1: scissor GXM tramite region clip hardware; il fragment scissor/discard non viene piu'
+  generato nel backend nativo.
+- A2/A3: depth store condizionale, dipendenze tra scene senza CPU finish, contatore scene e
+  D16 opzionale (BackendConfig::gxm_d16_depth).
+- A4: risoluzione interna separata dal framebuffer Vita tramite
+  BackendConfig::render_width/render_height (default 640x448 su scanout 960x544).
+- A5/A6: formati GX nativi dove supportati, CMPR/BC1 e swizzle dell'intera catena mip.
+- B1/B2/B3: streamed decode-transform-pack come percorso normale, layout decoder
+  precompilato in micro-op e transform NEON su ARM.
+- B4: cache fixed/GPU vertex abilitata di default con budget 8 MiB e opt-out esplicito a 0.
+- C1: scelta deliberatamente la seconda via sicura descritta sotto: staging cached e un
+  solo memcpy bulk, allineato, verso memoria GXM uncached. VitaSDK user-mode non espone
+  un range cache-clean/writeback utilizzabile in sicurezza per rendere coerente un buffer
+  USER_RW mappato a GXM; il direct-write cached resta quindi disabilitato sul backend
+  nativo invece di introdurre una race di cache.
+- C2/C3: fixup EFB sul GPU path e allocazione CDRAM-first con pool/suballocation e fallback.
+- D1/D2/D4: dirty tracking uniform, lookup hot-path ridotti e storage fixed-uniform stabile.
+- D3: i packet draw pesanti sono separati dal vettore comandi e il percorso streamed/GPU
+  li costruisce direttamente in-place, evitando la copia per draw e le ricopie da
+  riallocazione del command vector.
+- E1/E2/E3: math flags sicuri, Cortex-A9/NEON espliciti e fat LTO configurabile.
+- F1: worker persistenti spin-then-sleep; i semafori vengono usati solo quando un worker o
+  il chiamante deve realmente dormire.
+- H1/H2/H3: render extent configurabile (incluso il test 480x272), scene count in
+  FrameStats/telemetria e scissor hardware forzato globalmente sul backend GXM.
+
+E4 resta intenzionalmente una strategia di tuning alternativa, non cumulabile alla cieca
+con il profilo -O3/LTO: va confrontata per dimensione binario e frame time sul singolo
+titolo, come indicato nella sezione relativa.
+
 **Indice**
 
 - [0. Punto di partenza e metodo](#0-punto-di-partenza-e-metodo)

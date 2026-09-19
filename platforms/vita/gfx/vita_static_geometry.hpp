@@ -3,6 +3,7 @@
 #include "vita_fixed_vertex.hpp"
 #include "vita_byte_compare.hpp"
 #include "vita_memory_revision.hpp"
+#include <cstdio>
 #include <memory>
 #include <unordered_map>
 
@@ -43,6 +44,7 @@ public:
   size_t size() const noexcept { return entries_.size(); }
   uint64_t hits() const noexcept { return hits_; }
   uint64_t misses() const noexcept { return misses_; }
+  uint64_t lookup_fallbacks() const noexcept { return lookupFallbacks_; }
 
   const Entry* get(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
                    const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
@@ -59,6 +61,22 @@ public:
                        make_key(raw,bytes,count,primitive,layout,gpuLayout);
     }
     auto it=entries_.find(key);
+#if defined(__vita__)
+    // Perfect Dark hit a VitaSDK/libstdc++ unordered_map lookup regression for
+    // aggregate keys. Aurora uses a scalar pre-hashed key, but audit misses
+    // defensively: a linear equality scan only runs on cache misses, where the
+    // alternative is much more expensive decode/upload work anyway.
+    if(it==entries_.end()&&!entries_.empty()) {
+      for(auto probe=entries_.begin();probe!=entries_.end();++probe) {
+        if(probe->first!=key)continue;
+        it=probe;
+        ++lookupFallbacks_;
+        if(lookupFallbacks_==1)
+          std::fprintf(stderr,"[aurora-vita] geometry cache unordered lookup fallback activated\n");
+        break;
+      }
+    }
+#endif
     if(it!=entries_.end()) {
       ScopedTelemetryPhase phase(detailed,TelemetryPhase::GeometryValidate);
       auto& e=*it->second;
@@ -124,7 +142,7 @@ public:
       renderer_.buffers().destroy(pair.second->vertices.buffer);
       renderer_.buffers().destroy(pair.second->indices.buffer);
     }
-    entries_.clear();bytes_=0;hits_=misses_=0;
+    entries_.clear();bytes_=0;hits_=misses_=lookupFallbacks_=0;
   }
 
   static bool same_layout(const VertexDecodeLayout& a,const VertexDecodeLayout& b) noexcept {
@@ -200,7 +218,7 @@ private:
     }
     return true;
   }
-  static uint32_t hash_bytes(const uint8_t* data,size_t size) noexcept {
+  static uint64_t hash_bytes(const uint8_t* data,size_t size) noexcept {
     return byte_span_hash(data,size);
   }
   static uint64_t make_key(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
@@ -216,7 +234,9 @@ private:
     }
     add(gpu.count);
     for(unsigned i=0;i<gpu.count;++i) {const auto& a=gpu.attributes[i];add(a.location);add(a.components);add(static_cast<uint8_t>(a.scalar));add(a.normalized);add(a.offset);add(a.stride);}
-    return (static_cast<uint64_t>(h)<<32)|hash_bytes(raw,bytes);
+    const uint64_t content=hash_bytes(raw,bytes);
+    const uint64_t metadata=(static_cast<uint64_t>(h)<<32)|h;
+    return content ^ metadata;
   }
   static uint64_t make_stable_key(const uint8_t* stable,uint32_t count,SourcePrimitive primitive,
                                   const VertexDecodeLayout& layout,const VertexLayout& gpu) noexcept {
@@ -232,11 +252,13 @@ private:
     }
     add(gpu.count);
     for(unsigned i=0;i<gpu.count;++i) {const auto& a=gpu.attributes[i];add(a.location);add(a.components);add(static_cast<uint8_t>(a.scalar));add(a.normalized);add(a.offset);add(a.stride);}
-    return (static_cast<uint64_t>(h)<<32) ^ static_cast<uint64_t>(reinterpret_cast<uintptr_t>(stable));
+    const uint64_t metadata=(static_cast<uint64_t>(h)<<32)|h;
+    const uintptr_t address=reinterpret_cast<uintptr_t>(stable);
+    return byte_span_hash_seed(&address,sizeof(address),metadata);
   }
   Renderer& renderer_;
   size_t budget_=0,bytes_=0;
-  uint64_t hits_=0,misses_=0;
+  uint64_t hits_=0,misses_=0,lookupFallbacks_=0;
   std::unordered_map<uint64_t,std::unique_ptr<Entry>> entries_{};
   PreparedDraw scratch_{};
   std::vector<uint8_t> packed_{};

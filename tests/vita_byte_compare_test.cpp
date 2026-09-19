@@ -1,4 +1,5 @@
 #include "gfx/vita_byte_compare.h"
+#include "gfx/vita_byte_compare.hpp"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +30,12 @@ void exercise(unsigned char* a, unsigned char* b, size_t length) {
 int main() {
     check(aurora_vita_bytes_equal(nullptr, nullptr, 0));
     std::array<unsigned char, 576> a{}, b{};
+    for(size_t i=0;i<a.size();++i)a[i]=b[i]=static_cast<unsigned char>(i*29u+7u);
+    const auto baseHash=aurora::vita::gfx::byte_span_hash(a.data(),a.size());
+    check(baseHash==aurora::vita::gfx::byte_span_hash(b.data(),b.size()));
+    b[317]^=0x40;
+    check(baseHash!=aurora::vita::gfx::byte_span_hash(b.data(),b.size()));
+    b[317]^=0x40;
     for (size_t length = 0; length <= 257; ++length)
         for (unsigned ao = 0; ao < 16; ++ao)
             for (unsigned bo = 0; bo < 16; ++bo) exercise(a.data() + ao, b.data() + bo, length);

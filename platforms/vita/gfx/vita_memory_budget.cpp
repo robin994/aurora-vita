@@ -26,7 +26,10 @@ std::string MemoryBudgetSnapshot::format() const {
       << " v_overflow=" << vertexOverflows << " i_overflow=" << indexOverflows
       << " tex_evict=" << textureEvictions << " shader_fail=" << pipelineCompileFailures
       << " stream_recycles=" << streamRecycles << " gpu_syncs=" << gpuSyncs;
-  out << " static_geometry=" << staticGeometryBytes << " static_geometry_entries=" << staticGeometryEntries;
+  out << " static_geometry=" << staticGeometryBytes << " static_geometry_entries=" << staticGeometryEntries
+      << " static_geometry_hit=" << staticGeometryHits
+      << " static_geometry_miss=" << staticGeometryMisses
+      << " static_geometry_lookup_fallback=" << staticGeometryLookupFallbacks;
   return out.str();
 }
 

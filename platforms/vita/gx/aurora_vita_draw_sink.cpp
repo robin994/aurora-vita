@@ -23,7 +23,11 @@ namespace aurora::vita::gxbridge {
 gfx::MemoryBudgetSnapshot DrawSink::memory_budget() const noexcept {
   if (!renderer_ || !arena_) return {};
   auto result=gfx::capture_memory_budget(*arena_, renderer_->textures(), renderer_->pipelines(), &renderer_->efb());
-  if(staticGeometry_){result.staticGeometryBytes=staticGeometry_->bytes();result.staticGeometryEntries=staticGeometry_->size();}
+  if(staticGeometry_){
+    result.staticGeometryBytes=staticGeometry_->bytes();result.staticGeometryEntries=staticGeometry_->size();
+    result.staticGeometryHits=staticGeometry_->hits();result.staticGeometryMisses=staticGeometry_->misses();
+    result.staticGeometryLookupFallbacks=staticGeometry_->lookup_fallbacks();
+  }
   return result;
 }
 
