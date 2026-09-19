@@ -73,6 +73,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
         -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
         -mtune=cortex-a9 -mfpu=neon -ffast-math -fsigned-char
     )
+    if (AURORA_VITA_LTO)
+        target_compile_options(aurora_vita_backend PRIVATE -flto=auto -ffat-lto-objects)
+        target_link_options(aurora_vita_backend INTERFACE -flto=auto)
+    endif ()
     target_link_options(aurora_vita_backend PRIVATE -Wl,--gc-sections -Wl,-q)
     include("${CMAKE_CURRENT_LIST_DIR}/AuroraVitaProgramCache.cmake")
     aurora_vita_bind_vitagl(aurora_vita_backend)

@@ -23,6 +23,10 @@ target_compile_options(aurora_vita_gxm_backend PRIVATE
     -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
     -mcpu=cortex-a9 -mfpu=neon-vfpv3 -mfloat-abi=hard -fsigned-char
     -fno-math-errno -funsafe-math-optimizations -fno-signed-zeros -ffp-contract=fast)
+if (AURORA_VITA_LTO)
+    target_compile_options(aurora_vita_gxm_backend PRIVATE -flto=auto -ffat-lto-objects)
+    target_link_options(aurora_vita_gxm_backend INTERFACE -flto=auto)
+endif ()
 target_link_libraries(aurora_vita_gxm_backend PUBLIC aurora::vita_common
     vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
     SceGxm_stub SceDisplay_stub SceSysmodule_stub SceLibKernel_stub SceCtrl_stub

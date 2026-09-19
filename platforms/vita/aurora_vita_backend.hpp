@@ -53,6 +53,9 @@ struct BackendConfig {
   // normal fused execution; enabling it changes cache locality and worker wakes.
   bool profile_split_vertex_phases=false;
   bool texture_decode_diagnostics=false;
+  // Native GXM only. D16 halves depth bandwidth and tile backing size, but GX
+  // exposes 24-bit Z so titles with tight depth ranges may prefer DF32.
+  bool gxm_d16_depth=false;
   size_t static_geometry_budget=0; // Opt-in fixed-PN GPU transform and verified immutable geometry cache.
   const char* program_binary_cache_path=nullptr;
   // Diagnostic only: submit at most this many GX draw packets per frame. Zero

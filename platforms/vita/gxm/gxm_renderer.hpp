@@ -17,6 +17,7 @@ struct Config {
   size_t cdramReserveBytes = 8 * 1024 * 1024;
   size_t maxPipelines = 128;
   bool waitVblank = true;
+  bool d16Depth = false;
   const char* shaderCompilerPath = nullptr;
   const char* programCachePath = nullptr;
 };

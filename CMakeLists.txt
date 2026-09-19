@@ -22,10 +22,13 @@ option(AURORA_ENABLE_VITA_BACKEND "Build Dawn-free PS Vita graphics backend" OFF
 option(AURORA_VITA_BACKEND_ONLY "Build only the standalone PS Vita graphics backend" OFF)
 if (VITA)
   set(_aurora_vita_sdl3_native_default ON)
+  set(_aurora_vita_lto_default ON)
 else ()
   set(_aurora_vita_sdl3_native_default OFF)
+  set(_aurora_vita_lto_default OFF)
 endif ()
 option(AURORA_VITA_SDL3_NATIVE "Use SDL3 native Vita platform services while Aurora/vitaGL owns rendering" ${_aurora_vita_sdl3_native_default})
+option(AURORA_VITA_LTO "Compile Vita renderer objects with fat LTO and request LTO at final link" ${_aurora_vita_lto_default})
 
 if (AURORA_VITA_BACKEND_ONLY)
   if (NOT AURORA_ENABLE_VITA_BACKEND)

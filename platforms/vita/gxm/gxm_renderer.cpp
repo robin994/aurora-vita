@@ -554,8 +554,10 @@ bool Renderer::initialize(const Config& config) {
         "[aurora-gxm] cdram_pool unavailable requested=%zu reserve=%zu error=0x%08x; using mapped fallbacks\n",
         config.cdramPoolBytes, config.cdramReserveBytes, unsigned(poolResult));
   const uint32_t tw = (config.width + 31u) & ~31u, th = (config.height + 31u) & ~31u;
-  if (!d.alloc(d.depth, size_t(tw) * th * 4, MemoryKind::GpuResource)) return abort();
-  if (!d.check(sceGxmDepthStencilSurfaceInit(&d.depthSurface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32,
+  const auto depthFormat=config.d16Depth?SCE_GXM_DEPTH_STENCIL_FORMAT_D16:SCE_GXM_DEPTH_STENCIL_FORMAT_DF32;
+  const size_t depthBytesPerPixel=config.d16Depth?2u:4u;
+  if (!d.alloc(d.depth, size_t(tw) * th * depthBytesPerPixel, MemoryKind::GpuResource)) return abort();
+  if (!d.check(sceGxmDepthStencilSurfaceInit(&d.depthSurface, depthFormat,
       SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, tw, d.depth.data(), nullptr), "initialize depth surface")) return abort();
   sceGxmDepthStencilSurfaceSetBackgroundDepth(&d.depthSurface, 1.f);
   if (!d.alloc(d.patchBuffer, 1024 * 1024, MemoryKind::CpuGpu) ||
@@ -588,8 +590,8 @@ bool Renderer::initialize(const Config& config) {
   d.clearVertices = create_buffer(vertices, sizeof(vertices));
   d.clearIndices = create_buffer(indices, sizeof(indices));
   if (!d.clearPipeline || !d.clearVertices || !d.clearIndices) return abort();
-  std::fprintf(stderr, "[aurora-gxm] initialized %ux%u buffers=%u renderer=SceGxm native_cg=1\n",
-      config.width, config.height, config.displayBuffers);
+  std::fprintf(stderr, "[aurora-gxm] initialized %ux%u buffers=%u renderer=SceGxm native_cg=1 depth=%s\n",
+      config.width, config.height, config.displayBuffers,config.d16Depth?"D16":"DF32");
   log_memory_state("after-init");
   return true;
 }
@@ -1204,7 +1206,7 @@ Handle Renderer::create_target(uint32_t width,uint32_t height,bool useDepth) {
   const uint32_t stride=(width+7u)&~7u;
   const uint32_t dw=(width+31u)&~31u,dh=(height+31u)&~31u;
   const size_t colorBytes=(size_t(stride)*height*4+4095u)&~size_t(4095u);
-  const size_t depthBytes=useDepth?((size_t(dw)*dh*4+4095u)&~size_t(4095u)):0;
+  const size_t depthBytes=useDepth?((size_t(dw)*dh*(d.config.d16Depth?2u:4u)+4095u)&~size_t(4095u)):0;
   if(!d.has_budget(colorBytes+depthBytes)) {d.fail("render target budget exhausted");return 0;}
   auto texture=std::make_unique<Impl::Texture>();
   auto& t=*texture;
@@ -1218,7 +1220,8 @@ Handle Renderer::create_target(uint32_t width,uint32_t height,bool useDepth) {
           width,height,stride,t.memory.data()),"initialize target color surface")) return 0;
   if(useDepth) {
     if(!d.alloc(t.depth,depthBytes,MemoryKind::GpuResource) ||
-       !d.check(sceGxmDepthStencilSurfaceInit(&t.depthSurface,SCE_GXM_DEPTH_STENCIL_FORMAT_DF32,
+       !d.check(sceGxmDepthStencilSurfaceInit(&t.depthSurface,
+          d.config.d16Depth?SCE_GXM_DEPTH_STENCIL_FORMAT_D16:SCE_GXM_DEPTH_STENCIL_FORMAT_DF32,
           SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,dw,t.depth.data(),nullptr),"initialize target depth")) return 0;
     sceGxmDepthStencilSurfaceSetBackgroundDepth(&t.depthSurface,1.f);
   }

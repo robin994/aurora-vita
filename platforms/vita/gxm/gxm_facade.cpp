@@ -276,6 +276,7 @@ bool Renderer::initialize() noexcept {
   c.waitVblank=cfg_.waitVblank;c.resourceBudgetBytes=cfg_.nativeResourceBudget;
   c.cdramPoolBytes=cfg_.nativeCdramPoolBytes;
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
+  c.d16Depth=cfg_.nativeD16Depth;
   c.programCachePath=cfg_.programBinaryCachePath;
   c.maxPipelines=cfg_.pipelineBudget+16; // Native clear/blit variants are not GX cache entries.
   if(!native_->initialize(c))return false;

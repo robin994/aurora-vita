@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 namespace aurora::vita::gfx {
 namespace {
@@ -32,10 +35,21 @@ uint8_t byte(float f) noexcept {
 }
 
 V3 transform(const Matrix3x4& m,V4 p) noexcept {
+#if defined(__ARM_NEON)
+  const float pv[]{p.x,p.y,p.z,p.w};
+  const float32x4_t v=vld1q_f32(pv);
+  const auto dot4=[&](const float* row) noexcept {
+    const float32x4_t product=vmulq_f32(v,vld1q_f32(row));
+    const float32x2_t sum2=vpadd_f32(vget_low_f32(product),vget_high_f32(product));
+    return vget_lane_f32(vpadd_f32(sum2,sum2),0);
+  };
+  return {dot4(&m.v[0]),dot4(&m.v[4]),dot4(&m.v[8])};
+#else
   // Each four-float group is one result column: result = row-vector(p) * mat3x4.
   return {p.x*m.v[0]+p.y*m.v[1]+p.z*m.v[2]+p.w*m.v[3],
           p.x*m.v[4]+p.y*m.v[5]+p.z*m.v[6]+p.w*m.v[7],
           p.x*m.v[8]+p.y*m.v[9]+p.z*m.v[10]+p.w*m.v[11]};
+#endif
 }
 V3 transform_dir(const Matrix3x4&m,V3 p) noexcept{return transform(m,{p.x,p.y,p.z,0.f});}
 

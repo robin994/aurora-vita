@@ -21,6 +21,7 @@ struct RendererConfig {
   // title allocations. Ignored by the vitaGL backend.
   size_t nativeCdramPoolBytes=64*1024*1024;
   size_t nativeCdramReserveBytes=8*1024*1024;
+  bool nativeD16Depth=false;
   const char* programBinaryCachePath=nullptr;
 };
 class Renderer {

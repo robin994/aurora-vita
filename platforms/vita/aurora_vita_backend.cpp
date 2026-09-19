@@ -195,6 +195,7 @@ bool initialize(const BackendConfig& c) noexcept {
   gfx::RendererConfig rc{}; rc.width=c.width; rc.height=c.height; rc.textureBudget=c.texture_cache_budget;
   rc.displayBuffers=c.vgl_display_buffer_count;
   rc.waitVblank=c.wait_vblank;
+  rc.nativeD16Depth=c.gxm_d16_depth;
   // The native budget covers persistent streaming buffers as well as textures.
   rc.nativeResourceBudget=c.texture_cache_budget+c.static_geometry_budget+
       (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
