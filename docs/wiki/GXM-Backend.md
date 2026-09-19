@@ -15,6 +15,7 @@ Runtime:
 
 ```cpp
 aurora::vita::BackendConfig config{};
+config.log_level = aurora::vita::RuntimeLogLevel::Info;
 config.render_width = 0;
 config.render_height = 0;
 config.gxm_d16_depth = false;
@@ -22,6 +23,9 @@ config.static_geometry_budget = 0;
 ```
 
 This baseline intentionally favors correctness over peak throughput.
+
+For a quiet shipping build set `config.log_level = RuntimeLogLevel::Silent`. Explicit telemetry,
+coverage, and trace paths still write if configured.
 
 GXM uses a persistent compiled-program cache by default at
 `ux0:data/aurora-vita/program_cache`. Set

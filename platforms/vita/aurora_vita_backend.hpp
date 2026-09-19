@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include "vita_log.hpp"
 #include "gfx/vita_telemetry.hpp"
 #include "integration/vita_feature_coverage.hpp"
 #include "integration/vita_frame_trace.hpp"
@@ -49,6 +50,9 @@ struct BackendConfig {
   // Minimum useful work per CPU lane. Smaller draws stay on the render thread;
   // larger draws progressively use one or two workers as their size warrants.
   uint32_t cpu_parallel_min_vertices=512;
+  // Runtime console logging for Aurora Vita itself. Silent suppresses normal
+  // backend output; errors remain available through the structured failure APIs.
+  RuntimeLogLevel log_level=RuntimeLogLevel::Info;
   // Expensive per-draw coverage/trace instrumentation is opt-in for shipping
   // ports. Supplying any diagnostic output path still enables it automatically.
   bool diagnostics=false;

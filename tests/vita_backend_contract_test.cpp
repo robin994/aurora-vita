@@ -8,6 +8,7 @@
 #include "gfx/vita_sampler_units.hpp"
 #include "gfx/vita_draw_batch.hpp"
 #include "gfx/vita_hash_map.hpp"
+#include "vita_log.hpp"
 #include "gxm/gxm_texture_layout.hpp"
 #include "gxm/gxm_program_cache.hpp"
 #include <array>
@@ -424,6 +425,17 @@ void native_extended_contract() {
 }
 } // namespace
 int main() {
+  set_runtime_log_level(RuntimeLogLevel::Silent);
+  REQUIRE(runtime_log_level()==RuntimeLogLevel::Silent);
+  REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Error));
+  REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Info));
+  set_runtime_log_level(RuntimeLogLevel::Error);
+  REQUIRE(runtime_log_enabled(RuntimeLogLevel::Error));
+  REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Info));
+  set_runtime_log_level(RuntimeLogLevel::Info);
+  REQUIRE(runtime_log_enabled(RuntimeLogLevel::Error));
+  REQUIRE(runtime_log_enabled(RuntimeLogLevel::Info));
+  REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Debug));
   {
     TextureDesc d{}; d.format=TextureFormat::RGBA8888; d.mipCount=1;
     d.width=d.height=4;

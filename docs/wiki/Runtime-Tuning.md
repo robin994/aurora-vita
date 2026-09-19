@@ -4,6 +4,27 @@ Runtime tuning is configured through `aurora::vita::BackendConfig`.
 
 The defaults below are current source defaults.
 
+## Runtime logging
+
+`BackendConfig::log_level` controls Aurora Vita backend logging:
+
+| Value | Behavior |
+|---|---|
+| `RuntimeLogLevel::Silent` | Suppresses Aurora Vita runtime console logs, shader/compiler logs, hardcoded GXM memory logs, and automatic shader-failure artifacts. Structured errors remain available through `last_init_failure_detail()` / renderer error state. Explicit telemetry/coverage/trace output paths still write because the caller requested them. |
+| `RuntimeLogLevel::Error` | Errors and allocation/compiler failures only. |
+| `RuntimeLogLevel::Info` | Default. Startup/configuration and periodic informational messages plus errors. |
+| `RuntimeLogLevel::Debug` | Includes high-volume geometry, stream, texture, shader and cache diagnostics. |
+
+Example:
+
+```cpp
+aurora::vita::BackendConfig cfg{};
+cfg.log_level = aurora::vita::RuntimeLogLevel::Silent;
+```
+
+This is separate from the top-level Aurora `AuroraConfig::logLevel`, which controls the generic
+Aurora logger. A full port that wants completely quiet normal operation should configure both.
+
 ## Display and raster extent
 
 | Field | Default | Notes |
@@ -76,6 +97,7 @@ or warm and do not mix the two populations.
 
 | Field | Default | Effect |
 |---|---:|---|
+| `log_level` | `RuntimeLogLevel::Info` | Console/backend logging threshold. |
 | `diagnostics` | false | Expensive per-draw diagnostics. |
 | `profile_split_vertex_phases` | false | Separates decode/transform phases for profiling; alters normal fused execution. |
 | `texture_decode_diagnostics` | false | Texture decoder diagnostics. |

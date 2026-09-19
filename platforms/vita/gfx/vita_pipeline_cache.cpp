@@ -2,6 +2,7 @@
 #include "vita_gl_util.hpp"
 #include "vita_pipeline_key.hpp"
 #include "vita_shader_gen.hpp"
+#include "../vita_log.hpp"
 #include <cstring>
 #include <cstdio>
 #if defined(__vita__)
@@ -19,6 +20,7 @@ void write_failure_blob(const char* path,const void* data,size_t size) noexcept 
 }
 
 void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSources& src,const std::string& diagnostics) noexcept {
+  if(!runtime_log_enabled(RuntimeLogLevel::Error))return;
   // Failure artifacts are intentionally overwrite-by-key: a recurring broken
   // pipeline must not grow storage without bound during a long Mario Kart run.
   sceIoMkdir("ux0:data/aurora-vita",0777);
@@ -88,7 +90,7 @@ void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSource
   std::fprintf(fp,"alpha_compare=%u,%u op=%u %u,%u\n",(unsigned)d.tev.alphaCompare.comp0,(unsigned)d.tev.alphaCompare.ref0,
                (unsigned)d.tev.alphaCompare.op,(unsigned)d.tev.alphaCompare.comp1,(unsigned)d.tev.alphaCompare.ref1);
   std::fclose(fp);
-  std::printf("[aurora-vita] shader failure artifacts: %s.*\n",base);
+  AURORA_VITA_LOG_ERROR("[aurora-vita] shader failure artifacts: %s.*\n",base);
 }
 
 GLenum compare(Compare c){switch(c){case Compare::Never:return GL_NEVER;case Compare::Less:return GL_LESS;case Compare::Equal:return GL_EQUAL;case Compare::LessEqual:return GL_LEQUAL;case Compare::Greater:return GL_GREATER;case Compare::NotEqual:return GL_NOTEQUAL;case Compare::GreaterEqual:return GL_GEQUAL;case Compare::Always:return GL_ALWAYS;}return GL_ALWAYS;}
@@ -188,7 +190,7 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& d,Frame
   auto src=build_tev_glsl(d);
   std::string shaderDiagnostics;
   p.program=link_program(src.vertex.c_str(),src.fragment.c_str(),&shaderDiagnostics);
-  if(!p.program){++compileFailures_;failedKeys_.insert(k);std::printf("[aurora-vita] pipeline compile failed key=%llx\n",(unsigned long long)k);dump_pipeline_failure(k,d,src,shaderDiagnostics);return nullptr;}
+  if(!p.program){++compileFailures_;failedKeys_.insert(k);AURORA_VITA_LOG_ERROR("[aurora-vita] pipeline compile failed key=%llx\n",(unsigned long long)k);dump_pipeline_failure(k,d,src,shaderDiagnostics);return nullptr;}
   p.uMvp=glGetUniformLocation(p.program,"u_mvp");
   p.uKColor=glGetUniformLocation(p.program,"u_kcolor");
   p.uTevReg=glGetUniformLocation(p.program,"u_tevreg");

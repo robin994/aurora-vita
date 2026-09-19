@@ -1,4 +1,5 @@
 #include "vita_texture_cache.hpp"
+#include "../vita_log.hpp"
 #include "vita_pipeline_key.hpp"
 #include "vita_texture_decode.hpp"
 #include "vita_sampler_units.hpp"
@@ -23,11 +24,11 @@ namespace aurora::vita::gfx {
 namespace {
 void vgl_log_texture_alloc_fail(uint32_t w,uint32_t h,unsigned fmt,uint8_t mips,uint64_t sourceId,
                                 size_t estBytes,size_t cacheBytes,size_t budget) noexcept {
-  std::fprintf(stderr,
-    "[aurora-vita] texture_alloc_fail w=%u h=%u fmt=0x%X mips=%u source=0x%llX est=%llu cache_bytes=%llu budget=%llu\n",
-    w,h,fmt,static_cast<unsigned>(mips),static_cast<unsigned long long>(sourceId),
-    static_cast<unsigned long long>(estBytes),static_cast<unsigned long long>(cacheBytes),
-    static_cast<unsigned long long>(budget));
+  AURORA_VITA_LOG_ERROR(
+      "[aurora-vita] texture_alloc_fail w=%u h=%u fmt=0x%X mips=%u source=0x%llX est=%llu cache_bytes=%llu budget=%llu\n",
+      w,h,fmt,static_cast<unsigned>(mips),static_cast<unsigned long long>(sourceId),
+      static_cast<unsigned long long>(estBytes),static_cast<unsigned long long>(cacheBytes),
+      static_cast<unsigned long long>(budget));
 }
 // vitaGL uploads RGBA8 as VGL_ALIGN(w,8)*h*4 (row-stride padded to 8 texels).
 inline size_t aligned_rgba_bytes(uint32_t width,uint32_t height) noexcept {
@@ -126,9 +127,10 @@ Handle TextureCache::get_or_upload(const TextureDesc& d,uint64_t frame,FrameStat
   if(failedKeys_.find(key)!=failedKeys_.end()){
     ++retrySuppressTotal_;
     if(retrySuppressTotal_==1||(retrySuppressTotal_&(retrySuppressTotal_-1))==0){
-      std::fprintf(stderr,"[aurora-vita] texture_retry_suppressed total=%llu frame=%llu source=0x%llX\n",
-        static_cast<unsigned long long>(retrySuppressTotal_),static_cast<unsigned long long>(frame),
-        static_cast<unsigned long long>(d.sourceId));
+      AURORA_VITA_LOG_DEBUG(
+          "[aurora-vita] texture_retry_suppressed total=%llu frame=%llu source=0x%llX\n",
+          static_cast<unsigned long long>(retrySuppressTotal_),static_cast<unsigned long long>(frame),
+          static_cast<unsigned long long>(d.sourceId));
     }
     return InvalidHandle;
   }

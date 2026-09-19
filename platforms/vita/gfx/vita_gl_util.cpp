@@ -1,4 +1,5 @@
 #include "vita_gl_util.hpp"
+#include "../vita_log.hpp"
 #include "vita_program_binary_cache.hpp"
 #if defined(__vita__)
 #include <cstdio>
@@ -37,7 +38,8 @@ GLuint load_cached_program(const std::string& path,uint64_t sourceHash) noexcept
   if(!linked){glDeleteProgram(program);return 0;}
   ++programCacheHits;
   if(programCacheHits<=4||(programCacheHits&(programCacheHits-1))==0)
-    std::fprintf(stderr,"[aurora-vita] program_cache hits=%u misses=%u\n",programCacheHits,programCacheMisses);
+    AURORA_VITA_LOG_DEBUG("[aurora-vita] program_cache hits=%u misses=%u\n",
+                          programCacheHits,programCacheMisses);
   return program;
 }
 
@@ -76,14 +78,14 @@ void configure_program_binary_cache(const char* path) noexcept {
   for(size_t i=programCacheRoot.find(':')+1;i<programCacheRoot.size();++i)
     if(programCacheRoot[i]=='/')sceIoMkdir(programCacheRoot.substr(0,i).c_str(),0777);
   sceIoMkdir(programCacheRoot.c_str(),0777);
-  std::fprintf(stderr,"[aurora-vita] program_cache abi=%s\n",AURORA_VITAGL_CACHE_ABI);
+  AURORA_VITA_LOG_INFO("[aurora-vita] program_cache abi=%s\n",AURORA_VITAGL_CACHE_ABI);
 }
 
 GLuint compile_shader(GLenum type,const char* src,std::string* diagnostics) noexcept {
   GLuint s=glCreateShader(type);
   if(!s){
     const char* stage=type==GL_VERTEX_SHADER?"vertex":type==GL_FRAGMENT_SHADER?"fragment":"unknown";
-    std::printf("[aurora-vita] glCreateShader failed for %s shader\n",stage);
+    AURORA_VITA_LOG_ERROR("[aurora-vita] glCreateShader failed for %s shader\n",stage);
     if(diagnostics){diagnostics->append("glCreateShader failed for ");diagnostics->append(stage);diagnostics->append(" shader\n");}
     return 0;
   }
@@ -96,7 +98,7 @@ GLuint compile_shader(GLenum type,const char* src,std::string* diagnostics) noex
     std::vector<char> log(n>1?n:2);
     glGetShaderInfoLog(s,(GLsizei)log.size(),nullptr,log.data());
     const char* stage=type==GL_VERTEX_SHADER?"vertex":type==GL_FRAGMENT_SHADER?"fragment":"unknown";
-    std::printf("[aurora-vita] %s shader compile failed: %s\n",stage,log.data());
+    AURORA_VITA_LOG_ERROR("[aurora-vita] %s shader compile failed: %s\n",stage,log.data());
     if(diagnostics){
       diagnostics->append(stage);
       diagnostics->append(" shader compile failed:\n");
@@ -116,7 +118,7 @@ GLuint link_program(const char* vs,const char* fs,std::string* diagnostics) noex
   GLuint v=compile_shader(GL_VERTEX_SHADER,vs,diagnostics),f=compile_shader(GL_FRAGMENT_SHADER,fs,diagnostics);if(!v||!f){if(v)glDeleteShader(v);if(f)glDeleteShader(f);return 0;}
   GLuint p=glCreateProgram();
   if(!p){
-    std::printf("[aurora-vita] glCreateProgram failed\n");
+    AURORA_VITA_LOG_ERROR("[aurora-vita] glCreateProgram failed\n");
     if(diagnostics)diagnostics->append("glCreateProgram failed\n");
     glDeleteShader(v);glDeleteShader(f);return 0;
   }
@@ -124,7 +126,7 @@ GLuint link_program(const char* vs,const char* fs,std::string* diagnostics) noex
   glBindAttribLocation(p,0,"a_position");glBindAttribLocation(p,1,"a_color0");glBindAttribLocation(p,2,"a_color1");
   glBindAttribLocation(p,11,"a_normal");glBindAttribLocation(p,12,"a_binormal");glBindAttribLocation(p,13,"a_tangent");glBindAttribLocation(p,14,"a_pn_mtx");
   for(unsigned i=0;i<8;i++){char n[16];std::snprintf(n,sizeof(n),"a_tex%u",i);glBindAttribLocation(p,3+i,n);}glLinkProgram(p);
-  GLint ok=0;glGetProgramiv(p,GL_LINK_STATUS,&ok);if(!ok){GLint n=0;glGetProgramiv(p,GL_INFO_LOG_LENGTH,&n);std::vector<char> log(n>1?n:2);glGetProgramInfoLog(p,(GLsizei)log.size(),nullptr,log.data());std::printf("[aurora-vita] program link failed: %s\n",log.data());if(diagnostics){diagnostics->append("program link failed:\n");diagnostics->append(log.data());diagnostics->push_back('\n');}glDeleteProgram(p);p=0;}
+  GLint ok=0;glGetProgramiv(p,GL_LINK_STATUS,&ok);if(!ok){GLint n=0;glGetProgramiv(p,GL_INFO_LOG_LENGTH,&n);std::vector<char> log(n>1?n:2);glGetProgramInfoLog(p,(GLsizei)log.size(),nullptr,log.data());AURORA_VITA_LOG_ERROR("[aurora-vita] program link failed: %s\n",log.data());if(diagnostics){diagnostics->append("program link failed:\n");diagnostics->append(log.data());diagnostics->push_back('\n');}glDeleteProgram(p);p=0;}
   if(p)save_cached_program(cachePath,sourceHash,p);
   glDeleteShader(v);glDeleteShader(f);return p;
 }

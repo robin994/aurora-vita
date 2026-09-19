@@ -3,6 +3,7 @@
 #include "gxm_program_cache.hpp"
 #include "gxm_shader_gen.hpp"
 #include "gxm_texture_layout.hpp"
+#include "../vita_log.hpp"
 #include "gfx/vita_pipeline_key.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_sampler_units.hpp"
@@ -34,11 +35,12 @@ struct DisplayRequest {
 };
 
 void log_memory_state(const char* phase) {
+  if(!runtime_log_enabled(RuntimeLogLevel::Info))return;
   const auto stats = memory_stats();
   SceKernelFreeMemorySizeInfo freeMemory{};
   freeMemory.size = sizeof(freeMemory);
   const int freeResult = sceKernelGetFreeMemorySize(&freeMemory);
-  std::fprintf(stderr,
+  AURORA_VITA_LOG_INFO(
       "[aurora-gxm] memory phase=%s "
       "cdram=%llu peak=%llu allocs=%u pool=%llu pool_used=%llu pool_peak=%llu "
       "user=%llu peak=%llu allocs=%u "
@@ -110,7 +112,9 @@ void display_callback(const void* opaque) {
 void* patch_alloc(void*, SceSize bytes) { return std::malloc(bytes); }
 void patch_free(void*, void* p) { std::free(p); }
 void shader_log(const char* message, shark_log_level level, int line) {
-  std::fprintf(stderr, "[aurora-gxm][shader] level=%d line=%d %s\n", int(level), line, message ? message : "");
+  if(!runtime_log_enabled(RuntimeLogLevel::Debug))return;
+  AURORA_VITA_LOG_DEBUG("[aurora-gxm][shader] level=%d line=%d %s\n",
+                        int(level),line,message?message:"");
   if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader.log", "a")) {
     std::fprintf(file, "level=%d line=%d %s\n", int(level), line, message ? message : "");
     std::fclose(file);
@@ -420,7 +424,7 @@ struct Renderer::Impl {
     char text[384];
     std::snprintf(text, sizeof(text), "%s (0x%08x)", operation, unsigned(code));
     error = text;
-    std::fprintf(stderr, "[aurora-gxm] %s\n", text);
+    AURORA_VITA_LOG_ERROR("[aurora-gxm] %s\n",text);
     return false;
   }
   bool check(int code, const char* operation) { return code >= 0 || fail(operation, code); }
@@ -462,11 +466,11 @@ struct Renderer::Impl {
     const SceGxmProgram* program = shark_compile_shader(source.c_str(), &size, type);
     if (!program || !size) {
       const char stageChar = stage == ProgramStage::Vertex ? 'v' : 'f';
-      std::fprintf(stderr,
+      AURORA_VITA_LOG_ERROR(
           "[aurora-gxm] stage_compile_fail stage=%c hash=%016llx source_bytes=%u\n",
           stageChar, static_cast<unsigned long long>(sourceHash),
           static_cast<unsigned>(source.size()));
-      if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader_failures.log", "a")) {
+      if (runtime_log_enabled(RuntimeLogLevel::Error)) if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader_failures.log", "a")) {
         std::fprintf(file, "stage=%c hash=%016llx source_bytes=%u\n",
             stageChar, static_cast<unsigned long long>(sourceHash),
             static_cast<unsigned>(source.size()));
@@ -476,7 +480,7 @@ struct Renderer::Impl {
       std::snprintf(path, sizeof(path),
           "ux0:data/SmashMeleeVita/shader_fail-%c-%016llx.cg", stageChar,
           static_cast<unsigned long long>(sourceHash));
-      if (FILE* file = std::fopen(path, "wb")) {
+      if (runtime_log_enabled(RuntimeLogLevel::Error)) if (FILE* file = std::fopen(path, "wb")) {
         std::fwrite(source.data(), 1, source.size(), file);
         std::fclose(file);
       }
@@ -495,7 +499,7 @@ struct Renderer::Impl {
     ++stageCompiles;
     const uint64_t elapsed = sceKernelGetProcessTimeWide() - started;
     if (stageCompiles <= 8 || (stageCompiles & (stageCompiles - 1)) == 0)
-      std::fprintf(stderr,
+      AURORA_VITA_LOG_INFO(
           "[aurora-gxm] stage_compile stage=%c hash=%016llx us=%llu compiled=%u mem_hits=%u disk_hits=%u disk_misses=%u\n",
           stage == ProgramStage::Vertex ? 'v' : 'f', static_cast<unsigned long long>(sourceHash),
           static_cast<unsigned long long>(elapsed), stageCompiles, stageMemoryHits,
@@ -556,7 +560,7 @@ bool Renderer::initialize(const Config& config) {
   }
   const int poolResult = initialize_cdram_pool(config.cdramPoolBytes, config.cdramReserveBytes);
   if (poolResult < 0)
-    std::fprintf(stderr,
+    AURORA_VITA_LOG_ERROR(
         "[aurora-gxm] cdram_pool unavailable requested=%zu reserve=%zu error=0x%08x; using mapped fallbacks\n",
         config.cdramPoolBytes, config.cdramReserveBytes, unsigned(poolResult));
   const uint32_t tw = (config.width + 31u) & ~31u, th = (config.height + 31u) & ~31u;
@@ -596,7 +600,7 @@ bool Renderer::initialize(const Config& config) {
   d.clearVertices = create_buffer(vertices, sizeof(vertices));
   d.clearIndices = create_buffer(indices, sizeof(indices));
   if (!d.clearPipeline || !d.clearVertices || !d.clearIndices) return abort();
-  std::fprintf(stderr, "[aurora-gxm] initialized %ux%u buffers=%u renderer=SceGxm native_cg=1 depth=%s\n",
+  AURORA_VITA_LOG_INFO( "[aurora-gxm] initialized %ux%u buffers=%u renderer=SceGxm native_cg=1 depth=%s\n",
       config.width, config.height, config.displayBuffers,config.d16Depth?"D16":"DF32");
   log_memory_state("after-init");
   return true;
@@ -749,7 +753,7 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
         ++d.stats.textureMisses;++d.stats.textureUploads;
         return handle;
       }
-      std::fprintf(stderr,
+      AURORA_VITA_LOG_INFO(
           "[aurora-gxm] native GX texture format unsupported fmt=%u gxm=0x%08x; falling back to RGBA8\n",
           static_cast<unsigned>(desc.format),unsigned(nativeResult));
     }
@@ -1124,7 +1128,7 @@ bool Renderer::end_frame(bool present) {
   static uint64_t presentCount=0;
   const uint64_t count=++presentCount;
   if(present && (count<=8 || (count&(count-1))==0))
-    std::fprintf(stderr,"[aurora-gxm] present_timing n=%llu end_us=%llu queue_us=%llu total_us=%llu\n",
+    AURORA_VITA_LOG_INFO("[aurora-gxm] present_timing n=%llu end_us=%llu queue_us=%llu total_us=%llu\n",
       static_cast<unsigned long long>(count),
       static_cast<unsigned long long>(afterEnd-timingStart),
       static_cast<unsigned long long>(afterQueue-afterEnd),
@@ -1433,7 +1437,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     static uint64_t gpuCopyCount=0;
     const uint64_t n=++gpuCopyCount;
     if(n<=8||(n&(n-1u))==0)
-      std::fprintf(stderr,
+      AURORA_VITA_LOG_INFO(
           "[aurora-gxm] efb_gpu_fixup n=%llu flip=%u%u opaque=%u source_end_us=%llu draw_us=%llu total_us=%llu\n",
           static_cast<unsigned long long>(n),flipX?1u:0u,flipY?1u:0u,
           format==EfbCopyFormat::RGB565?1u:0u,
@@ -1486,7 +1490,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
   static uint64_t copyTimingCount=0;
   const uint64_t copyN=++copyTimingCount;
   if(copyN<=8 || (copyN&(copyN-1u))==0)
-    std::fprintf(stderr,
+    AURORA_VITA_LOG_INFO(
       "[aurora-gxm] efb_transfer_timing n=%llu source_finish_us=%llu transfer_submit_us=%llu total_us=%llu\n",
       static_cast<unsigned long long>(copyN),
       static_cast<unsigned long long>(afterSourceFinish-copyStarted),
@@ -1546,7 +1550,7 @@ bool Renderer::copy_display_region(const Scissor& source) {
     static uint64_t passthroughCount=0;
     const uint64_t count=++passthroughCount;
     if(count<=4 || (count&(count-1))==0)
-      std::fprintf(stderr,"[aurora-gxm] display_copy passthrough n=%llu source=%d,%d %dx%d\n",
+      AURORA_VITA_LOG_INFO("[aurora-gxm] display_copy passthrough n=%llu source=%d,%d %dx%d\n",
                    static_cast<unsigned long long>(count),source.x,source.y,source.width,source.height);
     return true;
   }
@@ -1620,7 +1624,7 @@ bool Renderer::copy_display_region(const Scissor& source) {
   static uint64_t displayCopyCount=0;
   const uint64_t count=++displayCopyCount;
   if(count<=8 || (count&(count-1))==0) {
-    std::fprintf(stderr,
+    AURORA_VITA_LOG_INFO(
       "[aurora-gxm] display_copy n=%llu source=%d,%d %dx%d total_us=%llu end_us=%llu prep_us=%llu draw_us=%llu\n",
       static_cast<unsigned long long>(count),
       source.x,source.y,source.width,source.height,

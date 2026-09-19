@@ -1,4 +1,5 @@
 #include "vita_cpu_workers.hpp"
+#include "../vita_log.hpp"
 
 #include <algorithm>
 #include <array>
@@ -81,10 +82,10 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
   }
 
   g_workers.initialized = true;
-  std::fprintf(stderr,
-               "[aurora-vita] cpu workers=%u lanes=%u sync=paired_semaphores cores=1,2 parallel_min_items=%llu\n",
-               g_workers.workerCount, g_workers.workerCount + 1,
-               static_cast<unsigned long long>(g_workers.minItems));
+  AURORA_VITA_LOG_INFO(
+      "[aurora-vita] cpu workers=%u lanes=%u sync=paired_semaphores cores=1,2 parallel_min_items=%llu\n",
+      g_workers.workerCount,g_workers.workerCount+1,
+      static_cast<unsigned long long>(g_workers.minItems));
   return true;
 }
 

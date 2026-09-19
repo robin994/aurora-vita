@@ -53,7 +53,8 @@ Aurora Vita provides two mutually exclusive experimental hardware renderer paths
 
 The Vita backend exposes both conservative defaults and opt-in performance paths for native GX
 textures, CMPR/BC1, streaming, reduced internal resolution, D16 depth, GPU geometry, diagnostics,
-and memory tuning. Experimental options can change framebuffer output or synchronization behavior,
+memory tuning, and runtime logging (`BackendConfig::log_level`, including a fully quiet `Silent`
+mode). Experimental options can change framebuffer output or synchronization behavior,
 so they should be validated on real hardware before becoming a port default.
 
 See the [Aurora Vita Wiki](docs/wiki/Home.md) for:

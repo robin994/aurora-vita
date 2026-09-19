@@ -1,4 +1,5 @@
 #include "vita_texture_decode.hpp"
+#include "../vita_log.hpp"
 #include "vita_cpu_workers.hpp"
 #include <algorithm>
 #include <array>
@@ -19,10 +20,11 @@ void report_texture_colors(const TextureDesc& d,const std::vector<uint8_t>& rgba
   }
   if(!magenta)return;
   ++textureReports;
-  std::fprintf(stderr,"[aurora-vita] texture_colors source=%llx fmt=%u size=%ux%u magenta=%u transparent_magenta=%u transparent=%u pixels=%u\n",
-    static_cast<unsigned long long>(d.sourceId),static_cast<unsigned>(d.format),d.width,d.height,
-    static_cast<unsigned>(magenta),static_cast<unsigned>(transparentMagenta),
-    static_cast<unsigned>(transparent),static_cast<unsigned>(rgba.size()/4));
+  AURORA_VITA_LOG_DEBUG(
+      "[aurora-vita] texture_colors source=%llx fmt=%u size=%ux%u magenta=%u transparent_magenta=%u transparent=%u pixels=%u\n",
+      static_cast<unsigned long long>(d.sourceId),static_cast<unsigned>(d.format),d.width,d.height,
+      static_cast<unsigned>(magenta),static_cast<unsigned>(transparentMagenta),
+      static_cast<unsigned>(transparent),static_cast<unsigned>(rgba.size()/4));
 }
 inline uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
 inline uint8_t expand4(uint8_t v) { return static_cast<uint8_t>((v << 4) | v); }
@@ -45,10 +47,11 @@ RGBA palette_color(const TextureDesc& d, uint32_t idx) {
     static uint64_t lastSource=~uint64_t{0};
     if(reported<8&&lastSource!=d.sourceId){
       lastSource=d.sourceId;++reported;
-      std::fprintf(stderr,"[aurora-vita] palette_oob source=%llx palette=%llx fmt=%u size=%ux%u entries=%u index=%u palette_format=%u\n",
-        static_cast<unsigned long long>(d.sourceId),static_cast<unsigned long long>(d.paletteSourceId),
-        static_cast<unsigned>(d.format),d.width,d.height,static_cast<unsigned>(d.paletteSize/2),idx,
-        static_cast<unsigned>(d.paletteFormat));
+      AURORA_VITA_LOG_ERROR(
+          "[aurora-vita] palette_oob source=%llx palette=%llx fmt=%u size=%ux%u entries=%u index=%u palette_format=%u\n",
+          static_cast<unsigned long long>(d.sourceId),static_cast<unsigned long long>(d.paletteSourceId),
+          static_cast<unsigned>(d.format),d.width,d.height,static_cast<unsigned>(d.paletteSize/2),idx,
+          static_cast<unsigned>(d.paletteFormat));
     }
 #endif
     return {255,0,255,255};

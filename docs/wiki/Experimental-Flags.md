@@ -35,6 +35,7 @@ These are members of `aurora::vita::BackendConfig`, not CMake options.
 
 | Field | Default | Scope | Status / risk |
 |---|---:|---|---|
+| `log_level` | `RuntimeLogLevel::Info` | Common | Runtime logging control. Use `Silent` to suppress Aurora Vita backend console/file diagnostics that are not explicitly requested through output-path fields. |
 | `render_width`, `render_height` | `0, 0` | Common | Experimental resolution scaling. Zero follows display extent. Reduced resolution must be checked against GXCopyTex shadows, UI, crop, and aspect handling. |
 | `gxm_d16_depth` | `false` | GXM | Experimental. D16 can reduce depth bandwidth/memory but GX exposes higher depth precision; validate z-fighting and depth effects. |
 | `static_geometry_budget` | `0` | Common, primarily GXM | Experimental GPU fixed-geometry cache. Zero is the conservative default. Enable only for categories validated against the CPU path. |

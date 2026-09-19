@@ -1,4 +1,5 @@
 #include "gxm_program_cache.hpp"
+#include "../vita_log.hpp"
 #include <cstdlib>
 #include <cstdio>
 #include <dirent.h>
@@ -25,7 +26,7 @@ void ProgramBinaryCache::configure(const char* path) noexcept {
   for (size_t i = colon == std::string::npos ? 0 : colon + 1; i < root_.size(); ++i)
     if (root_[i] == '/') sceIoMkdir(root_.substr(0, i).c_str(), 0777);
   sceIoMkdir(root_.c_str(), 0777);
-  std::fprintf(stderr, "[aurora-gxm] program_cache abi=gxm-cg-gxp-v1\n");
+  AURORA_VITA_LOG_INFO("[aurora-gxm] program_cache abi=gxm-cg-gxp-v1\n");
 }
 
 bool ProgramBinaryCache::load(uint64_t sourceHash, ProgramStage stage,
@@ -51,7 +52,7 @@ bool ProgramBinaryCache::load(uint64_t sourceHash, ProgramStage stage,
   std::memcpy(words.data(), bytes.data(), bytes.size());
   ++hits_;
   if (hits_ <= 4 || (hits_ & (hits_ - 1)) == 0)
-    std::fprintf(stderr, "[aurora-gxm] program_cache hits=%u misses=%u\n", hits_, misses_);
+    AURORA_VITA_LOG_DEBUG("[aurora-gxm] program_cache hits=%u misses=%u\n",hits_,misses_);
   return true;
 }
 

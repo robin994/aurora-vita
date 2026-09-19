@@ -21,6 +21,9 @@ If debugging a texture regression, disable native texture options first to estab
 `BackendConfig::program_binary_cache_path` is opt-in on VitaGL: the default `nullptr` disables
 the experimental disk cache.
 
+Use `BackendConfig::log_level = RuntimeLogLevel::Silent` to suppress Aurora Vita runtime logging in
+a shipping build. Shader compile/link failures remain queryable through the normal error paths.
+
 ## `AURORA_VITA_DIRECT_STREAM_WRITE`
 
 Default: **OFF**

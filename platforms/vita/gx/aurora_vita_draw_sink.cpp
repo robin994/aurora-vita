@@ -1,4 +1,5 @@
 #include "aurora_vita_draw_sink.hpp"
+#include "../vita_log.hpp"
 #include "../gfx/vita_renderer.hpp"
 #include "../gfx/vita_pipeline_key.hpp"
 
@@ -183,7 +184,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
     if(a.semantic==gfx::VertexSemantic::Position)posAttr=&a;
     else if(a.semantic==gfx::VertexSemantic::PnMatrixIndex)pnAttr=&a;
   }
-  std::fprintf(stderr,
+  AURORA_VITA_LOG_DEBUG(
     "[aurora-vita][3d-layout] in=%u stride=%u current_pn=%u vita_current_pn=%u "
     "pos_src=%u pos_comp=%u pos_cnt=%u pos_frac=%u pos_arr_stride=%u pos_arr_le=%u pn_src=%u\n",
     inputVertices,static_cast<unsigned>(layout.streamStride),static_cast<unsigned>(currentPn),
@@ -197,10 +198,10 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
   for(unsigned i=0;i<rawSamples;i++){
     gfx::CanonicalVertex raw{};
     if(gfx::decode_vertex_into(rawVertices,rawBytes,i,layout,raw)){
-      std::fprintf(stderr,"[aurora-vita][3d-raw-v] n=%u p=%g,%g,%g pn=%u\n",i,
+      AURORA_VITA_LOG_DEBUG("[aurora-vita][3d-raw-v] n=%u p=%g,%g,%g pn=%u\n",i,
                    raw.position[0],raw.position[1],raw.position[2],static_cast<unsigned>(raw.pnMatrixIndex));
     }else{
-      std::fprintf(stderr,"[aurora-vita][3d-raw-v] n=%u decode_failed\n",i);
+      AURORA_VITA_LOG_DEBUG("[aurora-vita][3d-raw-v] n=%u decode_failed\n",i);
     }
   }
 
@@ -228,7 +229,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
       if(xy&&c.z>=0.f&&c.z<=c.w)++insideZ01;
     }
   }
-  std::fprintf(stderr,
+  AURORA_VITA_LOG_DEBUG(
     "[aurora-vita][3d-geom] in=%u out=%u idx=%u clip=%u finite=%u wpos=%u xy=%u glz=%u z01=%u "
     "pos=[%g,%g,%g,%g..%g,%g,%g,%g] clipbox=[%g,%g,%g,%g..%g,%g,%g,%g] "
     "depth=%u/%u cull=%u revz=%u warn_zbefore=%u\n",
@@ -239,7 +240,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
     pipeline.depthTest?1u:0u,static_cast<unsigned>(pipeline.depthFunc),static_cast<unsigned>(pipeline.cull),
     pipeline.reversedZ?1u:0u,aurora::gx::g_gxState.zCompLocBeforeTex?1u:0u);
 
-  std::fprintf(stderr,"[aurora-vita][3d-proj] %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
+  AURORA_VITA_LOG_DEBUG("[aurora-vita][3d-proj] %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
     state.projection[0],state.projection[1],state.projection[2],state.projection[3],
     state.projection[4],state.projection[5],state.projection[6],state.projection[7],
     state.projection[8],state.projection[9],state.projection[10],state.projection[11],
@@ -248,10 +249,10 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
   const unsigned samples=std::min<unsigned>(3,static_cast<unsigned>(prepared.vertices.size()));
   for(unsigned i=0;i<samples;i++){
     const auto& v=prepared.vertices[i];const auto c=project_for_diag(state.projection,v,prepared.positionIsClipSpace);
-    std::fprintf(stderr,"[aurora-vita][3d-v] n=%u p=%g,%g,%g,%g c=%g,%g,%g,%g pn=%u\n",
+    AURORA_VITA_LOG_DEBUG("[aurora-vita][3d-v] n=%u p=%g,%g,%g,%g c=%g,%g,%g,%g pn=%u\n",
       i,v.position[0],v.position[1],v.position[2],v.position[3],c.x,c.y,c.z,c.w,static_cast<unsigned>(v.pnMatrixIndex));
   }
-  std::fprintf(stderr,"[aurora-vita][3d-i] %u %u %u %u %u %u\n",
+  AURORA_VITA_LOG_DEBUG("[aurora-vita][3d-i] %u %u %u %u %u %u\n",
     prepared.indices.size()>0?prepared.indices[0]:0u,prepared.indices.size()>1?prepared.indices[1]:0u,
     prepared.indices.size()>2?prepared.indices[2]:0u,prepared.indices.size()>3?prepared.indices[3]:0u,
     prepared.indices.size()>4?prepared.indices[4]:0u,prepared.indices.size()>5?prepared.indices[5]:0u);
@@ -323,7 +324,7 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
     static uint64_t copyLogCount=0;
     const uint64_t n=++copyLogCount;
     if(n<=8 || (n&(n-1))==0)
-      std::fprintf(stderr,
+      AURORA_VITA_LOG_DEBUG(
         "[aurora-vita] gx_copy_tex n=%llu src=%d,%d %dx%d dst=%ux%u fmt=0x%x mapped=%u clear=%u\n",
         static_cast<unsigned long long>(n),src.x,src.y,src.width,src.height,dstW,dstH,
         rawCopyFormat,static_cast<unsigned>(copyFormat),clear?1u:0u);
@@ -468,7 +469,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     for(unsigned i=0;i<4;++i)if(addresses[i]){
       SceKernelMemBlockInfo info{};info.size=sizeof(info);
       const int rc=sceKernelGetMemBlockInfoByAddr(const_cast<void*>(addresses[i]),&info);
-      std::fprintf(stderr,"[aurora-vita] memory_profile object=%s address=%p rc=%d type=0x%08x memory_type=0x%x\n",
+      AURORA_VITA_LOG_DEBUG("[aurora-vita] memory_profile object=%s address=%p rc=%d type=0x%08x memory_type=0x%x\n",
         labels[i],addresses[i],rc,static_cast<unsigned>(info.type),info.memoryType);
     }
   }
@@ -530,7 +531,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
 #if defined(__vita__)
     static unsigned debugGpuDraws=0;
     const bool debugGpu=telemetry_&&telemetry_->split_vertex_phases()&&debugGpuDraws++<4;
-    if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe begin count=%u primitive=%u key=%llx\n",vertexCount,primitive,static_cast<unsigned long long>(translatedPipelineKey));
+    if(debugGpu)AURORA_VITA_LOG_DEBUG("[aurora-vita] gpu_vertex_probe begin count=%u primitive=%u key=%llx\n",vertexCount,primitive,static_cast<unsigned long long>(translatedPipelineKey));
 #endif
     const uint64_t gpuPipelineDescKey=gfx::pipeline_key(translatedGpuPipeline_);
     auto key=fixedPipelineKeys_.find(gpuPipelineDescKey);
@@ -541,7 +542,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(fixedPipelineKey)fixedPipelineKeys_[gpuPipelineDescKey]=fixedPipelineKey;
     }
 #if defined(__vita__)
-    if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe pipeline=%llx\n",static_cast<unsigned long long>(fixedPipelineKey));
+    if(debugGpu)AURORA_VITA_LOG_DEBUG("[aurora-vita] gpu_vertex_probe pipeline=%llx\n",static_cast<unsigned long long>(fixedPipelineKey));
 #endif
     if(fixedPipelineKey){
       // A warm geometry hit still queues a reference to this program. Protect
@@ -551,7 +552,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       const auto before=staticGeometry_->hits();
       gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,translatedGpuPipeline_,vertexState,telemetry_,stableSource);
 #if defined(__vita__)
-      if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe geometry=%p entries=%u\n",static_cast<const void*>(gpuGeometry),static_cast<unsigned>(staticGeometry_->size()));
+      if(debugGpu)AURORA_VITA_LOG_DEBUG("[aurora-vita] gpu_vertex_probe geometry=%p entries=%u\n",static_cast<const void*>(gpuGeometry),static_cast<unsigned>(staticGeometry_->size()));
 #endif
       if(gpuGeometry&&telemetry_)telemetry_->gpu_geometry(staticGeometry_->hits()!=before,gpuGeometry->vertexCount);
     }
@@ -612,7 +613,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       static uint64_t rolloverLogCount=0;
       const auto n=arena_->recycles();
       if(rolloverLogCount<8||(n&&(n&(n-1))==0)){
-        std::fprintf(stderr,"[aurora-vita] stream_rollover total=%llu syncs=%llu slot=%u gpu_stride=%u next_vtx=%u next_idx=%u\n",
+        AURORA_VITA_LOG_DEBUG("[aurora-vita] stream_rollover total=%llu syncs=%llu slot=%u gpu_stride=%u next_vtx=%u next_idx=%u\n",
                      static_cast<unsigned long long>(n),static_cast<unsigned long long>(arena_->gpu_syncs()),arena_->slot(),
                      static_cast<unsigned>(gpuStride),required.vertexCount,required.indexCount);
         ++rolloverLogCount;

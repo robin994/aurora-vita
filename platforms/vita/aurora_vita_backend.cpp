@@ -104,7 +104,8 @@ void emit_periodic_diagnostics() noexcept {
       rs.nativeVertexUniformReuses,rs.nativeFragmentUniformReuses,rs.nativeEfbCopies,
       g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u,
       g_config.profile_split_vertex_phases?1u:0u);
-  std::printf("%s\n%s\n%s\n", frameLine.c_str(), rendererLine, memLine.c_str());
+  runtime_logf(RuntimeLogLevel::Info,"%s\n%s\n%s\n",
+               frameLine.c_str(),rendererLine,memLine.c_str());
   if (g_config.telemetry_log_path) {
     ensure_parent_dir(g_config.telemetry_log_path);
     g_telemetry.append_frame_log(g_config.telemetry_log_path);
@@ -124,6 +125,7 @@ extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
+  set_runtime_log_level(c.log_level);
   const uint32_t renderWidth=c.render_width?c.render_width:c.width;
   const uint32_t renderHeight=c.render_height?c.render_height:c.height;
   if(!renderWidth||!renderHeight||renderWidth>c.width||renderHeight>c.height) {
@@ -207,10 +209,12 @@ bool initialize(const BackendConfig& c) noexcept {
                         static_cast<int>(g_config.vgl_ram_threshold),
                         SCE_GXM_MULTISAMPLE_NONE);
   if(resolutionFallback){
-    std::printf("[aurora-vita] vitaGL framebuffer resolution fallback requested=%ux%u\n",
-                g_config.width,g_config.height);
+    runtime_logf(RuntimeLogLevel::Error,
+                 "[aurora-vita] vitaGL framebuffer resolution fallback requested=%ux%u\n",
+                 g_config.width,g_config.height);
   }
-  std::printf("[aurora-vita] vitaGL pools mode=%s ram=%llu/%llu cdram=%llu/%llu phycont=%llu/%llu circular=%u display_buffers=%u\n",
+  runtime_logf(RuntimeLogLevel::Info,
+               "[aurora-vita] vitaGL pools mode=%s ram=%llu/%llu cdram=%llu/%llu phycont=%llu/%llu circular=%u display_buffers=%u\n",
               explicitPools?"fixed":"threshold",
               static_cast<unsigned long long>(vglMemFree(VGL_MEM_RAM)),
               static_cast<unsigned long long>(vglMemTotal(VGL_MEM_RAM)),
@@ -254,9 +258,10 @@ bool initialize(const BackendConfig& c) noexcept {
     return false;
   }
   if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices)) {
-    std::fprintf(stderr, "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
+    runtime_logf(RuntimeLogLevel::Error,
+                 "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
-  std::fprintf(stderr,
+  runtime_logf(RuntimeLogLevel::Info,
                "[aurora-vita] render config display=%ux%u internal=%ux%u native_cmpr=%u direct_stream=%u scratch_dynamic=%u scratch_stream=%u gpu_vertex_stride=%u gpu_geometry_mb=%llu stream_v=%llu stream_i=%llu slots=%u\n",
                c.width,c.height,renderWidth,renderHeight,
                AURORA_VITA_NATIVE_CMPR?1u:0u,AURORA_VITA_DIRECT_STREAM_WRITE?1u:0u,

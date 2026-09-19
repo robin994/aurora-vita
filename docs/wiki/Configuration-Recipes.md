@@ -12,6 +12,7 @@ set(AURORA_VITA_NATIVE_GX_TEXTURES OFF CACHE BOOL "" FORCE)
 
 ```cpp
 aurora::vita::BackendConfig cfg{};
+cfg.log_level = aurora::vita::RuntimeLogLevel::Silent;
 cfg.render_width = 0;
 cfg.render_height = 0;
 cfg.gxm_d16_depth = false;
