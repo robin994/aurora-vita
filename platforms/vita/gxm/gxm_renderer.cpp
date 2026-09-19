@@ -1367,7 +1367,11 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     return d.fail("unsupported native EFB GPU copy");
 
   const Handle originalTarget=d.boundTarget;
-  const bool gpuFixup=flipX||flipY||format==EfbCopyFormat::RGB565;
+  // The transfer downscale path is both restrictive and, on Strikers' common
+  // 960x544 -> 480x272 GXCopyTex copies, can return SCE_GXM transfer errors and
+  // serialize End Frame. The draw path below already performs the same 2x
+  // reduction with linear sampling while preserving crop/flip/copy semantics.
+  const bool gpuFixup=halfScale||flipX||flipY||format==EfbCopyFormat::RGB565;
   if(gpuFixup && handle==originalTarget)
     return d.fail("native EFB feedback copy requires cached CPU fallback");
 
