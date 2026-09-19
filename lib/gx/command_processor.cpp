@@ -2437,7 +2437,7 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       mark_pipeline_state_dirty();
     }
   } else if (subCmd == GX_LOAD_AURORA_TEXOBJ) {
-    CHECK(pos + 34 <= size, "GX_LOAD_AURORA_TEXOBJ read overrun");
+    CHECK(pos + 35 <= size, "GX_LOAD_AURORA_TEXOBJ read overrun");
     const auto texMapId = data[pos];
     pos += 1;
     CHECK(texMapId < MaxTextures, "invalid texture map id {}", texMapId);
@@ -2459,11 +2459,12 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       next.flags &= ~1u;
     }
     pos += 1;
+    next.set_no_cache(data[pos] != 0);
+    pos += 1;
     next.texObjId = read_u32(data + pos, bigEndian);
     pos += 4;
     next.texDataVersion = read_u32(data + pos, bigEndian);
     pos += 4;
-    next.set_no_cache(false); // Reset no-cache flag
     const bool changed = slot.data != next.data || slot.mWidth != next.mWidth || slot.mHeight != next.mHeight ||
                          slot.mFormat != next.mFormat || slot.tlut != next.tlut || slot.flags != next.flags ||
                          slot.texObjId != next.texObjId || slot.texDataVersion != next.texDataVersion;

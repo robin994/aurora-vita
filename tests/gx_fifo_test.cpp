@@ -2049,6 +2049,7 @@ TEST_F(GXFifoTest, LoadTexObjPcFormat_PreservesFullFormatMetadata) {
 
   EXPECT_EQ(GXGetTexObjFmt(&obj), GX_TF_RGBA8_PC);
 
+  reinterpret_cast<GXTexObj_&>(obj).set_no_cache(true);
   GXLoadTexObj(&obj, GX_TEXMAP3);
   auto bytes = capture_fifo();
 
@@ -2062,6 +2063,7 @@ TEST_F(GXFifoTest, LoadTexObjPcFormat_PreservesFullFormatMetadata) {
   EXPECT_EQ(slot.height(), 8u);
   EXPECT_EQ(slot.format(), GX_TF_RGBA8_PC);
   EXPECT_EQ(slot.raw_format(), static_cast<u32>(GX_TF_RGBA8));
+  EXPECT_TRUE(slot.no_cache());
 }
 
 TEST_F(GXFifoTest, RawDrawDrainsQueuedMaterialStateWithoutDeferredDirtyBits) {
