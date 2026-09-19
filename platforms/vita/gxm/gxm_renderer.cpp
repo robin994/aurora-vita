@@ -405,10 +405,16 @@ struct Renderer::Impl {
           SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
       sceGxmDepthStencilSurfaceSetForceStoreMode(ds, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
     }
-    unsigned flags = sync ? SCE_GXM_SCENE_FRAGMENT_SET_DEPENDENCY : 0u;
-    SceGxmSyncObject* vertexDependency = pendingVertexDependency;
-    if (vertexDependency) flags |= SCE_GXM_SCENE_VERTEX_WAIT_FOR_DEPENDENCY;
-    if (pendingFragmentTransferSync) flags |= SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC;
+    // Scenes submitted through the same GXM context are ordered already.  Do
+    // not turn every render-target switch into a vertex-sync dependency: the
+    // Vita GXM contract/examples begin display/offscreen scenes without those
+    // flags, and forcing SET_DEPENDENCY|VERTEX_WAIT here produces
+    // SCE_GXM_ERROR_INVALID_POINTER on Strikers' EFB targets.  The fragment sync
+    // object is still supplied so the completed scene can be consumed by the
+    // display queue / transfer engine.  Only a real transfer-engine dependency
+    // needs an explicit scene flag.
+    unsigned flags = pendingFragmentTransferSync ? SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC : 0u;
+    SceGxmSyncObject* vertexDependency = nullptr;
     const int beginResult=sceGxmBeginScene(context,flags,rt,nullptr,vertexDependency,sync,cs,ds);
     if(beginResult<0) {
       AURORA_VITA_LOG_ERROR(
@@ -1302,15 +1308,13 @@ bool Renderer::bind_target(Handle handle) {
   const auto it=d.textures.find(handle);
   if(handle && (it==d.textures.end() || !it->second->target)) return d.fail("unknown render target");
   if(handle==d.boundTarget) return true;
-  // Target switches only need GPU ordering, not a CPU-wide finish. End the
-  // current scene and make the next one wait on its fragment sync object. This
-  // preserves render-to-texture and depth ordering while allowing the CPU to
-  // continue preparing the next GX scene in parallel with the GPU.
+  // End the current scene before changing the target. Commands in this GXM
+  // context retain submission order across scenes; an extra vertex dependency
+  // is unnecessary and rejected by GXM for the offscreen EFB targets used by
+  // Strikers.
   if(d.inScene) {
-    SceGxmSyncObject* previousSync=d.boundTarget?
-        d.textures.at(d.boundTarget)->sync:d.surfaces[d.back].sync;
     if(!d.end_scene()) return false;
-    d.pendingVertexDependency=previousSync;
+    d.pendingVertexDependency=nullptr;
   }
   d.boundTarget=handle;
   return true;
@@ -1596,7 +1600,9 @@ bool Renderer::copy_display_region(const Scissor& source) {
   alias->descriptorSamplerValid=false;
 
   d.back=destination;
-  d.pendingVertexDependency=d.surfaces[sourceBuffer].sync;
+  // Same-context scene ordering is sufficient for sampling the just-finished
+  // EFB in this display-copy scene.
+  d.pendingVertexDependency=nullptr;
   PipelineDesc p{};
   p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
   p.layout.count=2;
