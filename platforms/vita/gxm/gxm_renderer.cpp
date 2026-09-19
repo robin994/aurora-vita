@@ -1156,12 +1156,12 @@ bool Renderer::end_frame(bool present) {
   d.sceneWindowSum += d.stats.nativeSceneCount;
   ++d.sceneWindowFrames;
   if(d.stats.nativeSceneCount>d.config.scenesPerFrame)
-    std::fprintf(stderr,"[aurora-gxm] scene_budget_exceeded scenes=%u budget=%u\n",
+    AURORA_VITA_LOG_ERROR("[aurora-gxm] scene_budget_exceeded scenes=%u budget=%u\n",
         d.stats.nativeSceneCount,d.config.scenesPerFrame);
   if(d.sceneWindowFrames>=120u) {
     const double avg=double(d.sceneWindowSum)/double(d.sceneWindowFrames);
     if(avg>double(d.config.scenesPerFrame))
-      std::fprintf(stderr,"[aurora-gxm] scene_budget_average avg=%.2f budget=%u\n",
+      AURORA_VITA_LOG_INFO("[aurora-gxm] scene_budget_average avg=%.2f budget=%u\n",
           avg,d.config.scenesPerFrame);
     d.sceneWindowSum=0;d.sceneWindowFrames=0;
   }

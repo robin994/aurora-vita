@@ -82,6 +82,12 @@ Lowering the threshold wakes workers for smaller draws and can lose performance 
 
 `gxm_d16_depth=false` is the safe default. Enable D16 only as an explicit experiment.
 
+## GXM scene budget
+
+`gxm_scenes_per_frame` defaults to **5**. It configures the native GXM render-target
+`scenesPerFrame` budget. Keep it above the measured steady-state/peak scene count for the title.
+Do not reduce it as a generic memory optimization without hardware telemetry.
+
 ## Shader/program binary cache
 
 `program_binary_cache_path` has backend-specific behavior:
@@ -92,6 +98,17 @@ Lowering the threshold wakes workers for smaller draws and can lose performance 
 
 When comparing first-use shader compilation or menu/loading time, record whether the cache was cold
 or warm and do not mix the two populations.
+
+## Pipeline manifest and prewarm
+
+`pipeline_warmup_path` and `pipeline_prewarm_limit` control the hot-pipeline manifest:
+
+- **GXM:** a null path selects `ux0:data/aurora-vita/pipeline_hot_v1.bin`.
+- **VitaGL:** a null path disables manifest persistence/prewarm.
+- `pipeline_prewarm_limit=192` limits how many hot pipelines are restored/compiled during startup.
+
+Prewarm trades startup/loading work and memory residency for fewer first-use pipeline stalls during
+gameplay. Compare cold and warm boots separately.
 
 ## Diagnostics
 

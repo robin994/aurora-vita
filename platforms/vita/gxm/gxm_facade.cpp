@@ -1,4 +1,5 @@
 #include "gxm_renderer.hpp"
+#include "../vita_log.hpp"
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_pipeline_key.hpp"
 #include "gfx/vita_texture_decode.hpp"
@@ -173,7 +174,7 @@ void PipelineCache::configure_hot_manifest(const char* path,size_t prewarmLimit)
     hot_[disk.key]=HotRecord{disk.desc,disk.hits};
   }
   std::fclose(file);
-  if(!hot_.empty())std::fprintf(stderr,"[aurora-gxm] pipeline_manifest loaded=%u prewarm_limit=%u\n",
+  if(!hot_.empty())AURORA_VITA_LOG_INFO("[aurora-gxm] pipeline_manifest loaded=%u prewarm_limit=%u\n",
       static_cast<unsigned>(hot_.size()),static_cast<unsigned>(prewarmLimit_));
 }
 size_t PipelineCache::prewarm_hot(FrameStats* stats) noexcept {
@@ -191,7 +192,7 @@ size_t PipelineCache::prewarm_hot(FrameStats* stats) noexcept {
     if(stats)++stats->pipelineHits;
   }
   highWaterEntries_=std::max(highWaterEntries_,map_.size());
-  if(warmed)std::fprintf(stderr,"[aurora-gxm] pipeline_prewarm warmed=%u resident=%u\n",
+  if(warmed)AURORA_VITA_LOG_INFO("[aurora-gxm] pipeline_prewarm warmed=%u resident=%u\n",
       static_cast<unsigned>(warmed),static_cast<unsigned>(map_.size()));
   return warmed;
 }
@@ -213,7 +214,7 @@ void PipelineCache::save_hot_manifest() noexcept {
   if(ok){std::remove(hotManifestPath_.c_str());ok=std::rename(temporary.c_str(),hotManifestPath_.c_str())==0;}
   if(!ok){std::remove(temporary.c_str());return;}
   hotDirty_=false;
-  std::fprintf(stderr,"[aurora-gxm] pipeline_manifest saved=%u\n",header.count);
+  AURORA_VITA_LOG_INFO("[aurora-gxm] pipeline_manifest saved=%u\n",header.count);
 }
 const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& desc,FrameStats* stats) noexcept {
   const auto key=pipeline_key(desc);

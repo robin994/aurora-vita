@@ -31,6 +31,13 @@ GXM uses a persistent compiled-program cache by default at
 `ux0:data/aurora-vita/program_cache`. Set
 `BackendConfig::program_binary_cache_path` to override that location.
 
+It also uses a hot-pipeline manifest by default at
+`ux0:data/aurora-vita/pipeline_hot_v1.bin`. `pipeline_prewarm_limit` defaults to 192.
+Use `pipeline_warmup_path` to override the manifest location.
+
+`gxm_scenes_per_frame` defaults to 5 and should remain above the title's measured peak native
+scene count.
+
 ## GXM experimental flags
 
 ### `AURORA_VITA_NATIVE_CMPR`
