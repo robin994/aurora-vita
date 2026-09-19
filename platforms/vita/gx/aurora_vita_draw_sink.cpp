@@ -50,6 +50,7 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   verboseGeometryDiagnostics_ = config.verboseGeometryDiagnostics;
   strictUnsupported_ = config.strictUnsupported;
   allowLitFixedVertexGpu_ = config.allowLitFixedVertexGpu;
+  staticGeometryMinVertices_ = std::max<uint32_t>(3u,config.staticGeometryMinVertices);
   diagnosticDrawLimit_ = config.diagnosticDrawLimit;
   frameDrawIndex_ = 0;
   strictFailed_ = false;
@@ -504,8 +505,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto source = translate_source_primitive(primitive);
   translatedVertexState_.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(
       aurora::gx::g_gxState.currentPnMtx,translatedVertexState_.postexMatrices.size()-1));
+  const uint32_t fixedMinVertices=stableSource?staticGeometryMinVertices_:48u;
   const bool fixedCandidate=staticGeometry_&&(!translatedLit_||allowLitFixedVertexGpu_)&&
-      vertexCount>=48&&rawIndices==nullptr&&indexCount==0&&
+      vertexCount>=fixedMinVertices&&rawIndices==nullptr&&indexCount==0&&
       source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&source!=gfx::SourcePrimitive::Points&&
       gfx::supports_fixed_vertex_gpu(pipeline,layout,translatedVertexState_);
   // The GPU vertex path copies only the state its generated shader can consume.

@@ -72,6 +72,10 @@ struct BackendConfig {
   bool gxm_lit_fixed_vertex_gpu=false;
   // Opt-in until fixed-GPU lighting/texgen matches the CPU path on hardware.
   size_t static_geometry_budget=0;
+  // Minimum vertices for immutable display-list geometry to use the native
+  // fixed-vertex GPU cache. Dynamic/untracked sources retain the conservative
+  // 48-vertex floor in DrawSink regardless of this value.
+  uint32_t static_geometry_min_vertices=48;
   const char* program_binary_cache_path=nullptr;
   const char* pipeline_warmup_path=nullptr;
   size_t pipeline_prewarm_limit=192;

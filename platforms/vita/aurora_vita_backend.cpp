@@ -291,6 +291,7 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.verboseGeometryDiagnostics=c.diagnostics;
   dc.strictUnsupported=c.strict_unsupported;
   dc.staticGeometryBudget=c.static_geometry_budget;
+  dc.staticGeometryMinVertices=c.static_geometry_min_vertices;
   dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
   dc.diagnosticDrawLimit=c.diagnostic_draw_limit;
   g_drawSink=std::make_unique<gxbridge::DrawSink>();
