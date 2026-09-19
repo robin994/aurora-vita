@@ -548,7 +548,11 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
   const auto footprint = gfx::estimate_draw_footprint(source,vertexCount,indexCount,gpuStride);
-  const bool exactTriangleDedup=source==gfx::SourcePrimitive::Triangles&&rawIndices==nullptr&&indexCount==0;
+  const bool useStreamed=!gpuGeometry&&
+      source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&
+      source!=gfx::SourcePrimitive::Points;
+  const bool exactTriangleDedup=!useStreamed&&source==gfx::SourcePrimitive::Triangles&&
+      rawIndices==nullptr&&indexCount==0;
   if(!footprint.valid){
     result.drawError=gfx::PrepareDrawError::TooManyVertices;
     if(telemetry_)telemetry_->unsupported();
@@ -603,9 +607,15 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // keep the early guard that avoids preparing a draw which cannot fit.
   if(!gpuGeometry&&!exactTriangleDedup&&!ensureArena(footprint))return result;
   auto& prepared=preparedScratch_;
-  if(!gpuGeometry)(void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
-                              pipeline,vertexState,&uniforms,expansion,telemetry_,exactTriangleDedup);
-  if (prepared.ok() && rawIndices && indexCount) {
+  gfx::StreamedDraw streamed{};
+  if(useStreamed) {
+    (void)gfx::prepare_streamed_draw_into(streamed,*arena_,rawVertices,rawBytes,vertexCount,
+        source,rawIndices,indexCount,layout,pipeline,vertexState,&uniforms,telemetry_);
+  } else if(!gpuGeometry) {
+    (void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
+                                pipeline,vertexState,&uniforms,expansion,telemetry_,exactTriangleDedup);
+  }
+  if (!useStreamed && prepared.ok() && rawIndices && indexCount) {
     prepared.indices.assign(rawIndices, rawIndices + indexCount);
     for (const uint16_t index : prepared.indices) {
       if (index >= prepared.vertices.size()) {
@@ -617,15 +627,16 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       }
     }
   }
-  if (!gpuGeometry && !prepared.ok()) {
-    result.drawError = prepared.error;
-    if (coverage_) coverage_->unsupported(static_cast<uint64_t>(prepared.error), "prepare_draw failed");
+  if (!gpuGeometry && !(useStreamed?streamed.ok():prepared.ok())) {
+    result.drawError = useStreamed?streamed.error:prepared.error;
+    if (coverage_) coverage_->unsupported(static_cast<uint64_t>(result.drawError),
+                                          useStreamed?"prepare_streamed_draw failed":"prepare_draw failed");
     if (telemetry_) telemetry_->unsupported();
     if (strictUnsupported_) strictFailed_ = true;
     return result;
   }
 
-  if(!gpuGeometry&&exactTriangleDedup){
+  if(!gpuGeometry&&!useStreamed&&exactTriangleDedup){
     gfx::DrawFootprint compactFootprint{};
     compactFootprint.vertexCount=static_cast<uint32_t>(prepared.vertices.size());
     compactFootprint.indexCount=static_cast<uint32_t>(prepared.indices.size());
@@ -636,7 +647,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
 
 #if defined(__vita__)
-  if(verboseGeometryDiagnostics_&&!gpuGeometry)log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
+  if(verboseGeometryDiagnostics_&&!gpuGeometry&&!useStreamed)
+    log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
 #endif
 
   std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
@@ -714,7 +726,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
 
   if (trace_) {
     trace_->record(translatedPipelineKey, integration::trace_hash_bytes(rawVertices, rawBytes),
-                   static_cast<uint32_t>(rawBytes), vertexCount, gpuGeometry?gpuGeometry->indexCount:static_cast<uint32_t>(prepared.indices.size()),
+                   static_cast<uint32_t>(rawBytes), vertexCount,
+                   gpuGeometry?gpuGeometry->indexCount:(useStreamed?streamed.indexCount:static_cast<uint32_t>(prepared.indices.size())),
                    primitive, fmt, result.fallbackTextureMask, static_cast<uint8_t>(result.warnings));
   }
 
@@ -723,18 +736,22 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   uint64_t resolvedPipelineKey = 0;
   if(gpuGeometry){
     resolvedPipelineKey=fixedPipelineKey;
-  }else if (queuedPipelineValid_ && translatedPipelineKey == queuedTranslatedPipelineKey_ &&
-      prepared.primitive == queuedPrimitive_ &&
-      prepared.positionIsClipSpace == queuedPositionIsClipSpace_) {
+  }else {
+    const auto preparedPrimitive=useStreamed?streamed.primitive:prepared.primitive;
+    const bool preparedClipSpace=useStreamed?streamed.positionIsClipSpace:prepared.positionIsClipSpace;
+    if (queuedPipelineValid_ && translatedPipelineKey == queuedTranslatedPipelineKey_ &&
+        preparedPrimitive == queuedPrimitive_ &&
+        preparedClipSpace == queuedPositionIsClipSpace_) {
     resolvedPipelineKey = queuedResolvedPipelineKey_;
-  } else {
-    resolvedPipelineKey = gfx::resolve_draw_pipeline(*renderer_, prepared, pipeline, telemetry_);
-    if (resolvedPipelineKey) {
-      queuedTranslatedPipelineKey_ = translatedPipelineKey;
-      queuedResolvedPipelineKey_ = resolvedPipelineKey;
-      queuedPrimitive_ = prepared.primitive;
-      queuedPositionIsClipSpace_ = prepared.positionIsClipSpace;
-      queuedPipelineValid_ = true;
+    } else {
+      resolvedPipelineKey = gfx::resolve_draw_pipeline(*renderer_,preparedPrimitive,preparedClipSpace,pipeline,telemetry_);
+      if (resolvedPipelineKey) {
+        queuedTranslatedPipelineKey_ = translatedPipelineKey;
+        queuedResolvedPipelineKey_ = resolvedPipelineKey;
+        queuedPrimitive_ = preparedPrimitive;
+        queuedPositionIsClipSpace_ = preparedClipSpace;
+        queuedPipelineValid_ = true;
+      }
     }
   }
   bool enqueued=false;
@@ -748,6 +765,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     packet.fixedVertexUniforms=&fixedVertexUniforms_.back();
     stream_.draw(packet);enqueued=true;
     queuedPipelineValid_=false;
+  }else if(useStreamed) {
+    enqueued=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
+                         translate_viewport(),translate_scissor(),bindings,&error);
   }else enqueued=gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipeline, uniforms,
                          translate_viewport(), translate_scissor(), bindings, &error, telemetry_,
                          resolvedPipelineKey);
@@ -768,6 +788,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   ++submittedDraws_;
   if (telemetry_) {
     if(gpuGeometry)telemetry_->add_draw(gpuGeometry->vertexCount,gpuGeometry->indexCount,gpuGeometry->indexCount/3);
+    else if(useStreamed)telemetry_->add_draw(streamed.vertexCount,streamed.indexCount,
+                                             streamed.indexCount?streamed.indexCount/3:streamed.vertexCount/3);
     else telemetry_->add_draw(static_cast<uint32_t>(prepared.vertices.size()), static_cast<uint32_t>(prepared.indices.size()), static_cast<uint32_t>(prepared.indices.empty() ? prepared.vertices.size() / 3 : prepared.indices.size() / 3));
   }
   result.ok = true;
