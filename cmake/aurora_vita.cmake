@@ -56,6 +56,28 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_vertex_pack_test.cpp)
     target_link_libraries(aurora_vita_vertex_pack_test PRIVATE aurora::vita_common)
     add_test(NAME vita_vertex_pack COMMAND aurora_vita_vertex_pack_test)
+    add_executable(aurora_vita_regression_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_regression_test.cpp)
+    target_link_libraries(aurora_vita_regression_test PRIVATE aurora::vita_backend)
+    add_test(NAME vita_regression COMMAND aurora_vita_regression_test)
+    add_executable(aurora_vita_command_stream_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_command_stream_test.cpp)
+    target_link_libraries(aurora_vita_command_stream_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_command_stream COMMAND aurora_vita_command_stream_test)
+    find_package(Threads REQUIRED)
+    add_executable(aurora_vita_cpu_workers_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_cpu_workers_test.cpp
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_cpu_workers.cpp)
+    target_compile_features(aurora_vita_cpu_workers_test PRIVATE cxx_std_20)
+    target_compile_definitions(aurora_vita_cpu_workers_test PRIVATE __vita__=1)
+    target_include_directories(aurora_vita_cpu_workers_test PRIVATE
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_stubs ${AURORA_VITA_SOURCE_DIR}/platforms/vita)
+    target_link_libraries(aurora_vita_cpu_workers_test PRIVATE Threads::Threads)
+    add_test(NAME vita_cpu_workers COMMAND aurora_vita_cpu_workers_test)
+    # The host shim intentionally exercises 8,000 semaphore round-trips. macOS
+    # scheduling can make that take roughly a minute even when every per-wait
+    # 3-second lost-wake guard passes, so keep CTest from pre-empting a valid run.
+    set_tests_properties(vita_cpu_workers PROPERTIES TIMEOUT 120)
     add_test(NAME vita_renderer_selection
         COMMAND ${CMAKE_COMMAND}
             -DSELECTION_MODULE=${CMAKE_CURRENT_LIST_DIR}/AuroraVitaRendererSelection.cmake

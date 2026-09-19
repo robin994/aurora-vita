@@ -23,7 +23,9 @@ StreamingArena::~StreamingArena() { shutdown(); }
 size_t StreamingArena::align_up(size_t value, size_t alignment) noexcept {
   if (alignment <= 1) return value;
   const size_t remainder = value % alignment;
-  return remainder ? value + (alignment - remainder) : value;
+  const size_t padding=remainder?alignment-remainder:0;
+  if(padding>std::numeric_limits<size_t>::max()-value)return std::numeric_limits<size_t>::max();
+  return value+padding;
 }
 
 bool StreamingArena::initialize() noexcept {
@@ -254,8 +256,10 @@ bool StreamingArena::can_reserve(size_t vertexBytes,size_t vertexAlignment,size_
   const auto&slot=slots_[current_];
   const size_t va=align_up(slot.voff,vertexAlignment?vertexAlignment:cfg_.alignment);
   const size_t ia=align_up(slot.ioff,indexAlignment?indexAlignment:cfg_.alignment);
-  return va<=cfg_.vertexBytes&&vertexBytes<=cfg_.vertexBytes-va&&
-         ia<=cfg_.indexBytes&&indexBytes<=cfg_.indexBytes-ia;
+  if(va>cfg_.vertexBytes||vertexBytes>cfg_.vertexBytes-va||
+     ia>cfg_.indexBytes||indexBytes>cfg_.indexBytes-ia)return false;
+  return (!vertexBytes||align_up(va+vertexBytes,cfg_.alignment)<=cfg_.vertexBytes)&&
+         (!indexBytes||align_up(ia+indexBytes,cfg_.alignment)<=cfg_.indexBytes);
 }
 bool StreamingArena::recycle_current() noexcept {
   if(!initialized_||slots_.empty())return false;

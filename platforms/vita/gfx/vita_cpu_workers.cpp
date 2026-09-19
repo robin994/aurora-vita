@@ -15,15 +15,11 @@ namespace aurora::vita::gfx {
 namespace {
 constexpr uint32_t MaxWorkers = 2;
 constexpr size_t WorkerStackBytes = 128u * 1024u;
-constexpr uint32_t WorkerSpinIters = 2048;
-constexpr uint32_t CompletionSpinIters = 1024;
 
 struct CpuWorkerState {
   struct Lane {
     SceUID thread = -1, wake = -1, done = -1;
     std::atomic<bool> stop{false};
-    std::atomic<bool> sleeping{false};
-    std::atomic<bool> doneWaiter{false};
     std::atomic<unsigned> state{0}; // release/acquire publication: idle, ready, done
     CpuRangeTask task = nullptr;
     void *context = nullptr;
@@ -42,31 +38,13 @@ int cpu_worker_main(SceSize, void* opaque) {
   const uint32_t index = *static_cast<const uint32_t*>(opaque);
   auto &lane = g_workers.lanes[index];
   for (;;) {
-    for(uint32_t spin=0;spin<WorkerSpinIters;++spin) {
-      if(lane.stop.load(std::memory_order_acquire) ||
-         lane.state.load(std::memory_order_acquire)==1) break;
-#if defined(__arm__)
-      __asm__ volatile("yield");
-#else
-      std::atomic_signal_fence(std::memory_order_seq_cst);
-#endif
-    }
+    const int wait=sceKernelWaitSema(lane.wake,1,nullptr);
     if (lane.stop.load(std::memory_order_acquire)) return 0;
-    if (lane.state.load(std::memory_order_acquire) != 1) {
-      lane.sleeping.store(true,std::memory_order_release);
-      if(lane.state.load(std::memory_order_acquire)!=1 &&
-         !lane.stop.load(std::memory_order_acquire)) {
-        const int wait=sceKernelWaitSema(lane.wake,1,nullptr);
-        if(wait<0){lane.sleeping.store(false,std::memory_order_release);sceKernelDelayThread(100);continue;}
-      }
-      lane.sleeping.store(false,std::memory_order_release);
-      if(lane.stop.load(std::memory_order_acquire))return 0;
-      if(lane.state.load(std::memory_order_acquire)!=1)continue;
-    }
+    if(wait<0){sceKernelDelayThread(100);continue;}
+    if(lane.state.load(std::memory_order_acquire)!=1)continue;
     lane.result = lane.task && lane.task(lane.context, lane.begin, lane.end, index + 1);
     lane.state.store(2, std::memory_order_release);
-    if(lane.doneWaiter.exchange(false,std::memory_order_acq_rel))
-      sceKernelSignalSema(lane.done, 1);
+    sceKernelSignalSema(lane.done,1);
   }
 }
 
@@ -88,7 +66,7 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
   const uint32_t requested = std::min(workerThreads, MaxWorkers);
   for (uint32_t i = 0; i < requested; ++i) {
     auto &lane=g_workers.lanes[i];
-    lane.stop.store(false);lane.sleeping.store(false);lane.doneWaiter.store(false);lane.state.store(0);
+    lane.stop.store(false);lane.state.store(0);
     lane.wake=sceKernelCreateSema("aurora_cpu_wake",0,0,1,nullptr);
     lane.done=sceKernelCreateSema("aurora_cpu_done",0,0,1,nullptr);
     if(lane.wake<0 || lane.done<0) {destroy_lane(lane);break;}
@@ -104,7 +82,7 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
 
   g_workers.initialized = true;
   std::fprintf(stderr,
-               "[aurora-vita] cpu workers=%u lanes=%u sync=spin_then_semaphore cores=1,2 parallel_min_items=%llu\n",
+               "[aurora-vita] cpu workers=%u lanes=%u sync=paired_semaphores cores=1,2 parallel_min_items=%llu\n",
                g_workers.workerCount, g_workers.workerCount + 1,
                static_cast<unsigned long long>(g_workers.minItems));
   return true;
@@ -114,12 +92,12 @@ void shutdown_cpu_workers() noexcept {
   if (!g_workers.initialized) return;
   // The single producer calls shutdown only outside cpu_parallel_for, so no
   // callback can still own a caller's capture/staging data at this boundary.
-  for (uint32_t i = 0; i < g_workers.workerCount; ++i) {
+  for (uint32_t i = 0; i < g_workers.workerCount && i < MaxWorkers; ++i) {
     auto &lane=g_workers.lanes[i];
     lane.stop.store(true,std::memory_order_release);
     sceKernelSignalSema(lane.wake,1);
   }
-  for (uint32_t i = 0; i < g_workers.workerCount; ++i) {
+  for (uint32_t i = 0; i < g_workers.workerCount && i < MaxWorkers; ++i) {
     auto &lane=g_workers.lanes[i];
     sceKernelWaitThreadEnd(lane.thread,nullptr,nullptr);
     destroy_lane(lane);
@@ -161,9 +139,7 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
     lane.task=task;lane.context=context;lane.begin=begin;lane.end=end;
     lane.result=false;
     lane.state.store(1,std::memory_order_release);
-    dispatched[i]=true;
-    if(lane.sleeping.load(std::memory_order_acquire))
-      dispatched[i]=sceKernelSignalSema(lane.wake,1)>=0;
+    dispatched[i]=sceKernelSignalSema(lane.wake,1)>=0;
     if(!dispatched[i]) workersResult=false;
   }
 
@@ -171,21 +147,11 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
 
   for (uint32_t i = 0; i < activeWorkers; ++i) if(dispatched[i]) {
     auto &lane=g_workers.lanes[i];
-    for(uint32_t spin=0;spin<CompletionSpinIters&&
-        lane.state.load(std::memory_order_acquire)!=2;++spin) {
-#if defined(__arm__)
-      __asm__ volatile("yield");
-#else
-      std::atomic_signal_fence(std::memory_order_seq_cst);
-#endif
-    }
-    if(lane.state.load(std::memory_order_acquire)!=2) {
-      lane.doneWaiter.store(true,std::memory_order_release);
-      if(lane.state.load(std::memory_order_acquire)!=2)
-        while(sceKernelWaitSema(lane.done,1,nullptr)<0) sceKernelDelayThread(100);
-      else
-        lane.doneWaiter.store(false,std::memory_order_release);
-    }
+    // Consume exactly one acknowledgement for every published job, even if
+    // state already says done. Conditional signalling can leave a stale token
+    // that lets the producer reuse a later job's context while it is running.
+    // Separate sleeping/state flags also permit a lost wake on ARM.
+    while(sceKernelWaitSema(lane.done,1,nullptr)<0)sceKernelDelayThread(100);
     const bool completed=lane.state.load(std::memory_order_acquire)==2;
     workersResult=workersResult && completed && lane.result;
     lane.task=nullptr;lane.context=nullptr;

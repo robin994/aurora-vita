@@ -14,6 +14,15 @@ implementation as `aurora::vita_backend`. This is source/build-time
 interchangeability, not a runtime hot switch or identical coverage of every GX
 feature. The earlier standalone milestone is archived in `BRINGUP_NOTES.md`.
 
+The [2026-09-19 regression audit](../REGRESSION_AUDIT_2026-09-19.md) supersedes
+the implementation claims in the earlier performance proposal. Native GXM now
+preserves exact fragment scissoring, uses paired worker semaphores, and defaults
+to display-sized CPU geometry. Reduced resolution, fixed GPU geometry, D16 and
+native packed texture uploads require explicit opt-in and hardware comparison.
+The GX probe additionally compares 24 cropped EFB copy/flip/alpha cases with the
+CPU reference. Building that probe does not establish that those cases pass on
+the device.
+
 ## One frontend, separate hardware ownership
 
 `cmake/aurora_vita_frontend.cmake` owns the frontend source list for both backends:

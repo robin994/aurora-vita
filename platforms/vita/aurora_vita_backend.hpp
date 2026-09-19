@@ -18,9 +18,9 @@ enum class InitFailure : uint8_t {
 };
 struct BackendConfig {
   uint32_t width=960,height=544;
-  // GX raster extent, independent from the 960x544 Vita scanout. The default
-  // matches the common GameCube visible EFB and is upscaled by GXCopyDisp.
-  uint32_t render_width=640,render_height=448;
+  // Zero follows the display extent, preserving the validated raster scale.
+  // Reduced resolution is opt-in and must be checked with GXCopyTex shadows.
+  uint32_t render_width=0,render_height=0;
   // Aurora never uses vitaGL immediate mode, so reserving a large legacy pool
   // only steals memory from textures, EFBs and the Wii guest runtime.
   uint32_t vgl_legacy_pool_size=0;
@@ -59,8 +59,8 @@ struct BackendConfig {
   // Native GXM only. D16 halves depth bandwidth and tile backing size, but GX
   // exposes 24-bit Z so titles with tight depth ranges may prefer DF32.
   bool gxm_d16_depth=false;
-  // Fixed-PN geometry is verified before reuse; keep an explicit zero opt-out.
-  size_t static_geometry_budget=8*1024*1024;
+  // Opt-in until fixed-GPU lighting/texgen matches the CPU path on hardware.
+  size_t static_geometry_budget=0;
   const char* program_binary_cache_path=nullptr;
   // Diagnostic only: submit at most this many GX draw packets per frame. Zero
   // disables the limit. Useful for framebuffer bisection of rendering faults.

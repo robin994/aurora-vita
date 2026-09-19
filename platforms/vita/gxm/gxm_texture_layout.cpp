@@ -5,7 +5,7 @@
 namespace aurora::vita::gxm {
 LinearTextureData prepare_swizzled_texture(const gfx::TextureDesc& desc) {
   LinearTextureData out;
-  if (!desc.width || !desc.height || desc.width > 4096 || desc.height > 4096 ||
+  if (!desc.data || !desc.width || !desc.height || desc.width > 4096 || desc.height > 4096 ||
       (desc.width & (desc.width-1u)) || (desc.height & (desc.height-1u))) {
     out.error="swizzled upload requires power-of-two dimensions";
     return out;
@@ -46,7 +46,7 @@ LinearTextureData prepare_swizzled_texture(const gfx::TextureDesc& desc) {
     if(level<explicitLevels) {
       auto mip=desc;mip.width=width;mip.height=height;mip.mipCount=1;mip.generateMipmaps=false;
       const size_t encoded=gfx::encoded_texture_size(width,height,mip.format);
-      if(desc.dataSize&&(inputOffset>desc.dataSize||encoded>desc.dataSize-inputOffset)){
+      if(inputOffset>desc.dataSize||encoded>desc.dataSize-inputOffset){
         out.error="truncated swizzled GX mip chain";out.pixels.clear();return out;
       }
       mip.data=static_cast<const uint8_t*>(desc.data)+inputOffset;mip.dataSize=encoded;

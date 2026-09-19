@@ -61,22 +61,6 @@ public:
                        make_key(raw,bytes,count,primitive,layout,gpuLayout);
     }
     auto it=entries_.find(key);
-#if defined(__vita__)
-    // Perfect Dark hit a VitaSDK/libstdc++ unordered_map lookup regression for
-    // aggregate keys. Aurora uses a scalar pre-hashed key, but audit misses
-    // defensively: a linear equality scan only runs on cache misses, where the
-    // alternative is much more expensive decode/upload work anyway.
-    if(it==entries_.end()&&!entries_.empty()) {
-      for(auto probe=entries_.begin();probe!=entries_.end();++probe) {
-        if(probe->first!=key)continue;
-        it=probe;
-        ++lookupFallbacks_;
-        if(lookupFallbacks_==1)
-          std::fprintf(stderr,"[aurora-vita] geometry cache unordered lookup fallback activated\n");
-        break;
-      }
-    }
-#endif
     if(it!=entries_.end()) {
       ScopedTelemetryPhase phase(detailed,TelemetryPhase::GeometryValidate);
       auto& e=*it->second;

@@ -210,12 +210,15 @@ NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
   NativeTextureUpload out;
   if(desc.mipCount>1||desc.generateMipmaps)return out;
   if(desc.format==TextureFormat::CMPR) {
+#if AURORA_VITA_NATIVE_CMPR
     if(!transcode_cmpr_to_dxt1(desc,out.pixels))return out;
     out.format=SCE_GXM_TEXTURE_FORMAT_UBC1_ABGR;
     out.stride=desc.width;
     out.valid=true;
+#endif
     return out;
   }
+#if AURORA_VITA_NATIVE_GX_TEXTURES
   NativeTextureFormat native=NativeTextureFormat::None;
   std::vector<uint8_t> tight;
   if(!transcode_texture_native(desc,native,tight))return out;
@@ -242,6 +245,7 @@ NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
     out.stride=stride;
   }
   out.valid=true;
+#endif
   return out;
 }
 } // namespace
@@ -357,19 +361,14 @@ struct Renderer::Impl {
 
   uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
   uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
-  bool end_scene(bool preserveDepth=true) {
+  bool end_scene() {
     if (!inScene) return true;
-    auto* ds=&depthSurface;
-    if(boundTarget) {
-      auto& t=*textures.at(boundTarget);
-      ds=t.depth.data()?&t.depthSurface:nullptr;
-    }
-    if(ds) sceGxmDepthStencilSurfaceSetForceStoreMode(ds,preserveDepth?
-        SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED:SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
     const int result = sceGxmEndScene(context, nullptr, nullptr);
     inScene = false;
-    if (boundTarget) textures.at(boundTarget)->depthValid = preserveDepth;
-    else depthValid = preserveDepth;
+    // Store/load policy is specified before BeginScene. The next frame may
+    // continue an offscreen target; EndFrame alone does not retire its depth.
+    if (boundTarget) textures.at(boundTarget)->depthValid = result>=0;
+    else depthValid = result>=0;
     return check(result, "end native scene");
   }
   bool ensure_scene() {
@@ -600,7 +599,8 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   auto& d = *impl_;
   if (!d.initialized) { d.fail("create pipeline before initialization"); return 0; }
   PipelineDesc nativeDesc=desc;
-  nativeDesc.fragmentScissor=false;
+  // Region clipping is tile-granular. Keep the requested fragment scissor for
+  // exact GX edges; it may only be omitted by full-target internal passes.
   const uint64_t key = pipeline_key(nativeDesc);
   if (d.pipelines.find(key) != d.pipelines.end()) { ++d.stats.pipelineHits; return key; }
   if (d.pipelines.size() >= d.config.maxPipelines) { d.fail("native pipeline budget exhausted"); return 0; }
@@ -786,6 +786,7 @@ bool Renderer::begin_frame() {
   if (displayError < 0) return d.fail("display callback failed", displayError);
   d.stats = {}; d.frameStarted = sceKernelGetProcessTimeWide();
   d.profileDraws = (++d.profileFrame % 120u) == 60u;
+  d.stats.nativeTimingsSampled=d.profileDraws;
   d.frameActive = true; d.boundTarget = 0;
   return true;
 }
@@ -928,6 +929,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   }
   std::array<uint16_t,MaxTextures> textureFlags{};
   std::array<std::array<float,4>,MaxTextures> textureTransform{};
+  for(auto& transform:textureTransform)transform={1.f,1.f,0.f,0.f};
   for(unsigned i=0;i<usedTextureCount;++i)if(textures) {
     const auto& binding=(*textures)[i];
     textureFlags[i]=static_cast<uint16_t>((binding.flipX?1u:0u)|
@@ -1038,6 +1040,10 @@ bool Renderer::draw(const DrawPacket& packet) {
   }
 #endif
   if (pipeline.cull == CullMode::All || packet.scissor.width <= 0 || packet.scissor.height <= 0) return true;
+  if(!pipeline.fragmentScissor&&(packet.scissor.x>0||packet.scissor.y>0||
+      int64_t(packet.scissor.x)+packet.scissor.width<d.width()||
+      int64_t(packet.scissor.y)+packet.scissor.height<d.height()))
+    return d.fail("full-target pipeline requires a full-target scissor");
   uint64_t profileTick = d.profileDraws ? sceKernelGetProcessTimeWide() : 0;
   d.resolvedPipelineHint=pi->second.get();d.resolvedPipelineHintKey=packet.pipelineKey;
   const bool pipelineBound=bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures);
@@ -1091,7 +1097,7 @@ bool Renderer::end_frame(bool present) {
   auto& d = *impl_;
   if (!d.frameActive) return d.fail("end_frame outside a frame");
   const uint64_t timingStart=sceKernelGetProcessTimeWide();
-  if (!d.end_scene(false)) return false;
+  if (!d.end_scene()) return false;
   const uint64_t afterEnd=sceKernelGetProcessTimeWide();
   d.frameActive = false;
   auto& surface = d.surfaces[d.back];
@@ -1492,6 +1498,7 @@ bool Renderer::copy_display_region(const Scissor& source) {
   if(d.stride!=expectedStride) return d.fail("display surface stride cannot be sampled linearly");
   if(!d.check(sceGxmTextureInitLinear(&alias->descriptor,d.surfaces[sourceBuffer].memory.data(),
       SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,d.config.width,d.config.height,0),"initialize display source texture")) return false;
+  alias->descriptorSamplerValid=false;
 
   d.back=destination;
   d.pendingVertexDependency=d.surfaces[sourceBuffer].sync;

@@ -7,6 +7,8 @@ endif ()
 if (AURORA_VITA_BUILD_SDL3_PROBE)
     message(FATAL_ERROR "The SDL3/vitaGL probe cannot be linked into the GXM-only target")
 endif ()
+option(AURORA_VITA_NATIVE_CMPR "Experimental GXM CMPR/BC1 uploads; requires hardware image comparison" OFF)
+option(AURORA_VITA_NATIVE_GX_TEXTURES "Experimental GXM I/I+A/RGB565 uploads; requires hardware image comparison" OFF)
 add_library(aurora_vita_gxm_backend STATIC
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_memory.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_program_cache.cpp
@@ -19,9 +21,12 @@ add_library(aurora::vita_gxm_backend ALIAS aurora_vita_gxm_backend)
 target_compile_features(aurora_vita_gxm_backend PUBLIC cxx_std_20)
 target_compile_definitions(aurora_vita_gxm_backend PUBLIC AURORA_VITA_RENDERER_GXM=1)
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE AURORA_VITA_DIRECT_STREAM_WRITE=0)
+target_compile_definitions(aurora_vita_gxm_backend PRIVATE
+    AURORA_VITA_NATIVE_CMPR=$<BOOL:${AURORA_VITA_NATIVE_CMPR}>
+    AURORA_VITA_NATIVE_GX_TEXTURES=$<BOOL:${AURORA_VITA_NATIVE_GX_TEXTURES}>)
 target_compile_options(aurora_vita_gxm_backend PRIVATE
     -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
-    -mcpu=cortex-a9 -mfpu=neon-vfpv3 -mfloat-abi=hard -fsigned-char
+    -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard -fsigned-char
     -fno-math-errno -funsafe-math-optimizations -fno-signed-zeros -ffp-contract=fast)
 if (AURORA_VITA_LTO)
     target_compile_options(aurora_vita_gxm_backend PRIVATE -flto=auto -ffat-lto-objects)

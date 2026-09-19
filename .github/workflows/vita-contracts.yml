@@ -1,0 +1,32 @@
+name: Vita CPU contracts
+
+on:
+  push:
+    branches: [vita-experiment]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        sanitize: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure host contracts
+        if: ${{ !matrix.sanitize }}
+        run: cmake --preset vita-host-tests
+      - name: Configure AddressSanitizer and UndefinedBehaviorSanitizer
+        if: ${{ matrix.sanitize }}
+        run: >-
+          cmake --preset vita-host-tests
+          -DCMAKE_BUILD_TYPE=Debug
+          '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer'
+          '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer'
+          '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
+      - run: cmake --build --preset vita-host-tests --parallel 2
+      - run: ctest --preset vita-host-tests

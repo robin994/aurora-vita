@@ -89,18 +89,20 @@ void emit_periodic_diagnostics() noexcept {
   const auto& rs=g_renderer->stats();
   char rendererLine[512];
   std::snprintf(rendererLine,sizeof(rendererLine),
-      "[AURORA-VITA][RENDERER] display=%ux%u internal=%ux%u scenes=%u "
+      "[AURORA-VITA][RENDERER] frame=%llu display=%ux%u internal=%ux%u scenes=%u sampled=%u "
       "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu "
-      "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u d16=%u gpu_geometry=%u",
+      "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u d16=%u gpu_geometry=%u split_vertex_phases=%u",
+      static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
       g_config.render_width?g_config.render_width:g_config.width,
       g_config.render_height?g_config.render_height:g_config.height,
-      rs.nativeSceneCount,
+      rs.nativeSceneCount,rs.nativeTimingsSampled?1u:0u,
       static_cast<unsigned long long>(rs.nativePipelineUs),
       static_cast<unsigned long long>(rs.nativeTextureUs),
       static_cast<unsigned long long>(rs.nativeDrawUs),
       rs.nativeVertexUniformReuses,rs.nativeFragmentUniformReuses,rs.nativeEfbCopies,
-      g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u);
+      g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u,
+      g_config.profile_split_vertex_phases?1u:0u);
   std::printf("%s\n%s\n%s\n", frameLine.c_str(), rendererLine, memLine.c_str());
   if (g_config.telemetry_log_path) {
     ensure_parent_dir(g_config.telemetry_log_path);

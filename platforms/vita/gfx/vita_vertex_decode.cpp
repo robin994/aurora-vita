@@ -181,7 +181,7 @@ bool decode_vertex_ops(const uint8_t* stream,size_t streamSize,uint32_t vi,const
       if(!color(p,avail,op.component,le,dstBase+op.dstOffset))return false;
       continue;
     }
-    if(avail<op.valueBytes)return false;
+    if(op.components==0||op.components>4||avail<op.valueBytes)return false;
     float tmp[4]{};
     for(unsigned i=0;i<op.components;++i) {
       switch(op.component) {
@@ -199,7 +199,9 @@ bool decode_vertex_ops(const uint8_t* stream,size_t streamSize,uint32_t vi,const
       dstBase[op.dstOffset]=static_cast<uint8_t>(tmp[0]);
     } else {
       auto* dst=reinterpret_cast<float*>(dstBase+op.dstOffset);
-      for(unsigned i=0;i<op.components;++i)dst[i]=tmp[i];
+      // GX numeric vectors store XYZ/STQ; a fourth input component must not
+      // overwrite W, the next normal, color bytes, or a matrix selector.
+      for(unsigned i=0;i<std::min<unsigned>(3,op.components);++i)dst[i]=tmp[i];
       if(op.fillThirdOne&&op.components<3)dst[2]=1.f;
     }
   }
@@ -245,7 +247,7 @@ VertexLayout canonical_vertex_layout() noexcept {
 }
 void compile_vertex_decode_layout(VertexDecodeLayout& layout) noexcept {
   layout.opCount=0;
-  for(unsigned i=0;i<layout.count&&layout.opCount<layout.ops.size();++i) {
+  for(unsigned i=0;i<layout.count&&i<layout.attributes.size();++i) {
     const auto& a=layout.attributes[i];
     if(a.source==VertexSource::None)continue;
     auto& op=layout.ops[layout.opCount++];
@@ -322,7 +324,8 @@ bool deduplicate_vertex_records(const uint8_t* stream,size_t streamSize,uint32_t
 bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,
                         const VertexDecodeLayout& layout, CanonicalVertex& vertex,
                         VertexSemanticMask requiredSemantics) noexcept {
-  if (!stream || !layout.streamStride || layout.count > layout.attributes.size()) return false;
+  if (!stream || !layout.streamStride || layout.count > layout.attributes.size() ||
+      layout.opCount > layout.ops.size()) return false;
   if (size_t(vertexIndex) * layout.streamStride >= streamSize) return false;
   return layout.opCount?decode_vertex_ops(stream,streamSize,vertexIndex,layout,vertex,requiredSemantics):
                         decode_vertex(stream, streamSize, vertexIndex, layout, vertex, requiredSemantics);

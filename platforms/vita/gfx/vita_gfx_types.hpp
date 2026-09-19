@@ -502,6 +502,7 @@ struct FrameStats {
   uint32_t stateChanges = 0;
   uint64_t cpuFrameUs = 0;
   // Sampled native CPU timings (zero on unsampled frames and other backends).
+  bool nativeTimingsSampled = false;
   uint64_t nativePipelineUs = 0;
   uint64_t nativeTextureUs = 0;
   uint64_t nativeDrawUs = 0;

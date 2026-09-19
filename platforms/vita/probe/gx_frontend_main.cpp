@@ -1,5 +1,6 @@
 #include "aurora_vita_backend.hpp"
 #include "gfx/vita_fixed_vertex.hpp"
+#include "gfx/vita_efb_copy.hpp"
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gx/aurora_vita_draw_sink.hpp"
@@ -105,6 +106,37 @@ bool efb_contract() {
           unsigned(p/4),c,pixels[p+c]);return false;
     }
   r.efb().destroy(nativeCopy);r.efb().destroy(copy);r.efb().destroy(target);
+  return !r.failed();
+}
+bool cropped_efb_orientation_probe() {
+  auto& r=renderer();
+  constexpr uint32_t side=16;
+  std::array<uint8_t,side*side*4> rgba{};
+  for(unsigned y=0;y<side;++y)for(unsigned x=0;x<side;++x) {
+    auto* p=rgba.data()+(y*side+x)*4;
+    p[0]=x<8?255:0;p[1]=y<8?255:0;p[2]=(x<8)==(y<8)?255:0;
+    p[3]=x<8?64:192;
+  }
+  const auto source=r.upload_efb_rgba(0,side,side,rgba.data());
+  if(!source||!begin_frame()||!r.bind_efb(source))return false;
+  const gfx::Scissor crop{2,4,12,8};
+  unsigned cases=0;
+  for(auto format:{gfx::EfbCopyFormat::Passthrough,gfx::EfbCopyFormat::RGB565,gfx::EfbCopyFormat::A8})
+    for(unsigned divisor:{1u,2u})for(bool flipX:{false,true})for(bool flipY:{false,true}) {
+      const uint32_t w=crop.width/divisor,h=crop.height/divisor;
+      std::vector<uint8_t> expected,actual;
+      if(!gfx::copy_efb_rgba8(rgba.data(),side,side,crop,w,h,format,flipX,!flipY,expected))return false;
+      const auto copied=r.capture_current(0,crop,w,h,format,flipX,flipY);
+      if(!copied||!r.efb().read_rgba(copied,actual)||actual.size()!=expected.size())return false;
+      for(size_t i=0;i<actual.size();++i)if(std::abs(int(actual[i])-int(expected[i]))>3) {
+        std::fprintf(stderr,"[gx-contract] cropped EFB mismatch fmt=%u scale=%u flip=%u%u byte=%u actual=%u expected=%u\n",
+            unsigned(format),divisor,unsigned(flipX),unsigned(flipY),unsigned(i),actual[i],expected[i]);
+        return false;
+      }
+      r.efb().destroy(copied);++cases;
+    }
+  r.bind_default();end_frame();r.efb().destroy(source);
+  std::fprintf(stderr,"[gx-contract] cropped EFB orientation/alpha PASS cases=%u\n",cases);
   return !r.failed();
 }
 bool display_blit_orientation_probe() {
@@ -264,7 +296,7 @@ int run() {
   char path[160];
   std::snprintf(path,sizeof(path),"ux0:data/aurora-vita/gx_frontend_%s.log",AURORA_TEST_RENDERER);
   if(std::freopen(path,"w",stderr))std::setvbuf(stderr,nullptr,_IONBF,0);
-  std::fprintf(stderr,"[gx-contract] renderer=%s shared_frontend=1\n",AURORA_TEST_RENDERER);
+  std::fprintf(stderr,"[gx-contract] build=regression-20260919 renderer=%s shared_frontend=1\n",AURORA_TEST_RENDERER);
   BackendConfig config{};
   config.stream_vertex_bytes=512;config.stream_index_bytes=128;config.stream_slots=2;
   config.texture_cache_budget=4*1024*1024;
@@ -284,6 +316,11 @@ int run() {
     std::fprintf(stderr,"[gx-contract] EFB FAILED %s\n",renderer().last_error());shutdown();return 2;
   }
   std::fprintf(stderr,"[gx-contract] EFB clear_masks/copy/resize/R8/sample PASS\n");
+#if defined(AURORA_VITA_RENDERER_GXM)
+  if(!cropped_efb_orientation_probe()) {
+    std::fprintf(stderr,"[gx-contract] cropped EFB FAILED %s\n",renderer().last_error());shutdown();return 12;
+  }
+#endif
   if(!display_blit_orientation_probe()) {
     std::fprintf(stderr,"[gx-contract] display blit FAILED %s\n",renderer().last_error());shutdown();return 10;
   }

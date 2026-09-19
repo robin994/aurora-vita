@@ -1,12 +1,19 @@
 # Audit performance — Aurora Vita (backend GXM + vitaGL)
 
+> **Rettifica 2026-09-19:** questo documento conserva la proposta originaria.
+> Lo stato corrente e le verifiche sono in [REGRESSION_AUDIT_2026-09-19.md](REGRESSION_AUDIT_2026-09-19.md).
+> In particolare region clip non sostituisce lo scissor pixel, lo spin/sleep dei
+> worker e' stato corretto, e geometria GPU/risoluzione ridotta/texture native non
+> sono piu' abilitate implicitamente nel profilo GXM. Le stime sotto non sono
+> risultati della patch e non devono essere usate per decidere i default.
+
 > Documento di analisi statica del codice, non di misura. Nessun numero di questo
 > documento è stato verificato su hardware. Le stime di guadagno sono ragionamenti
 > sull'architettura di SGX543MP4+ e della Vita, non risultati. Vale la stessa regola
 > di `PERFORMANCE_LAB.md`: una build che compila e un overlay a 60 FPS non sono prove
 > di 60 FPS sostenuti in gameplay.
 
-## Stato implementazione
+## Stato implementazione storico, precedente alle correzioni del 19 settembre
 
 Il piano operativo e' stato integrato nel branch Vita. In particolare:
 

@@ -279,8 +279,11 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const auto mapped = aurora::gx::map_logical_scissor(g.texCopySrc);
   src = gfx::Scissor{mapped.x,mapped.y,mapped.width,mapped.height};
   const auto logicalFb = aurora::gx::logical_fb_size();
-  const float sx = logicalFb.x ? static_cast<float>(renderer_->target_width()) / static_cast<float>(logicalFb.x) : 1.f;
-  const float sy = logicalFb.y ? static_cast<float>(renderer_->target_height()) / static_cast<float>(logicalFb.y) : 1.f;
+  // Use the same raster extent as map_logical_scissor, not the scanout backing
+  // size. Otherwise reduced-resolution shadows copy/stretch unrelated pixels.
+  const auto renderSize = aurora::gfx::get_render_target_size();
+  const float sx = logicalFb.x ? static_cast<float>(renderSize.x) / static_cast<float>(logicalFb.x) : 1.f;
+  const float sy = logicalFb.y ? static_cast<float>(renderSize.y) / static_cast<float>(logicalFb.y) : 1.f;
   const uint32_t dstW = std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(static_cast<float>(g.texCopyDstWidth) * sx)));
   const uint32_t dstH = std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(static_cast<float>(g.texCopyDstHeight) * sy)));
   // map_logical_scissor deliberately expands the far edge with ceil() so a
@@ -548,11 +551,18 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(gpuGeometry&&telemetry_)telemetry_->gpu_geometry(staticGeometry_->hits()!=before,gpuGeometry->vertexCount);
     }
   }
+  if(!gpuGeometry&&translatedVertexStateLightweight_) {
+    // A shader/cache miss or a full geometry budget can reject a GPU candidate.
+    // The CPU fallback needs its complete matrices, lights and texgen state.
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
+    translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
+    translatedVertexStateLightweight_=false;
+  }
   const auto expansion = translate_primitive_expansion(translate_line_mode(primitive));
   const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
   const auto footprint = gfx::estimate_draw_footprint(source,vertexCount,indexCount,gpuStride);
-  const bool useStreamed=!gpuGeometry&&
+  const bool useStreamed=!gpuGeometry&&!(telemetry_&&telemetry_->split_vertex_phases())&&
       source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&
       source!=gfx::SourcePrimitive::Points;
   const bool exactTriangleDedup=!useStreamed&&source==gfx::SourcePrimitive::Triangles&&
