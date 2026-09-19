@@ -41,9 +41,28 @@ struct VertexDecodeAttribute {
   VertexArrayView array{};
 };
 
+enum class VertexDecodeStore : uint8_t { Float, PnMatrixIndex, TexMatrixIndex, Color };
+struct VertexDecodeOp {
+  VertexSource source = VertexSource::None;
+  VertexComponent component = VertexComponent::F32;
+  VertexDecodeStore store = VertexDecodeStore::Float;
+  VertexSemantic semantic = VertexSemantic::Position;
+  uint8_t components = 0;
+  uint8_t valueBytes = 0;
+  uint8_t indexBytes = 0;
+  bool fillThirdOne = false;
+  uint16_t streamOffset = 0;
+  uint16_t valueOffset = 0;
+  uint16_t dstOffset = 0;
+  float scale = 1.f;
+  VertexArrayView array{};
+};
+
 struct VertexDecodeLayout {
   std::array<VertexDecodeAttribute, 24> attributes{};
+  std::array<VertexDecodeOp, 24> ops{};
   uint8_t count = 0;
+  uint8_t opCount = 0;
   uint16_t streamStride = 0;
   bool streamLittleEndian = false;
 };
@@ -88,6 +107,7 @@ VertexLayout gpu_vertex_layout(uint8_t texcoordMask=0xff,uint8_t colorMask=0x03)
 bool deduplicate_vertex_records(const uint8_t* stream,size_t streamSize,uint32_t vertexCount,uint16_t streamStride,
                                 std::vector<uint8_t>& compact,std::vector<uint16_t>& remap,
                                 std::vector<uint32_t>& table) noexcept;
+void compile_vertex_decode_layout(VertexDecodeLayout& layout) noexcept;
 // Decode one GX FIFO vertex into the canonical CPU representation. Exposed so
 // the Vita draw adapter can fuse decode + transform into a single worker pass.
 bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t vertexIndex,

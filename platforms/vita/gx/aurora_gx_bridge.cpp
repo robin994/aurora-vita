@@ -338,6 +338,7 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
     const auto attr = static_cast<GXAttr>(GX_VA_TEX0 + i);
     add(attr, tex_semantic(i), c.attrs[attr], std::min<uint8_t>(c.attrs[attr].cnt, 2));
   }
+  gfx::compile_vertex_decode_layout(out);
   return out;
 }
 

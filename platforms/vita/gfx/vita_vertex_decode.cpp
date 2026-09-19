@@ -18,6 +18,35 @@ uint8_t ex6(uint32_t v) noexcept { return static_cast<uint8_t>((v<<2)|(v>>4)); }
 size_t component_bytes(VertexComponent c, uint8_t n) noexcept {
   switch(c){case VertexComponent::U8:case VertexComponent::S8:return n;case VertexComponent::U16:case VertexComponent::S16:return size_t(n)*2;case VertexComponent::F32:return size_t(n)*4;case VertexComponent::RGB565:case VertexComponent::RGBA4:return 2;case VertexComponent::RGB8:return 3;case VertexComponent::RGBX8:case VertexComponent::RGBA8:return 4;case VertexComponent::RGBA6:return 3;}return 0;
 }
+uint16_t semantic_offset(VertexSemantic semantic) noexcept {
+  switch(semantic) {
+  case VertexSemantic::PnMatrixIndex:return offsetof(CanonicalVertex,pnMatrixIndex);
+  case VertexSemantic::TexMatrixIndex0: case VertexSemantic::TexMatrixIndex1:
+  case VertexSemantic::TexMatrixIndex2: case VertexSemantic::TexMatrixIndex3:
+  case VertexSemantic::TexMatrixIndex4: case VertexSemantic::TexMatrixIndex5:
+  case VertexSemantic::TexMatrixIndex6: case VertexSemantic::TexMatrixIndex7:
+    return static_cast<uint16_t>(offsetof(CanonicalVertex,texMatrixIndex)+
+      static_cast<unsigned>(semantic)-static_cast<unsigned>(VertexSemantic::TexMatrixIndex0));
+  case VertexSemantic::Position:return offsetof(CanonicalVertex,position);
+  case VertexSemantic::Normal:return offsetof(CanonicalVertex,normal);
+  case VertexSemantic::Binormal:return offsetof(CanonicalVertex,binormal);
+  case VertexSemantic::Tangent:return offsetof(CanonicalVertex,tangent);
+  case VertexSemantic::Color0:return offsetof(CanonicalVertex,color0);
+  case VertexSemantic::Color1:return offsetof(CanonicalVertex,color1);
+  case VertexSemantic::Tex0: case VertexSemantic::Tex1: case VertexSemantic::Tex2: case VertexSemantic::Tex3:
+  case VertexSemantic::Tex4: case VertexSemantic::Tex5: case VertexSemantic::Tex6: case VertexSemantic::Tex7:
+    return static_cast<uint16_t>(offsetof(CanonicalVertex,texcoord)+sizeof(float)*3u*
+      (static_cast<unsigned>(semantic)-static_cast<unsigned>(VertexSemantic::Tex0)));
+  }
+  return 0;
+}
+VertexDecodeStore semantic_store(VertexSemantic semantic) noexcept {
+  if(semantic==VertexSemantic::PnMatrixIndex)return VertexDecodeStore::PnMatrixIndex;
+  if(semantic>=VertexSemantic::TexMatrixIndex0&&semantic<=VertexSemantic::TexMatrixIndex7)
+    return VertexDecodeStore::TexMatrixIndex;
+  if(semantic==VertexSemantic::Color0||semantic==VertexSemantic::Color1)return VertexDecodeStore::Color;
+  return VertexDecodeStore::Float;
+}
 bool numeric(const uint8_t* p, size_t avail, const VertexDecodeAttribute& a, bool le, float out[4]) noexcept {
   if (a.components == 0 || a.components > 4 || avail < component_bytes(a.component, a.components)) return false;
   // GX fractional bits are small (5 bits in VAT). Constructing 2^-frac from
@@ -123,6 +152,60 @@ bool decode_vertex(const uint8_t* stream, size_t streamSize, uint32_t vi,
   return true;
 }
 
+bool resolve_op(const uint8_t* stream,size_t streamSize,size_t base,const VertexDecodeOp& op,bool streamLe,
+                const uint8_t*& p,size_t& avail,bool& le) noexcept {
+  if(op.source==VertexSource::None||base+op.streamOffset>=streamSize)return false;
+  const uint8_t* s=stream+base+op.streamOffset;
+  if(op.source==VertexSource::Direct) {
+    if(base+op.streamOffset+op.valueOffset>=streamSize)return false;
+    p=s+op.valueOffset;avail=streamSize-(base+op.streamOffset+op.valueOffset);le=streamLe;return true;
+  }
+  if(streamSize-(base+op.streamOffset)<op.indexBytes)return false;
+  const size_t index=op.source==VertexSource::Index8?s[0]:read16(s,streamLe);
+  if(!op.array.data||!op.array.stride)return false;
+  const size_t off=index*op.array.stride;
+  if(off>=op.array.size||off+op.valueOffset>=op.array.size)return false;
+  p=op.array.data+off+op.valueOffset;avail=op.array.size-off-op.valueOffset;le=op.array.littleEndian;return true;
+}
+
+bool decode_vertex_ops(const uint8_t* stream,size_t streamSize,uint32_t vi,const VertexDecodeLayout& layout,
+                       CanonicalVertex& v,VertexSemanticMask requiredSemantics) noexcept {
+  const size_t base=size_t(vi)*layout.streamStride;
+  auto* dstBase=reinterpret_cast<uint8_t*>(&v);
+  for(unsigned oi=0;oi<layout.opCount;++oi) {
+    const auto& op=layout.ops[oi];
+    if((requiredSemantics&vertex_semantic_bit(op.semantic))==0)continue;
+    const uint8_t* p=nullptr;size_t avail=0;bool le=false;
+    if(!resolve_op(stream,streamSize,base,op,layout.streamLittleEndian,p,avail,le))return false;
+    if(op.store==VertexDecodeStore::Color) {
+      if(!color(p,avail,op.component,le,dstBase+op.dstOffset))return false;
+      continue;
+    }
+    if(avail<op.valueBytes)return false;
+    float tmp[4]{};
+    for(unsigned i=0;i<op.components;++i) {
+      switch(op.component) {
+      case VertexComponent::U8:tmp[i]=p[i]*op.scale;break;
+      case VertexComponent::S8:tmp[i]=static_cast<int8_t>(p[i])*op.scale;break;
+      case VertexComponent::U16:tmp[i]=read16(p+i*2,le)*op.scale;break;
+      case VertexComponent::S16:tmp[i]=static_cast<int16_t>(read16(p+i*2,le))*op.scale;break;
+      case VertexComponent::F32:tmp[i]=readf(p+i*4,le);break;
+      default:return false;
+      }
+    }
+    if(op.store==VertexDecodeStore::PnMatrixIndex) {
+      dstBase[op.dstOffset]=static_cast<uint8_t>(tmp[0]/3.f);
+    } else if(op.store==VertexDecodeStore::TexMatrixIndex) {
+      dstBase[op.dstOffset]=static_cast<uint8_t>(tmp[0]);
+    } else {
+      auto* dst=reinterpret_cast<float*>(dstBase+op.dstOffset);
+      for(unsigned i=0;i<op.components;++i)dst[i]=tmp[i];
+      if(op.fillThirdOne&&op.components<3)dst[2]=1.f;
+    }
+  }
+  return true;
+}
+
 struct DecodeContext {
   const uint8_t* stream = nullptr;
   size_t streamSize = 0;
@@ -159,6 +242,22 @@ VertexLayout canonical_vertex_layout() noexcept {
   l.attributes[2]={2,4,VertexScalar::U8,true,sizeof(CanonicalVertex),offsetof(CanonicalVertex,color1)};
   for(unsigned i=0;i<8;i++)l.attributes[3+i]={static_cast<uint8_t>(3+i),3,VertexScalar::F32,false,sizeof(CanonicalVertex),static_cast<uint16_t>(offsetof(CanonicalVertex,texcoord)+sizeof(float)*3*i)};
   return l;
+}
+void compile_vertex_decode_layout(VertexDecodeLayout& layout) noexcept {
+  layout.opCount=0;
+  for(unsigned i=0;i<layout.count&&layout.opCount<layout.ops.size();++i) {
+    const auto& a=layout.attributes[i];
+    if(a.source==VertexSource::None)continue;
+    auto& op=layout.ops[layout.opCount++];
+    op.source=a.source;op.component=a.component;op.store=semantic_store(a.semantic);op.semantic=a.semantic;
+    op.components=a.components;op.valueBytes=static_cast<uint8_t>(component_bytes(a.component,a.components));
+    op.indexBytes=a.source==VertexSource::Index16?2u:(a.source==VertexSource::Index8?1u:0u);
+    op.fillThirdOne=a.semantic>=VertexSemantic::Tex0&&a.semantic<=VertexSemantic::Tex7;
+    op.streamOffset=a.streamOffset;op.valueOffset=a.valueOffset;op.dstOffset=semantic_offset(a.semantic);
+    op.scale=a.frac<=126?std::bit_cast<float>(static_cast<uint32_t>(127u-a.frac)<<23u):
+                            std::ldexp(1.f,-static_cast<int>(a.frac));
+    op.array=a.array;
+  }
 }
 VertexLayout gpu_vertex_layout(uint8_t texcoordMask,uint8_t colorMask) noexcept {
   VertexLayout l{};
@@ -225,7 +324,8 @@ bool decode_vertex_into(const uint8_t* stream, size_t streamSize, uint32_t verte
                         VertexSemanticMask requiredSemantics) noexcept {
   if (!stream || !layout.streamStride || layout.count > layout.attributes.size()) return false;
   if (size_t(vertexIndex) * layout.streamStride >= streamSize) return false;
-  return decode_vertex(stream, streamSize, vertexIndex, layout, vertex, requiredSemantics);
+  return layout.opCount?decode_vertex_ops(stream,streamSize,vertexIndex,layout,vertex,requiredSemantics):
+                        decode_vertex(stream, streamSize, vertexIndex, layout, vertex, requiredSemantics);
 }
 VertexDecodeResult decode_vertices(const uint8_t* stream, size_t streamSize, uint32_t vertexCount,
                                    const VertexDecodeLayout& layout) noexcept {
