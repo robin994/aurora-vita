@@ -432,30 +432,34 @@ void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms&
     uniforms.tevreg[i] = copy_vec4(g.colorRegs[i]);
     uniforms.kcolor[i] = copy_vec4(g.kcolors[i]);
   }
-  uniforms.fogColor = copy_vec4(g.fog.color);
-  const float logicalWidth = std::max(g.logicalViewport.width, 1.f);
-  const float renderWidth = std::max(g.renderViewport.width, 1.f);
-  const int32_t rawCenter = static_cast<int32_t>(g.fogRange[0] & 0x3ffu) - 342;
-  const float rangeCenter = ((static_cast<float>(rawCenter) - g.logicalViewport.left) / logicalWidth) * 2.f - 1.f +
-                            (g.renderViewport.left / renderWidth) * 2.f;
-  uniforms.fogParams = {g.fog.a, g.fog.b, g.fog.c, rangeCenter};
-  uniforms.renderViewportWidth = renderWidth;
-  for (unsigned i=0;i<uniforms.fogRangeK.size();++i) {
-    const u32 packed = g.fogRange[1 + i / 2];
-    const u32 raw = (packed >> ((i & 1u) * 12u)) & 0xfffu;
-    uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
+  if(pipeline.fogMode!=gfx::FogMode::None) {
+    uniforms.fogColor = copy_vec4(g.fog.color);
+    const float logicalWidth = std::max(g.logicalViewport.width, 1.f);
+    const float renderWidth = std::max(g.renderViewport.width, 1.f);
+    const int32_t rawCenter = static_cast<int32_t>(g.fogRange[0] & 0x3ffu) - 342;
+    const float rangeCenter = ((static_cast<float>(rawCenter) - g.logicalViewport.left) / logicalWidth) * 2.f - 1.f +
+                              (g.renderViewport.left / renderWidth) * 2.f;
+    uniforms.fogParams = {g.fog.a, g.fog.b, g.fog.c, rangeCenter};
+    uniforms.renderViewportWidth = renderWidth;
+    if(pipeline.fogRangeEnabled) for (unsigned i=0;i<uniforms.fogRangeK.size();++i) {
+      const u32 packed = g.fogRange[1 + i / 2];
+      const u32 raw = (packed >> ((i & 1u) * 12u)) & 0xfffu;
+      uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
+    }
   }
 
-  for (unsigned i = 0; i < gfx::MaxTextures; ++i) {
-    const auto& s = g.texCoordScales[i];
-    uniforms.texcoordScale[i] = {static_cast<float>(s.scaleS) + 1.f, static_cast<float>(s.scaleT) + 1.f, 0.f, 0.f};
-    const auto& t = g.loadedTextures[i];
-    uniforms.textureSizeBias[i] = {static_cast<float>(t.width()), static_cast<float>(t.height()), t.lod_bias(), 0.f};
-  }
-  for (unsigned i = 0; i < gfx::MaxIndMatrices; ++i) {
-    const auto& m = g.indTexMtxs[i];
-    uniforms.indirectMatrices[i * 2] = {m.mtx.m0.x, m.mtx.m0.y, m.mtx.m1.x, m.mtx.m1.y};
-    uniforms.indirectMatrices[i * 2 + 1] = {m.mtx.m2.x, m.mtx.m2.y, std::exp2f(m.scaleExp), 0.f};
+  if(pipeline.tev.indirectStageCount) {
+    for (unsigned i = 0; i < gfx::MaxTextures; ++i) {
+      const auto& s = g.texCoordScales[i];
+      uniforms.texcoordScale[i] = {static_cast<float>(s.scaleS) + 1.f, static_cast<float>(s.scaleT) + 1.f, 0.f, 0.f};
+      const auto& t = g.loadedTextures[i];
+      uniforms.textureSizeBias[i] = {static_cast<float>(t.width()), static_cast<float>(t.height()), t.lod_bias(), 0.f};
+    }
+    for (unsigned i = 0; i < gfx::MaxIndMatrices; ++i) {
+      const auto& m = g.indTexMtxs[i];
+      uniforms.indirectMatrices[i * 2] = {m.mtx.m0.x, m.mtx.m0.y, m.mtx.m1.x, m.mtx.m1.y};
+      uniforms.indirectMatrices[i * 2 + 1] = {m.mtx.m2.x, m.mtx.m2.y, std::exp2f(m.scaleExp), 0.f};
+    }
   }
 }
 
@@ -510,29 +514,38 @@ void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUni
     uniforms.tevreg[i]=copy_vec4(g.colorRegs[i]);
     uniforms.kcolor[i]=copy_vec4(g.kcolors[i]);
   }
-  uniforms.fogColor=copy_vec4(g.fog.color);
-  const float logicalWidth=std::max(g.logicalViewport.width,1.f);
-  const float renderWidth=std::max(g.renderViewport.width,1.f);
-  const int32_t rawCenter=static_cast<int32_t>(g.fogRange[0]&0x3ffu)-342;
-  const float rangeCenter=((static_cast<float>(rawCenter)-g.logicalViewport.left)/logicalWidth)*2.f-1.f+
-                          (g.renderViewport.left/renderWidth)*2.f;
-  uniforms.fogParams={g.fog.a,g.fog.b,g.fog.c,rangeCenter};
-  uniforms.renderViewportWidth=renderWidth;
-  for(unsigned i=0;i<uniforms.fogRangeK.size();++i) {
-    const u32 packed=g.fogRange[1+i/2];
-    const u32 raw=(packed>>((i&1u)*12u))&0xfffu;
-    uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
+  // These fragment uniforms are dead when the generated shader omits the
+  // corresponding GX feature. Avoid rebuilding them on every matrix/state
+  // update: fixed-vertex draws can number in the hundreds per Strikers frame.
+  if(pipeline.fogMode!=gfx::FogMode::None) {
+    uniforms.fogColor=copy_vec4(g.fog.color);
+    const float logicalWidth=std::max(g.logicalViewport.width,1.f);
+    const float renderWidth=std::max(g.renderViewport.width,1.f);
+    const int32_t rawCenter=static_cast<int32_t>(g.fogRange[0]&0x3ffu)-342;
+    const float rangeCenter=((static_cast<float>(rawCenter)-g.logicalViewport.left)/logicalWidth)*2.f-1.f+
+                            (g.renderViewport.left/renderWidth)*2.f;
+    uniforms.fogParams={g.fog.a,g.fog.b,g.fog.c,rangeCenter};
+    uniforms.renderViewportWidth=renderWidth;
+    if(pipeline.fogRangeEnabled) for(unsigned i=0;i<uniforms.fogRangeK.size();++i) {
+      const u32 packed=g.fogRange[1+i/2];
+      const u32 raw=(packed>>((i&1u)*12u))&0xfffu;
+      uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
+    }
   }
-  for(unsigned i=0;i<gfx::MaxTextures;++i) {
-    const auto& s=g.texCoordScales[i];
-    uniforms.texcoordScale[i]={static_cast<float>(s.scaleS)+1.f,static_cast<float>(s.scaleT)+1.f,0.f,0.f};
-    const auto& t=g.loadedTextures[i];
-    uniforms.textureSizeBias[i]={static_cast<float>(t.width()),static_cast<float>(t.height()),t.lod_bias(),0.f};
-  }
-  for(unsigned i=0;i<gfx::MaxIndMatrices;++i) {
-    const auto& m=g.indTexMtxs[i];
-    uniforms.indirectMatrices[i*2]={m.mtx.m0.x,m.mtx.m0.y,m.mtx.m1.x,m.mtx.m1.y};
-    uniforms.indirectMatrices[i*2+1]={m.mtx.m2.x,m.mtx.m2.y,std::exp2f(m.scaleExp),0.f};
+  if(pipeline.tev.indirectStageCount) {
+    // Texture dimensions/scales and indirect matrices are referenced only by
+    // the indirect-TEV code emitted by gxm_shader_gen.
+    for(unsigned i=0;i<gfx::MaxTextures;++i) {
+      const auto& s=g.texCoordScales[i];
+      uniforms.texcoordScale[i]={static_cast<float>(s.scaleS)+1.f,static_cast<float>(s.scaleT)+1.f,0.f,0.f};
+      const auto& t=g.loadedTextures[i];
+      uniforms.textureSizeBias[i]={static_cast<float>(t.width()),static_cast<float>(t.height()),t.lod_bias(),0.f};
+    }
+    for(unsigned i=0;i<gfx::MaxIndMatrices;++i) {
+      const auto& m=g.indTexMtxs[i];
+      uniforms.indirectMatrices[i*2]={m.mtx.m0.x,m.mtx.m0.y,m.mtx.m1.x,m.mtx.m1.y};
+      uniforms.indirectMatrices[i*2+1]={m.mtx.m2.x,m.mtx.m2.y,std::exp2f(m.scaleExp),0.f};
+    }
   }
 }
 
