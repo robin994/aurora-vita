@@ -8,6 +8,7 @@
 #include "gfx/vita_gl_util.hpp"
 #endif
 #include "gx/aurora_vita_draw_sink.hpp"
+#include "../../lib/vita/render_size.hpp"
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -85,12 +86,30 @@ void emit_periodic_diagnostics() noexcept {
   if (period == 0 || (g_frame % period) != 0) return;
   const auto frameLine = g_telemetry.format_frame();
   const auto memLine = g_drawSink->memory_budget().format();
-  std::printf("%s\n%s\n", frameLine.c_str(), memLine.c_str());
+  const auto& rs=g_renderer->stats();
+  char rendererLine[512];
+  std::snprintf(rendererLine,sizeof(rendererLine),
+      "[AURORA-VITA][RENDERER] display=%ux%u internal=%ux%u scenes=%u "
+      "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu "
+      "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u d16=%u gpu_geometry=%u",
+      g_config.width,g_config.height,
+      g_config.render_width?g_config.render_width:g_config.width,
+      g_config.render_height?g_config.render_height:g_config.height,
+      rs.nativeSceneCount,
+      static_cast<unsigned long long>(rs.nativePipelineUs),
+      static_cast<unsigned long long>(rs.nativeTextureUs),
+      static_cast<unsigned long long>(rs.nativeDrawUs),
+      rs.nativeVertexUniformReuses,rs.nativeFragmentUniformReuses,rs.nativeEfbCopies,
+      g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u);
+  std::printf("%s\n%s\n%s\n", frameLine.c_str(), rendererLine, memLine.c_str());
   if (g_config.telemetry_log_path) {
     ensure_parent_dir(g_config.telemetry_log_path);
     g_telemetry.append_frame_log(g_config.telemetry_log_path);
     FILE* fp = std::fopen(g_config.telemetry_log_path, "ab");
-    if (fp) { std::fwrite(memLine.data(),1,memLine.size(),fp); std::fwrite("\n",1,1,fp); std::fclose(fp); }
+    if (fp) {
+      std::fwrite(rendererLine,1,std::strlen(rendererLine),fp);std::fwrite("\n",1,1,fp);
+      std::fwrite(memLine.data(),1,memLine.size(),fp); std::fwrite("\n",1,1,fp); std::fclose(fp);
+    }
   }
 }
 }
@@ -102,6 +121,16 @@ extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
+  const uint32_t renderWidth=c.render_width?c.render_width:c.width;
+  const uint32_t renderHeight=c.render_height?c.render_height:c.height;
+  if(!renderWidth||!renderHeight||renderWidth>c.width||renderHeight>c.height) {
+    g_initFailure=InitFailure::RendererInitFailed;
+    std::snprintf(g_initFailureDetail,sizeof(g_initFailureDetail),
+                  "invalid Vita render extent %ux%u for display %ux%u",
+                  renderWidth,renderHeight,c.width,c.height);
+    return false;
+  }
+  aurora::vita::render_size::configure(renderWidth,renderHeight,c.width,c.height);
   gfx::set_texture_decode_diagnostics(c.texture_decode_diagnostics);
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   gfx::configure_program_binary_cache(c.program_binary_cache_path);
@@ -219,10 +248,12 @@ bool initialize(const BackendConfig& c) noexcept {
     std::fprintf(stderr, "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
   std::fprintf(stderr,
-               "[aurora-vita] render config native_cmpr=%u direct_stream=%u scratch_dynamic=%u scratch_stream=%u gpu_vertex_stride=%u stream_v=%llu stream_i=%llu slots=%u\n",
+               "[aurora-vita] render config display=%ux%u internal=%ux%u native_cmpr=%u direct_stream=%u scratch_dynamic=%u scratch_stream=%u gpu_vertex_stride=%u gpu_geometry_mb=%llu stream_v=%llu stream_i=%llu slots=%u\n",
+               c.width,c.height,renderWidth,renderHeight,
                AURORA_VITA_NATIVE_CMPR?1u:0u,AURORA_VITA_DIRECT_STREAM_WRITE?1u:0u,
                c.vgl_scratch_dynamic?1u:0u,c.vgl_scratch_stream?1u:0u,
                static_cast<unsigned>(sizeof(gfx::GpuVertex)),
+               static_cast<unsigned long long>(c.static_geometry_budget/(1024u*1024u)),
                static_cast<unsigned long long>(c.stream_vertex_bytes),
                static_cast<unsigned long long>(c.stream_index_bytes),c.stream_slots);
   g_telemetry.reset(); g_coverage.reset(); g_trace=std::make_unique<integration::FrameTrace>(c.trace_capacity);

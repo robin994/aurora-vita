@@ -18,6 +18,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include "render_size.hpp"
 
 namespace wgpu {
 struct BindGroup {};
@@ -199,8 +200,16 @@ struct TextureBind {
   operator bool() const noexcept { return ref.operator bool(); }
 };
 
-inline Vec2<uint32_t> get_render_target_size() noexcept { return {960, 544}; }
-inline Vec2<uint32_t> get_frame_buffer_size() noexcept { return {960, 544}; }
+// The Vita scanout stays at the native display size while GX can rasterize a
+// smaller logical render extent. GXCopyDisp already owns the final crop/upscale
+// into the presentable buffer, so lowering this size reduces fragment/depth work
+// without changing the guest-visible EFB coordinates.
+inline Vec2<uint32_t> get_render_target_size() noexcept {
+  return {vita::render_size::g_renderWidth,vita::render_size::g_renderHeight};
+}
+inline Vec2<uint32_t> get_frame_buffer_size() noexcept {
+  return {vita::render_size::g_frameWidth,vita::render_size::g_frameHeight};
+}
 inline uint32_t current_frame() noexcept { return 0; }
 inline uint32_t get_sample_count() noexcept { return 1; }
 inline bool is_offscreen() noexcept { return false; }
