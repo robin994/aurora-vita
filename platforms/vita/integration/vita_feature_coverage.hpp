@@ -3,8 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-#include <unordered_set>
+#include "../gfx/vita_hash_map.hpp"
 
 namespace aurora::vita::integration {
 
@@ -43,7 +42,7 @@ public:
   bool write_report(const char* path) const noexcept;
 private:
   static uint64_t composite_key(FeatureClass featureClass, uint64_t key) noexcept;
-  std::unordered_map<uint64_t, FeatureRecord> records_{};
+  gfx::FlatHashMap<uint64_t, FeatureRecord> records_{};
   uint64_t totalObservations_ = 0;
   uint64_t fallbackCount_ = 0;
   uint64_t unsupportedCount_ = 0;

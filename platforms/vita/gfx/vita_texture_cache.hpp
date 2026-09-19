@@ -1,10 +1,9 @@
 #pragma once
 #include "vita_gfx_types.hpp"
 #include "vita_native_fwd.hpp"
+#include "vita_hash_map.hpp"
 #include <cstddef>
 #include <cstdint>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 namespace aurora::vita::gfx {
 class TextureCache {
@@ -32,12 +31,12 @@ private:
   // Evict LRU entries (never the entry keyed protectKey) until bytes_+requiredBytes fits
   // under budget_ with headroom. Runs BEFORE any vitaGL allocation.
   void pre_evict(size_t requiredBytes,uint64_t frame,uint64_t protectKey) noexcept;
-  std::unordered_map<uint64_t,Entry> byKey_;
-  // unordered_map references are stable across rehash, so handles resolve
+  NodeHashMap<uint64_t,Entry> byKey_;
+  // Node-map references are stable across rehash, so handles resolve
   // directly to Entry with one lookup instead of handle->key->entry. Keep only
   // live handles here: non-cacheable texture handles are monotonic and a vector
   // indexed by them would grow for the lifetime of a long-running game.
-  std::unordered_map<Handle,Entry*> byHandle_{};
+  FlatHashMap<Handle,Entry*> byHandle_{};
   Handle next_=1;size_t budget_=0,bytes_=0,highWaterBytes_=0;uint64_t evictions_=0;
   uint64_t allocFailTotal_=0,preEvictions_=0,preEvictedBytes_=0,lastRequestedBytes_=0,retrySuppressTotal_=0;
   // A failed GPU allocation used to be retried by every draw that referenced the
@@ -45,7 +44,7 @@ private:
   // glTexImage attempts in a single frame. Remember only this frame's failures so
   // the texture can be retried normally after older cache entries become evictable.
   uint64_t failedFrame_=~uint64_t{0};
-  std::unordered_set<uint64_t> failedKeys_{};
+  FlatHashSet<uint64_t> failedKeys_{};
   // Reused by the CMPR -> DXT1 fast path so streaming new textures does not
   // allocate and free a temporary buffer for every cache miss.
   std::vector<uint8_t> nativeCompressedScratch_{};

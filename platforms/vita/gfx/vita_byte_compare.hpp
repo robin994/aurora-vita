@@ -2,6 +2,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#define XXH_STATIC_LINKING_ONLY
+#include <xxhash.h>
 #if defined(__vita__) && defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
@@ -40,26 +42,12 @@ inline bool byte_spans_equal(const void* lhs, const void* rhs, size_t bytes) noe
 #endif
 }
 
-inline uint64_t byte_span_hash_seed(const void* source,size_t bytes,uint64_t seed) noexcept {
-  const auto* p=static_cast<const uint8_t*>(source);
-  uint64_t h=seed^(uint64_t(bytes)*0x9e3779b185ebca87ull);
-  while(p&&bytes>=8) {
-    uint64_t word=0;std::memcpy(&word,p,sizeof(word));
-    word^=word>>33;word*=0xff51afd7ed558ccdull;word^=word>>33;
-    h^=word;h=(h<<27)|(h>>37);h=h*5u+0x52dce729u;
-    p+=8;bytes-=8;
-  }
-  uint64_t tail=0;
-  if(p&&bytes)std::memcpy(&tail,p,bytes);
-  h^=tail+0x9e3779b97f4a7c15ull;
-  h^=h>>33;h*=0xc4ceb9fe1a85ec53ull;h^=h>>33;
-  return h;
-}
 // Candidate lookup only: exact cache reuse is still guarded by
-// byte_spans_equal(). Keep the hash self-contained so VitaSDK consumers do not
-// need an extra xxHash header/library dependency.
+// byte_spans_equal(). XXH3 replaces the previous scalar mixer because this
+// runs on large immutable display-list records in the geometry-cache hot path.
 inline uint64_t byte_span_hash(const void* source, size_t bytes) noexcept {
-  return byte_span_hash_seed(source,bytes,0x165667b19e3779f9ull);
+  static constexpr uint8_t Empty=0;
+  return XXH3_64bits(source?source:&Empty,source?bytes:0);
 }
 
 } // namespace aurora::vita::gfx

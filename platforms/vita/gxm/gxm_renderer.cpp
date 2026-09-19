@@ -19,9 +19,9 @@
 #include <limits>
 #include <new>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
+#include "gfx/vita_hash_map.hpp"
 
 namespace aurora::vita::gxm {
 namespace {
@@ -315,11 +315,11 @@ struct Renderer::Impl {
   MemoryBlock vdm, vertexRing, fragmentRing, fragmentUsseRing, patchBuffer, vertexUsse, fragmentUsse, depth;
   SceGxmDepthStencilSurface depthSurface{};
   std::array<Surface, 3> surfaces;
-  std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> pipelines;
-  std::unordered_map<uint64_t, std::shared_ptr<CompiledStage>> stageCache;
-  std::unordered_map<Handle, Buffer> buffers;
-  std::unordered_map<Handle, std::unique_ptr<Texture>> textures;
-  std::unordered_map<uint64_t, Handle> textureCache;
+  gfx::FlatHashMap<uint64_t, std::unique_ptr<Pipeline>> pipelines;
+  gfx::FlatHashMap<uint64_t, std::shared_ptr<CompiledStage>> stageCache;
+  gfx::FlatHashMap<Handle, Buffer> buffers;
+  gfx::FlatHashMap<Handle, std::unique_ptr<Texture>> textures;
+  gfx::FlatHashMap<uint64_t, Handle> textureCache;
   FrameStats stats{};
   std::string error;
   std::atomic<int> displayError{0};

@@ -1,10 +1,10 @@
 #pragma once
+#include "vita_hash_map.hpp"
 #include "vita_renderer.hpp"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <unordered_map>
 
 namespace aurora::vita::gfx {
 
@@ -74,7 +74,7 @@ private:
   Renderer& renderer_;
   size_t budget_=0,bytes_=0;
   uint64_t hits_=0,misses_=0;
-  std::unordered_map<uint64_t,std::unique_ptr<Entry>> entries_{};
+  FlatHashMap<uint64_t,std::unique_ptr<Entry>> entries_{};
 };
 
 } // namespace aurora::vita::gfx

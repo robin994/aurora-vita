@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
-#include <unordered_map>
+#include "../gfx/vita_hash_map.hpp"
 
 namespace aurora::vita::gxbridge {
 
@@ -105,7 +105,7 @@ private:
   std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
   std::deque<gfx::FixedVertexUniforms> fixedVertexUniforms_{};
   gfx::PipelineDesc translatedGpuPipeline_{};
-  std::unordered_map<uint64_t,uint64_t> fixedPipelineKeys_{};
+  gfx::FlatHashMap<uint64_t,uint64_t> fixedPipelineKeys_{};
   gfx::VertexTransformState translatedVertexState_{};
   gfx::DrawUniforms translatedUniforms_{};
   bool translatedVertexStateValid_ = false;
@@ -151,7 +151,7 @@ private:
     bool logicalFlipX=false,logicalFlipY=false,forceOpaque=false;
     gfx::EfbCopyFormat sampleFormat=gfx::EfbCopyFormat::Passthrough;
   };
-  std::unordered_map<uintptr_t,CopyTextureEntry> copyTextures_{};
+  gfx::FlatHashMap<uintptr_t,CopyTextureEntry> copyTextures_{};
   bool initialized_ = false;
 };
 

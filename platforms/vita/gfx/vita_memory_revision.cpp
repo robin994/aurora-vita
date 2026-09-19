@@ -1,13 +1,13 @@
 #include "vita_memory_revision.hpp"
+#include "vita_hash_map.hpp"
 #include <algorithm>
 #include <mutex>
-#include <unordered_map>
 
 namespace aurora::vita::gfx {
 namespace {
 constexpr uintptr_t PageBytes=64u*1024u;
 std::mutex g_mutex;
-std::unordered_map<uintptr_t,uint64_t> g_pages;
+FlatHashMap<uintptr_t,uint64_t> g_pages;
 uint64_t g_epoch=1;
 }
 

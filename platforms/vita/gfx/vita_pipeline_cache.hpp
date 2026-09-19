@@ -1,11 +1,10 @@
 #pragma once
 #include "vita_gfx_types.hpp"
+#include "vita_hash_map.hpp"
 #include "vita_native_fwd.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace aurora::vita::gfx {
 struct CompiledPipeline {
@@ -63,12 +62,12 @@ private:
 #endif
   bool evict_one() noexcept;
   void destroy_pipeline(CompiledPipeline& pipeline) noexcept;
-  std::unordered_map<uint64_t,CompiledPipeline> map_;
-  std::unordered_set<uint64_t> pinned_{};
+  NodeHashMap<uint64_t,CompiledPipeline> map_;
+  FlatHashSet<uint64_t> pinned_{};
   // Shader failures are deterministic for a pipeline description. Retrying the
   // same broken TEV program every draw causes severe stalls and repeated compiler
   // pressure on Vita, so suppress it until the cache is explicitly cleared.
-  std::unordered_set<uint64_t> failedKeys_{};
+  FlatHashSet<uint64_t> failedKeys_{};
   uint64_t bound_=0;
   CompiledPipeline* boundPipeline_=nullptr;
   FixedStateSnapshot fixedState_{};

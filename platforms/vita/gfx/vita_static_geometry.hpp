@@ -2,10 +2,10 @@
 #include "vita_draw_adapter.hpp"
 #include "vita_fixed_vertex.hpp"
 #include "vita_byte_compare.hpp"
+#include "vita_hash_map.hpp"
 #include "vita_memory_revision.hpp"
 #include <cstdio>
 #include <memory>
-#include <unordered_map>
 
 namespace aurora::vita::gfx {
 
@@ -254,12 +254,12 @@ private:
     for(unsigned i=0;i<gpu.count;++i) {const auto& a=gpu.attributes[i];add(a.location);add(a.components);add(static_cast<uint8_t>(a.scalar));add(a.normalized);add(a.offset);add(a.stride);}
     const uint64_t metadata=(static_cast<uint64_t>(h)<<32)|h;
     const uintptr_t address=reinterpret_cast<uintptr_t>(stable);
-    return byte_span_hash_seed(&address,sizeof(address),metadata);
+    return XXH3_64bits_withSeed(&address,sizeof(address),metadata);
   }
   Renderer& renderer_;
   size_t budget_=0,bytes_=0;
   uint64_t hits_=0,misses_=0,lookupFallbacks_=0;
-  std::unordered_map<uint64_t,std::unique_ptr<Entry>> entries_{};
+  FlatHashMap<uint64_t,std::unique_ptr<Entry>> entries_{};
   PreparedDraw scratch_{};
   std::vector<uint8_t> packed_{};
 };

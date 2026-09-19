@@ -1,9 +1,9 @@
 #pragma once
 #include "vita_gfx_types.hpp"
+#include "vita_hash_map.hpp"
 #include "vita_native_fwd.hpp"
 #include <array>
 #include <cstdint>
-#include <unordered_map>
 #include <vector>
 
 namespace aurora::vita::gfx {
@@ -41,7 +41,7 @@ private:
   gxm::Renderer* native_=nullptr;
 #endif
   struct Entry{unsigned fbo=0,color=0,depth=0;uint32_t width=0,height=0;size_t bytes=0;SamplerDesc sampler{};bool samplerValid=false;};
-  std::unordered_map<Handle,Entry> map_;
+  FlatHashMap<Handle,Entry> map_;
   Handle next_=1;
   static constexpr size_t CopyProgramCount = static_cast<size_t>(EfbCopyFormat::GB8) + 1;
   std::array<unsigned,CopyProgramCount> blitPrograms_{};

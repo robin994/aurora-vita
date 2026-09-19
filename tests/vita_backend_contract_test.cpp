@@ -7,6 +7,7 @@
 #include "gfx/vita_efb_copy.hpp"
 #include "gfx/vita_sampler_units.hpp"
 #include "gfx/vita_draw_batch.hpp"
+#include "gfx/vita_hash_map.hpp"
 #include "gxm/gxm_texture_layout.hpp"
 #include "gxm/gxm_program_cache.hpp"
 #include <array>
@@ -479,6 +480,20 @@ int main() {
     REQUIRE(!local_draws_mergeable(a, changed));
     changed = b; changed.pipelineKey = 2;
     REQUIRE(!local_draws_mergeable(a, changed));
+  }
+  {
+    FlatHashMap<uint64_t,uint64_t> flat;
+    for(uint64_t i=0;i<4096;++i)flat.emplace(i*0x9e3779b97f4a7c15ull,i);
+    for(uint64_t i=0;i<4096;++i) {
+      const auto it=flat.find(i*0x9e3779b97f4a7c15ull);
+      REQUIRE(it!=flat.end());REQUIRE(it->second==i);
+    }
+    NodeHashMap<uint64_t,uint64_t> nodes;
+    nodes.emplace(7,0x12345678u);
+    auto* stable=&nodes.find(7)->second;
+    for(uint64_t i=8;i<8192;++i)nodes.emplace(i,i);
+    REQUIRE(nodes.find(7)!=nodes.end());REQUIRE(&nodes.find(7)->second==stable);
+    REQUIRE(*stable==0x12345678u);
   }
   shader_masks(); shader_operations(); rejection_tests(); projection_contract(); common_decode_contract(); keys_and_defaults();
   native_extended_contract();

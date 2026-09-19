@@ -1,9 +1,9 @@
 #pragma once
 #include "vita_gfx_types.hpp"
+#include "vita_hash_map.hpp"
 #include "vita_native_fwd.hpp"
 #include <cstddef>
 #include <cstdint>
-#include <unordered_map>
 namespace aurora::vita::gfx {
 class BufferPool {
 public:
@@ -25,6 +25,6 @@ private:
   gxm::Renderer* native_=nullptr;
 #endif
   struct Entry{unsigned id=0;unsigned target=0;size_t bytes=0;bool dynamic=false;};
-  std::unordered_map<Handle,Entry> map_;Handle next_=1;
+  FlatHashMap<Handle,Entry> map_;Handle next_=1;
 };
 } // namespace aurora::vita::gfx
