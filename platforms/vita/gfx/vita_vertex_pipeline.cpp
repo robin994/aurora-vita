@@ -146,7 +146,10 @@ bool transform_vertex(CanonicalVertex& v, const PipelineDesc& pipeline,
     if(is_bump(t.type)){
       const unsigned src=std::min<unsigned>(t.embossSource,MaxTextures-1),li=std::min<unsigned>(bump_light(t.type),MaxLights-1);V3 ldir=norm(sub(light_vec3(state.lights[li].position),mvPos));v.texcoord[i][0]=v.texcoord[src][0]+dot(ldir,mvTan);v.texcoord[i][1]=v.texcoord[src][1]+dot(ldir,mvBin);v.texcoord[i][2]=1.f;continue;
     }
-    V4 src=tex_source(in,t.source);V3 tmp{};
+    // COLOR0/COLOR1 texgen consumes the post-lighting channel value. Other
+    // texgen sources retain the original vertex-domain input expected by GX.
+    const bool colorTexgen=t.source==TexGenSource::Color0||t.source==TexGenSource::Color1;
+    V4 src=tex_source(colorTexgen?v:in,t.source);V3 tmp{};
     if(t.type==TexGenType::SRTG){tmp={src.x,src.y,1.f};}
     else if(t.matrixFromVertex&&in.texMatrixIndex[i]!=0xff){const unsigned mi=in.texMatrixIndex[i]/3;if(mi>=state.postexMatrices.size())return false;tmp=transform(state.postexMatrices[mi],src);}
     else if(t.matrix<0){tmp={src.x,src.y,src.z};}
@@ -183,12 +186,21 @@ bool transform_range(void* opaque, size_t begin, size_t end, uint32_t) noexcept 
 VertexPipelineRequirements vertex_pipeline_requirements(const PipelineDesc& pipeline) noexcept {
   VertexPipelineRequirements r{};
   r.colorMask=pipeline_raster_color_mask(pipeline);
+  const unsigned texgenCount=std::min<unsigned>(pipeline.texgenCount,MaxTextures);
+  r.texgenMask=pipeline_texgen_compute_mask(pipeline);
+  for(unsigned i=0;i<texgenCount;++i)if(r.texgenMask&(1u<<i)){
+    const auto& t=pipeline.texgens[i];
+    r.needBumpBasis=r.needBumpBasis||is_bump(t.type);
+    // GX SRTG/color texgen consumes the post-lighting raster color. Even when
+    // the TEV program does not read RASC0/RASC1 directly, that color channel
+    // must still run through the lighting path and therefore may require the
+    // normal/light state.
+    if(t.source==TexGenSource::Color0)r.colorMask|=1u;
+    else if(t.source==TexGenSource::Color1)r.colorMask|=2u;
+  }
   for(unsigned base=0;base<2;base++)if(r.colorMask&(1u<<base)){
     r.needNormal=r.needNormal||pipeline.colorChannels[base].lightingEnabled||pipeline.colorChannels[base+2].lightingEnabled;
   }
-  const unsigned texgenCount=std::min<unsigned>(pipeline.texgenCount,MaxTextures);
-  r.texgenMask=pipeline_texgen_compute_mask(pipeline);
-  for(unsigned i=0;i<texgenCount;++i)if(r.texgenMask&(1u<<i))r.needBumpBasis=r.needBumpBasis||is_bump(pipeline.texgens[i].type);
   r.needNormal=r.needNormal||r.needBumpBasis;
   return r;
 }

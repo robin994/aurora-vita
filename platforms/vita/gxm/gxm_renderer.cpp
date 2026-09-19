@@ -1322,6 +1322,85 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     return d.fail("unsupported native EFB GPU copy");
 
   const Handle originalTarget=d.boundTarget;
+  const bool gpuFixup=flipX||flipY||format==EfbCopyFormat::RGB565;
+  if(gpuFixup && handle==originalTarget)
+    return d.fail("native EFB feedback copy requires cached CPU fallback");
+
+  if(gpuFixup) {
+    Handle sourceTexture=originalTarget;
+    if(!sourceTexture) {
+      Impl::Texture* alias=nullptr;
+      if(!d.displaySource) {
+        auto texture=std::make_unique<Impl::Texture>();
+        d.displaySource=d.nextHandle++;
+        alias=texture.get();
+        d.textures.emplace(d.displaySource,std::move(texture));
+      } else alias=d.textures.at(d.displaySource).get();
+      alias->width=d.config.width;alias->height=d.config.height;alias->stride=d.stride;
+      alias->mipCount=1;alias->swizzled=false;alias->descriptorSamplerValid=false;
+      if(!d.check(sceGxmTextureInitLinear(&alias->descriptor,d.surfaces[d.back].memory.data(),
+          SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,d.config.width,d.config.height,0),
+          "initialize EFB source alias"))return false;
+      sourceTexture=d.displaySource;
+    }
+
+    const uint64_t copyStarted=sceKernelGetProcessTimeWide();
+    // bind_target ends the source scene and threads its fragment sync object
+    // into the destination scene. No CPU wait is required.
+    if(!bind_target(handle))return false;
+    const uint64_t afterSourceEnd=sceKernelGetProcessTimeWide();
+
+    PipelineDesc p{};
+    p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
+    p.layout.count=2;
+    p.layout.attributes[0]={0,4,VertexScalar::F32,false,28,0};
+    p.layout.attributes[1]={3,3,VertexScalar::F32,false,28,16};
+    p.tev.stages[0].texture=0;p.tev.stages[0].texCoord=0;
+    p.tev.stages[0].color.d=TevColorArg::TexColor;p.tev.stages[0].alpha.d=TevAlphaArg::TexAlpha;
+    const auto key=create_pipeline(p);
+    if(!key)return false;
+    if(!d.copyVertices) {
+      // Base UVs follow the top-left EFB convention: actual clip-space top maps
+      // to V=0 and bottom to V=1. Crop and mirror live in u_tex_transform.
+      const float vertices[]{-1,-1,-.5f,1, 0,1,1,
+                              3,-1,-.5f,1, 2,1,1,
+                             -1, 3,-.5f,1, 0,-1,1};
+      d.copyVertices=create_buffer(vertices,sizeof(vertices));
+    }
+    if(!d.copyVertices)return false;
+    DrawPacket packet{};packet.pipelineKey=key;
+    packet.vertices={d.copyVertices,0,84};packet.indices={d.clearIndices,0,6};
+    packet.vertexCount=packet.indexCount=3;
+    packet.viewport.width=float(destination.width);packet.viewport.height=float(destination.height);
+    packet.scissor.width=destination.width;packet.scissor.height=destination.height;
+    auto& binding=packet.textures[0];
+    binding.texture=sourceTexture;binding.source=TextureSource::Efb;
+    binding.sampler.wrapS=binding.sampler.wrapT=WrapMode::Clamp;
+    binding.sampler.minFilter=binding.sampler.magFilter=halfScale?Filter::Linear:Filter::Nearest;
+    binding.flipX=flipX;binding.flipY=flipY;
+    binding.forceOpaque=format==EfbCopyFormat::RGB565;
+    binding.uvScaleX=float(source.width)/float(sourceWidth);
+    binding.uvScaleY=float(source.height)/float(sourceHeight);
+    binding.uvBiasX=float(source.x)/float(sourceWidth);
+    binding.uvBiasY=float(source.y)/float(sourceHeight);
+    if(!draw(packet))return false;
+    const uint64_t afterDraw=sceKernelGetProcessTimeWide();
+    if(!bind_target(originalTarget))return false;
+    ++d.stats.nativeEfbCopies;
+    d.stats.nativeEfbEndSceneUs+=afterSourceEnd-copyStarted;
+    d.stats.nativeEfbTransferSubmitUs+=afterDraw-afterSourceEnd;
+    static uint64_t gpuCopyCount=0;
+    const uint64_t n=++gpuCopyCount;
+    if(n<=8||(n&(n-1u))==0)
+      std::fprintf(stderr,
+          "[aurora-gxm] efb_gpu_fixup n=%llu flip=%u%u opaque=%u source_end_us=%llu draw_us=%llu total_us=%llu\n",
+          static_cast<unsigned long long>(n),flipX?1u:0u,flipY?1u:0u,
+          format==EfbCopyFormat::RGB565?1u:0u,
+          static_cast<unsigned long long>(afterSourceEnd-copyStarted),
+          static_cast<unsigned long long>(afterDraw-afterSourceEnd),
+          static_cast<unsigned long long>(afterDraw-copyStarted));
+    return true;
+  }
 
   const void* sourceData=nullptr;
   uint32_t sourceStride=0;
@@ -1338,82 +1417,40 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     sourceSync=d.surfaces[d.back].sync;
   }
 
-  // Keep ordinary passthrough copies asynchronous, but use the proven
-  // synchronized path for mirrored/RGB565 copies. The fully GPU-side fixup path
-  // can expose partially-updated EFB contents on Strikers and causes visible
-  // flashes between ordered GXCopyTex operations.
+  // Unmodified copies stay on the transfer engine. All mirror/opaque fixups use
+  // the draw path above, so this transfer never needs a CPU-side pixel pass.
   const uint64_t copyStarted=sceKernelGetProcessTimeWide();
-  const bool asyncCopy=format==EfbCopyFormat::Passthrough && !flipX && !flipY;
-  if(asyncCopy) {
-    if(!d.end_scene())return false;
-  } else if(!finish()) return false;
+  if(!d.end_scene())return false;
   const uint64_t afterSourceFinish=sceKernelGetProcessTimeWide();
   const int transferResult=sameSize?
       sceGxmTransferCopy(destination.width,destination.height,0,0,SCE_GXM_TRANSFER_COLORKEY_NONE,
           SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,SCE_GXM_TRANSFER_LINEAR,sourceData,
           static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),static_cast<int>(sourceStride*4u),
           SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,SCE_GXM_TRANSFER_LINEAR,destination.memory.data(),
-          0,0,static_cast<int>(destination.stride*4u),asyncCopy?sourceSync:nullptr,
-          asyncCopy?SCE_GXM_TRANSFER_FRAGMENT_SYNC:0u,nullptr):
+          0,0,static_cast<int>(destination.stride*4u),sourceSync,
+          SCE_GXM_TRANSFER_FRAGMENT_SYNC,nullptr):
       sceGxmTransferDownscale(SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
           sourceData,static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),
           static_cast<unsigned>(source.width),static_cast<unsigned>(source.height),
           static_cast<int>(sourceStride*4u),SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
           destination.memory.data(),0,0,static_cast<int>(destination.stride*4u),
-          asyncCopy?sourceSync:nullptr,asyncCopy?SCE_GXM_TRANSFER_FRAGMENT_SYNC:0u,nullptr);
+          sourceSync,SCE_GXM_TRANSFER_FRAGMENT_SYNC,nullptr);
   if(!d.check(transferResult,sameSize?"native EFB copy transfer":"native EFB downscale transfer"))return false;
   const uint64_t afterTransferSubmit=sceKernelGetProcessTimeWide();
-  if(!asyncCopy && !d.check(sceGxmTransferFinish(),"finish native EFB downscale transfer"))return false;
-  const uint64_t afterTransferFinish=sceKernelGetProcessTimeWide();
-
-  // TransferDownscale has no mirror/opaque conversion flags. Apply those only
-  // after the transfer has completed so sampling can never race these fixups.
-  auto* pixels=static_cast<uint32_t*>(destination.memory.data());
-  if(format==EfbCopyFormat::RGB565) {
-    for(uint32_t y=0;y<destination.height;++y) {
-      auto* row=pixels+size_t(y)*destination.stride;
-      for(uint32_t x=0;x<destination.width;++x)row[x]|=0xff000000u;
-    }
-  }
-  if(flipX) {
-    for(uint32_t y=0;y<destination.height;++y) {
-      auto* row=pixels+size_t(y)*destination.stride;
-      for(uint32_t x=0;x<destination.width/2u;++x)
-        std::swap(row[x],row[destination.width-1u-x]);
-    }
-  }
-  if(flipY) {
-    for(uint32_t y=0;y<destination.height/2u;++y) {
-      auto* top=pixels+size_t(y)*destination.stride;
-      auto* bottom=pixels+size_t(destination.height-1u-y)*destination.stride;
-      for(uint32_t x=0;x<destination.width;++x)std::swap(top[x],bottom[x]);
-    }
-  }
-  const uint64_t afterCpuFixup=sceKernelGetProcessTimeWide();
   ++d.stats.nativeEfbCopies;
   d.stats.nativeEfbEndSceneUs+=afterSourceFinish-copyStarted;
   d.stats.nativeEfbTransferSubmitUs+=afterTransferSubmit-afterSourceFinish;
-  d.stats.nativeEfbTransferWaitUs+=afterTransferFinish-afterTransferSubmit;
-  d.stats.nativeEfbCpuFixupUs+=afterCpuFixup-afterTransferFinish;
-  if(asyncCopy) {
-    d.pendingFragmentTransferSync=true;
-    destination.inFlight=true;
-  }
+  d.pendingFragmentTransferSync=true;
+  destination.inFlight=true;
   static uint64_t copyTimingCount=0;
   const uint64_t copyN=++copyTimingCount;
   if(copyN<=8 || (copyN&(copyN-1u))==0)
     std::fprintf(stderr,
-      "[aurora-gxm] efb_transfer_timing n=%llu source_finish_us=%llu transfer_submit_us=%llu transfer_wait_us=%llu cpu_fixup_us=%llu total_us=%llu\n",
+      "[aurora-gxm] efb_transfer_timing n=%llu source_finish_us=%llu transfer_submit_us=%llu total_us=%llu\n",
       static_cast<unsigned long long>(copyN),
       static_cast<unsigned long long>(afterSourceFinish-copyStarted),
       static_cast<unsigned long long>(afterTransferSubmit-afterSourceFinish),
-      static_cast<unsigned long long>(afterTransferFinish-afterTransferSubmit),
-      static_cast<unsigned long long>(afterCpuFixup-afterTransferFinish),
-      static_cast<unsigned long long>(afterCpuFixup-copyStarted));
-  if(!asyncCopy) {
-    destination.inFlight=false;
-    d.pendingVertexDependency=nullptr;
-  }
+      static_cast<unsigned long long>(afterTransferSubmit-copyStarted));
   d.boundTarget=originalTarget;
   return true;
 }

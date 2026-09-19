@@ -346,7 +346,10 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   // and the EFB texture binding carries the horizontal GX mirror to the shader.
 #if defined(AURORA_VITA_RENDERER_GXM)
   constexpr bool physicalFlipX=false,physicalFlipY=true;
-  constexpr bool logicalFlipX=true,logicalFlipY=false;
+  // Native GXM EFB copies are already sampled in the correct horizontal
+  // orientation. Applying an additional logical X flip mirrors copy textures
+  // (including several UI/effect layers in Strikers).
+  constexpr bool logicalFlipX=false,logicalFlipY=false;
   const bool forceOpaque=copyFormat==gfx::EfbCopyFormat::RGB565;
   const bool deferR4=copyFormat==gfx::EfbCopyFormat::R4;
   const bool deferA8=copyFormat==gfx::EfbCopyFormat::A8;
@@ -499,7 +502,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto source = translate_source_primitive(primitive);
   translatedVertexState_.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(
       aurora::gx::g_gxState.currentPnMtx,translatedVertexState_.postexMatrices.size()-1));
-  const bool fixedCandidate=staticGeometry_&&vertexCount>=48&&rawIndices==nullptr&&indexCount==0&&
+  const bool fixedCandidate=staticGeometry_&&!translatedLit_&&vertexCount>=48&&rawIndices==nullptr&&indexCount==0&&
       source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&source!=gfx::SourcePrimitive::Points&&
       gfx::supports_fixed_vertex_gpu(pipeline,layout,translatedVertexState_);
   // The GPU vertex path copies only the state its generated shader can consume.
