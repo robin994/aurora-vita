@@ -62,6 +62,10 @@ struct BackendConfig {
   // Native GXM render-target scene budget. Gameplay telemetry should stay below
   // this in steady state; Strikers currently averages ~2.4 and peaks at 3.
   uint32_t gxm_scenes_per_frame=5;
+  // Experimental native-GXM path: keep GX vertex lighting/texgen on the GPU for
+  // eligible immutable geometry. Disabled by default so ports can A/B against
+  // the graphics-proven CPU path.
+  bool gxm_lit_fixed_vertex_gpu=false;
   // Opt-in until fixed-GPU lighting/texgen matches the CPU path on hardware.
   size_t static_geometry_budget=0;
   const char* program_binary_cache_path=nullptr;

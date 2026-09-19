@@ -388,7 +388,8 @@ bool Renderer::present(bool display) noexcept {
   const auto& s=native_->stats();
   stats_.nativeTimingsSampled=s.nativeTimingsSampled;
   stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;
-  stats_.nativeDrawUs=s.nativeDrawUs;stats_.nativeSceneCount=s.nativeSceneCount;
+  stats_.nativeDrawUs=s.nativeDrawUs;stats_.nativeDisplayQueueAddUs=s.nativeDisplayQueueAddUs;
+  stats_.nativeSceneCount=s.nativeSceneCount;
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
   stats_.nativeEfbCopies=s.nativeEfbCopies;stats_.nativeEfbEndSceneUs=s.nativeEfbEndSceneUs;

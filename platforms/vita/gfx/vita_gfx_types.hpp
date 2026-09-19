@@ -506,6 +506,9 @@ struct FrameStats {
   uint64_t nativePipelineUs = 0;
   uint64_t nativeTextureUs = 0;
   uint64_t nativeDrawUs = 0;
+  // CPU time spent inside sceGxmDisplayQueueAddEntry. A sustained non-trivial
+  // value indicates display-queue/GPU backpressure rather than frontend CPU work.
+  uint64_t nativeDisplayQueueAddUs = 0;
   uint32_t nativeVertexUniformReuses = 0;
   uint32_t nativeFragmentUniformReuses = 0;
   uint32_t nativeSceneCount = 0;

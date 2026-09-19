@@ -360,6 +360,11 @@ struct Renderer::Impl {
   uint32_t stageMemoryHits = 0, stageCompiles = 0;
   uint64_t sceneWindowSum = 0;
   uint32_t sceneWindowFrames = 0;
+  uint64_t displayQueueWindowSum = 0;
+  uint64_t displayQueueWindowMax = 0;
+  uint64_t cpuFrameWindowSum = 0;
+  uint32_t displayQueueBlockedFrames = 0;
+  uint32_t displayQueueWindowFrames = 0;
 
   uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
   uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
@@ -1119,7 +1124,10 @@ bool Renderer::end_frame(bool present) {
   auto& surface = d.surfaces[d.back];
   if (present) {
     const DisplayRequest request{surface.memory.data(), d.config.width, d.config.height, d.stride, d.config.waitVblank, &d.displayError};
+    const uint64_t queueStarted=sceKernelGetProcessTimeWide();
     if (!d.check(sceGxmDisplayQueueAddEntry(d.surfaces[d.front].sync, surface.sync, &request), "queue present")) return false;
+    const uint64_t queueFinished=sceKernelGetProcessTimeWide();
+    d.stats.nativeDisplayQueueAddUs=queueFinished-queueStarted;
     d.displayed = true; d.front = d.back; d.back = (d.back + 1) % d.config.displayBuffers;
   } else {
     // Discarded presents retain the current display; complete writes before the
@@ -1136,6 +1144,25 @@ bool Renderer::end_frame(bool present) {
       static_cast<unsigned long long>(afterQueue-afterEnd),
       static_cast<unsigned long long>(afterQueue-timingStart));
   d.stats.cpuFrameUs = sceKernelGetProcessTimeWide() - d.frameStarted;
+  if(present) {
+    constexpr uint64_t kBackpressureThresholdUs=500;
+    d.displayQueueWindowSum+=d.stats.nativeDisplayQueueAddUs;
+    d.displayQueueWindowMax=std::max(d.displayQueueWindowMax,d.stats.nativeDisplayQueueAddUs);
+    d.cpuFrameWindowSum+=d.stats.cpuFrameUs;
+    d.displayQueueBlockedFrames+=d.stats.nativeDisplayQueueAddUs>kBackpressureThresholdUs?1u:0u;
+    ++d.displayQueueWindowFrames;
+    if(d.displayQueueWindowFrames>=120u) {
+      const double avgQueue=double(d.displayQueueWindowSum)/double(d.displayQueueWindowFrames);
+      const double avgCpu=double(d.cpuFrameWindowSum)/double(d.displayQueueWindowFrames);
+      const double blockedPct=100.0*double(d.displayQueueBlockedFrames)/double(d.displayQueueWindowFrames);
+      std::fprintf(stderr,
+          "[aurora-gxm] display_queue_profile avg_us=%.1f max_us=%llu blocked_pct=%.1f cpu_frame_avg_us=%.1f classification=%s\n",
+          avgQueue,static_cast<unsigned long long>(d.displayQueueWindowMax),blockedPct,avgCpu,
+          blockedPct>=10.0?"gpu_backpressure":"cpu_or_frontend_bound");
+      d.displayQueueWindowSum=0;d.displayQueueWindowMax=0;d.cpuFrameWindowSum=0;
+      d.displayQueueBlockedFrames=0;d.displayQueueWindowFrames=0;
+    }
+  }
   d.sceneWindowSum += d.stats.nativeSceneCount;
   ++d.sceneWindowFrames;
   if(d.stats.nativeSceneCount>d.config.scenesPerFrame)

@@ -90,7 +90,7 @@ void emit_periodic_diagnostics() noexcept {
   char rendererLine[512];
   std::snprintf(rendererLine,sizeof(rendererLine),
       "[AURORA-VITA][RENDERER] frame=%llu display=%ux%u internal=%ux%u scenes=%u sampled=%u "
-      "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu "
+      "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu display_queue_us=%llu "
       "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u d16=%u gpu_geometry=%u split_vertex_phases=%u",
       static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
@@ -100,6 +100,7 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(rs.nativePipelineUs),
       static_cast<unsigned long long>(rs.nativeTextureUs),
       static_cast<unsigned long long>(rs.nativeDrawUs),
+      static_cast<unsigned long long>(rs.nativeDisplayQueueAddUs),
       rs.nativeVertexUniformReuses,rs.nativeFragmentUniformReuses,rs.nativeEfbCopies,
       g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u,
       g_config.profile_split_vertex_phases?1u:0u);
@@ -277,6 +278,7 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.verboseGeometryDiagnostics=c.diagnostics;
   dc.strictUnsupported=c.strict_unsupported;
   dc.staticGeometryBudget=c.static_geometry_budget;
+  dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
   dc.diagnosticDrawLimit=c.diagnostic_draw_limit;
   g_drawSink=std::make_unique<gxbridge::DrawSink>();
   if(!g_drawSink->initialize(*g_renderer,dc)){

@@ -51,6 +51,7 @@ struct DrawSinkConfig {
   bool verboseGeometryDiagnostics = false;
   bool strictUnsupported = false;
   size_t staticGeometryBudget = 0; // Zero keeps the established CPU vertex path.
+  bool allowLitFixedVertexGpu = false;
   uint32_t diagnosticDrawLimit = 0;
 };
 
@@ -142,6 +143,7 @@ private:
   bool verboseGeometryDiagnostics_ = false;
   bool strictUnsupported_ = false;
   bool strictFailed_ = false;
+  bool allowLitFixedVertexGpu_ = false;
   uint32_t diagnosticDrawLimit_ = 0;
   uint32_t frameDrawIndex_ = 0;
   struct CopyTextureEntry {
