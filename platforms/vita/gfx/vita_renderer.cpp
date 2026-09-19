@@ -151,7 +151,7 @@ void Renderer::clear_current(const Color& color,float depth,bool clearRgb,bool c
 void Renderer::execute(const CommandStream&s) noexcept {execute_range(s,0,s.size(),true);}
 void Renderer::execute_range(const CommandStream&s,size_t begin,size_t end,bool finalize) noexcept {const auto&commands=s.commands();begin=std::min(begin,commands.size());end=std::min(std::max(end,begin),commands.size());for(size_t index=begin;index<end;++index){const auto&c=commands[index];switch(c.type){case CommandType::Clear:
   clear_current(c.clear.color,c.clear.depth,c.clear.colorEnable,c.clear.colorEnable,c.clear.depthEnable);break;
-case CommandType::Draw:draw(c.draw);break;case CommandType::SetRenderTarget:if(c.target.target)bind_efb(c.target.target);else bind_default();break;case CommandType::CopyEfb:if(c.copy.destination)blit_efb(c.copy.destination);break;case CommandType::Barrier:
+case CommandType::Draw:draw(s.draw_packet(c.drawIndex));break;case CommandType::SetRenderTarget:if(c.target.target)bind_efb(c.target.target);else bind_default();break;case CommandType::CopyEfb:if(c.copy.destination)blit_efb(c.copy.destination);break;case CommandType::Barrier:
 #if defined(__vita__)
   glFlush();
 #endif

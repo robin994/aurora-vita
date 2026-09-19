@@ -452,11 +452,10 @@ bool enqueue_streamed_draw(CommandStream&stream,const StreamedDraw&prepared,uint
   auto fail=[&](PrepareDrawError e){if(err)*err=e;return false;};
   if(!prepared.ok()||!prepared.vertices.buffer||!prepared.vertexCount||!resolvedPipelineKey)
     return fail(prepared.error==PrepareDrawError::None?PrepareDrawError::InvalidInput:prepared.error);
-  DrawPacket d{};
+  DrawPacket& d=stream.emplace_draw();
   d.pipelineKey=resolvedPipelineKey;d.vertices=prepared.vertices;d.indices=prepared.indices;
   d.vertexCount=prepared.vertexCount;d.indexCount=prepared.indexCount;d.absoluteVertexIndices=false;
   d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
-  stream.draw(d);
   if(err)*err=PrepareDrawError::None;
   return true;
 }

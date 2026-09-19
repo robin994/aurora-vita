@@ -366,7 +366,7 @@ void Renderer::execute_range(const CommandStream& stream,size_t begin,size_t end
     if(failed_)break;
     switch(c.type) {
     case CommandType::Clear:clear_current(c.clear.color,c.clear.depth,c.clear.colorEnable,c.clear.colorEnable,c.clear.depthEnable);break;
-    case CommandType::Draw:draw(c.draw);break;
+    case CommandType::Draw:draw(stream.draw_packet(c.drawIndex));break;
     case CommandType::SetRenderTarget:
       if(c.target.target) {if(!bind_efb(c.target.target))failed_=true;} else bind_default();break;
     case CommandType::CopyEfb:if(c.copy.destination&&!blit_efb(c.copy.destination))failed_=true;break;

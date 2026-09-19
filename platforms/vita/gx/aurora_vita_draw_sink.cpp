@@ -758,12 +758,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if(gpuGeometry){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
     fixedVertexUniforms_.push_back(gfx::fixed_vertex_uniforms(translatedGpuPipeline_,vertexState));
-    gfx::DrawPacket packet{};
+    gfx::DrawPacket& packet=stream_.emplace_draw();
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
     packet.textures=bindings;packet.uniforms=uniforms;packet.viewport=translate_viewport();packet.scissor=translate_scissor();
     packet.fixedVertexUniforms=&fixedVertexUniforms_.back();
-    stream_.draw(packet);enqueued=true;
+    enqueued=true;
     queuedPipelineValid_=false;
   }else if(useStreamed) {
     enqueued=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
