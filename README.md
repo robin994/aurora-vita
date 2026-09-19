@@ -44,6 +44,27 @@ implementation used is Chromium's [Dawn](https://dawn.googlesource.com/dawn/).
 
 See [docs/building.md](docs/building.md) for build instructions, CMake integration, and configuration options.
 
+### PS Vita backends
+
+Aurora Vita provides two mutually exclusive experimental hardware renderer paths:
+
+- **VitaGL** for the vitaGL-based renderer.
+- **GXM** for the native `sceGxm` renderer.
+
+The Vita backend exposes both conservative defaults and opt-in performance paths for native GX
+textures, CMPR/BC1, streaming, reduced internal resolution, D16 depth, GPU geometry, diagnostics,
+and memory tuning. Experimental options can change framebuffer output or synchronization behavior,
+so they should be validated on real hardware before becoming a port default.
+
+See the [Aurora Vita Wiki](docs/wiki/Home.md) for:
+
+- the complete [experimental flag matrix](docs/wiki/Experimental-Flags.md);
+- [native GXM configuration](docs/wiki/GXM-Backend.md);
+- [VitaGL configuration](docs/wiki/VitaGL-Backend.md);
+- [runtime and memory tuning](docs/wiki/Runtime-Tuning.md);
+- [hardware validation and profiling](docs/wiki/Diagnostics-and-Validation.md);
+- [known-safe configuration recipes](docs/wiki/Configuration-Recipes.md).
+
 ### License
 
 Aurora is licensed under the [MIT License](LICENSE).
