@@ -65,9 +65,18 @@ Run depth-heavy stages and inspect z-fighting before considering performance.
 
 ```cpp
 cfg.static_geometry_budget = 8 * 1024 * 1024;
+cfg.gxm_lit_fixed_vertex_gpu = true;
 ```
 
-Do not combine this first test with reduced resolution, native GXM textures or D16. A single-variable experiment makes regressions bisectable.
+This is currently the GXM experimental default. For the A/B control use:
+
+```cpp
+cfg.static_geometry_budget = 0;
+cfg.gxm_lit_fixed_vertex_gpu = false;
+```
+
+Do not combine the first comparison with reduced resolution, native GXM textures or D16. A
+single-variable experiment makes regressions bisectable.
 
 ## Conservative VitaGL debug control
 

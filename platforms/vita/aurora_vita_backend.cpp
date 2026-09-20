@@ -424,6 +424,14 @@ PerformanceSnapshot performance_snapshot() noexcept {
   out.nativeEfbTransferSubmitUs=stats.nativeEfbTransferSubmitUs;
   out.nativeEfbTransferWaitUs=stats.nativeEfbTransferWaitUs;
   out.nativeEfbCpuFixupUs=stats.nativeEfbCpuFixupUs;
+  if(g_drawSink) {
+    const auto memory=g_drawSink->memory_budget();
+    out.staticGeometryHits=memory.staticGeometryHits;
+    out.staticGeometryMisses=memory.staticGeometryMisses;
+    out.staticGeometryLookupFallbacks=memory.staticGeometryLookupFallbacks;
+    out.staticGeometryBytes=memory.staticGeometryBytes;
+    out.staticGeometryEntries=memory.staticGeometryEntries;
+  }
   return out;
 }
 gfx::Renderer& renderer() noexcept{return *g_renderer;}

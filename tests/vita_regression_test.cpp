@@ -114,7 +114,13 @@ void command_lifetimes() {
 int main() {
   compiled_decode_equivalence();arena_boundaries();bounded_mips();command_lifetimes();
   const aurora::vita::BackendConfig defaults{};
+#if defined(AURORA_VITA_RENDERER_GXM)
+  CHECK(defaults.static_geometry_budget==8*1024*1024);
+  CHECK(defaults.gxm_lit_fixed_vertex_gpu);
+#else
   CHECK(defaults.static_geometry_budget==0);
+  CHECK(!defaults.gxm_lit_fixed_vertex_gpu);
+#endif
   CHECK(defaults.render_width==0&&defaults.render_height==0);
   CHECK(!defaults.gxm_d16_depth);
   std::printf("vita regression: %u checks, %u failures\n",checks,failures);

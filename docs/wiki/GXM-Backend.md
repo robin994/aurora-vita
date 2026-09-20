@@ -19,10 +19,13 @@ config.log_level = aurora::vita::RuntimeLogLevel::Info;
 config.render_width = 0;
 config.render_height = 0;
 config.gxm_d16_depth = false;
-config.static_geometry_budget = 0;
+config.static_geometry_budget = 0;          // explicit CPU/control override
+config.gxm_lit_fixed_vertex_gpu = false;    // explicit CPU/control override
 ```
 
-This baseline intentionally favors correctness over peak throughput.
+This explicit baseline intentionally favors correctness over peak throughput. The current GXM
+experimental profile defaults to an 8 MiB immutable geometry cache with
+`gxm_lit_fixed_vertex_gpu=true` so it can be A/B tested on hardware.
 
 For a quiet shipping build set `config.log_level = RuntimeLogLevel::Silent`. Explicit telemetry,
 coverage, and trace paths still write if configured.
@@ -39,10 +42,10 @@ Use `pipeline_warmup_path` to override the manifest location.
 `gxm_scenes_per_frame` defaults to 5 and should remain above the title's measured peak native
 scene count.
 
-`gxm_lit_fixed_vertex_gpu` defaults to **false**. When enabled, eligible immutable lit geometry
-can keep GX lighting/texgen work on the native GXM vertex path. Treat it as an A/B experiment
-against the CPU vertex path and validate lighting, matrix updates, normals, texgen, and animation
-before enabling it per-title.
+`gxm_lit_fixed_vertex_gpu` currently defaults to **true on GXM** as an experimental hardware
+profile. Eligible immutable lit geometry can keep GX lighting/texgen work on the native GXM vertex
+path. Compare against an explicit `false` CPU control and validate lighting, matrix updates,
+normals, texgen, and animation before promoting the result beyond the experiment.
 
 ## GXM experimental flags
 
@@ -101,13 +104,13 @@ Accept only after long-distance geometry, coplanar surfaces, shadows, particles,
 
 ### `BackendConfig::static_geometry_budget`
 
-Default: **0**
+Current GXM experimental default: **8 MiB**. VitaGL/host default: **0**.
 
 Enables the experimental fixed-geometry GPU path/cache when non-zero.
 
 This path must remain opt-in until the eligible vertex categories are validated against the CPU reference path. It is especially sensitive to matrix, lighting, texgen, FIFO source revision, and cache lifetime.
 
-Use telemetry:
+Use an explicit `0` budget for the conservative CPU control. Use telemetry:
 - geometry cache hits/misses;
 - resident geometry bytes;
 - lookup fallback count;

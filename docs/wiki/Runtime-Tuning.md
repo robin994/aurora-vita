@@ -55,6 +55,9 @@ Important fields:
 - `nativePipelineUs`, `nativeTextureUs`, `nativeDrawUs` — sampled native submission phases;
   consult `nativeTimingsSampled` because these are intentionally sampled rather than timed every frame.
 - EFB copy and scene counters/timings are included in the same snapshot.
+- `staticGeometryHits`, `staticGeometryMisses`, `staticGeometryBytes`,
+  `staticGeometryEntries` — verify that the experimental geometry cache is actually active and
+  reusing immutable draws instead of silently falling back to the CPU path.
 
 This API does not print or write anything, so a port can sample it selectively or forward it through
 its own low-overhead transport such as a batched UDP diagnostic channel.

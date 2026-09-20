@@ -37,6 +37,11 @@ struct PerformanceSnapshot {
   uint64_t nativeEfbTransferSubmitUs=0;
   uint64_t nativeEfbTransferWaitUs=0;
   uint64_t nativeEfbCpuFixupUs=0;
+  uint64_t staticGeometryHits=0;
+  uint64_t staticGeometryMisses=0;
+  uint64_t staticGeometryLookupFallbacks=0;
+  size_t staticGeometryBytes=0;
+  size_t staticGeometryEntries=0;
 };
 struct BackendConfig {
   uint32_t width=960,height=544;
@@ -87,12 +92,16 @@ struct BackendConfig {
   // Native GXM render-target scene budget. Gameplay telemetry should stay below
   // this in steady state; Strikers currently averages ~2.4 and peaks at 3.
   uint32_t gxm_scenes_per_frame=5;
-  // Experimental native-GXM path: keep GX vertex lighting/texgen on the GPU for
-  // eligible immutable geometry. Disabled by default so ports can A/B against
-  // the graphics-proven CPU path.
+  // Experimental native-GXM A/B profile: cache immutable geometry and keep
+  // eligible lit GX vertex work on the GPU. VitaGL/host keep the conservative
+  // CPU defaults. Ports can still force the GXM control path with false/0.
+#if defined(AURORA_VITA_RENDERER_GXM)
+  bool gxm_lit_fixed_vertex_gpu=true;
+  size_t static_geometry_budget=8*1024*1024;
+#else
   bool gxm_lit_fixed_vertex_gpu=false;
-  // Opt-in until fixed-GPU lighting/texgen matches the CPU path on hardware.
   size_t static_geometry_budget=0;
+#endif
   // Minimum vertices for immutable display-list geometry to use the native
   // fixed-vertex GPU cache. Dynamic/untracked sources retain the conservative
   // 48-vertex floor in DrawSink regardless of this value.
