@@ -262,6 +262,9 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.programBinaryCachePath=g_programCachePath.empty()?nullptr:g_programCachePath.c_str();
   rc.pipelineWarmupPath=g_pipelineWarmupPath.empty()?nullptr:g_pipelineWarmupPath.c_str();
   rc.pipelinePrewarmLimit=c.pipeline_prewarm_limit;
+  rc.preloadProgramBinaryCache=c.gxm_preload_program_cache;
+  rc.programBinaryPreloadLimit=c.gxm_program_cache_preload_limit;
+  rc.sealRuntimeShaderCompilationAfterPrewarm=c.gxm_seal_shader_cache_after_prewarm;
 #else
   rc.programBinaryCachePath=g_programCachePath.empty()?nullptr:g_programCachePath.c_str();
   rc.pipelineWarmupPath=g_pipelineWarmupPath.empty()?nullptr:g_pipelineWarmupPath.c_str();
@@ -424,6 +427,12 @@ PerformanceSnapshot performance_snapshot() noexcept {
   out.nativeEfbTransferSubmitUs=stats.nativeEfbTransferSubmitUs;
   out.nativeEfbTransferWaitUs=stats.nativeEfbTransferWaitUs;
   out.nativeEfbCpuFixupUs=stats.nativeEfbCpuFixupUs;
+  out.shaderRuntimeCompilationEnabled=g_renderer->runtime_shader_compilation_enabled();
+  out.shaderRuntimeCompiles=g_renderer->runtime_shader_compiles();
+  out.shaderRuntimeCompileUs=g_renderer->runtime_shader_compile_us();
+  out.shaderCompileBlockedMisses=g_renderer->blocked_shader_compile_misses();
+  out.shaderDiskCacheHits=g_renderer->program_cache_hits();
+  out.shaderDiskCacheMisses=g_renderer->program_cache_misses();
   if(g_drawSink) {
     const auto memory=g_drawSink->memory_budget();
     out.staticGeometryHits=memory.staticGeometryHits;
@@ -433,6 +442,12 @@ PerformanceSnapshot performance_snapshot() noexcept {
     out.staticGeometryEntries=memory.staticGeometryEntries;
   }
   return out;
+}
+void set_runtime_shader_compilation_enabled(bool enabled) noexcept {
+  if(g_renderer)g_renderer->set_runtime_shader_compilation_enabled(enabled);
+}
+bool runtime_shader_compilation_enabled() noexcept {
+  return g_renderer&&g_renderer->runtime_shader_compilation_enabled();
 }
 gfx::Renderer& renderer() noexcept{return *g_renderer;}
 gxbridge::DrawSink& draw_sink() noexcept{return *g_drawSink;}

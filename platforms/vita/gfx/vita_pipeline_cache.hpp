@@ -50,6 +50,7 @@ public:
   void configure_hot_manifest(const char* path,size_t prewarmLimit=192) noexcept;
   size_t prewarm_hot(FrameStats* stats=nullptr) noexcept;
   void save_hot_manifest() noexcept;
+  void clear_blocked_compile_misses() noexcept { blockedKeys_.clear(); }
   void pin(uint64_t key) noexcept { if(key) pinned_.insert(key); }
   void clear_pins() noexcept { pinned_.clear(); }
   void trim_to_budget() noexcept;
@@ -74,6 +75,9 @@ private:
   // same broken TEV program every draw causes severe stalls and repeated compiler
   // pressure on Vita, so suppress it until the cache is explicitly cleared.
   FlatHashSet<uint64_t> failedKeys_{};
+  // A sealed GXM cache miss is not a permanent shader failure. Suppress
+  // repeated disk lookups while sealed, then retry when compilation is reopened.
+  FlatHashSet<uint64_t> blockedKeys_{};
   uint64_t bound_=0;
   CompiledPipeline* boundPipeline_=nullptr;
   FixedStateSnapshot fixedState_{};

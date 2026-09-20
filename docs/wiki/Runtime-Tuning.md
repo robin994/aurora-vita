@@ -164,6 +164,38 @@ ux0:data/aurora-vita/<TITLE_ID>/pipeline_hot_v1.bin
 Prewarm trades startup/loading work and memory residency for fewer first-use pipeline stalls during
 gameplay. Compare cold and warm boots separately.
 
+### Zero runtime shader compilation on GXM
+
+For a trained per-title cache, GXM can guarantee that gameplay never calls vitaShaRK:
+
+```cpp
+cfg.gxm_preload_program_cache = true;
+cfg.gxm_program_cache_preload_limit = 1024;
+cfg.gxm_seal_shader_cache_after_prewarm = true;
+```
+
+The preload validates cached GXP programs with `sceGxmProgramCheck()` before placing them in the
+in-memory stage cache. The seal is applied only after the hot-pipeline prewarm. Once sealed, a
+missing stage is **not compiled**; the affected pipeline creation fails for that draw and
+`shaderCompileBlockedMisses` increases.
+
+This therefore requires a training/cold run with sealing disabled first. Exercise menus, gameplay,
+stages and effects that the shipping session must support so their GXP binaries are persisted.
+For games that know their loading/gameplay boundary, the stricter alternative is to leave automatic
+sealing disabled and call:
+
+```cpp
+aurora::vita::set_runtime_shader_compilation_enabled(false);
+```
+
+after loading. Re-enable it only during a controlled loading/training phase if new shader variants
+are intentionally allowed.
+
+`performance_snapshot()` exposes `shaderRuntimeCompilationEnabled`, `shaderRuntimeCompiles`,
+`shaderRuntimeCompileUs`, `shaderCompileBlockedMisses`, `shaderDiskCacheHits`, and
+`shaderDiskCacheMisses`. On a validated warm gameplay run, `shaderRuntimeCompiles` must remain
+constant after the seal and `shaderCompileBlockedMisses` should remain zero.
+
 Automatic shader failure artifacts also live under the same per-title root, in
 `shader_failures/`, instead of a project-specific or global Aurora directory.
 

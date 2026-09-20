@@ -46,6 +46,9 @@ These are members of `aurora::vita::BackendConfig`, not CMake options.
 | `data_root_path` | `nullptr` | Common | Null automatically resolves to `ux0:data/aurora-vita/<TITLE_ID>`. Override only when a port intentionally owns a different writable data root. |
 | `pipeline_warmup_path` | `nullptr` | GXM | Null selects `<data_root>/pipeline_hot_v1.bin` for the native GXM hot-pipeline manifest. An explicit path overrides the per-title default. |
 | `pipeline_prewarm_limit` | `192` | Common | Maximum hot pipelines compiled/resident during startup prewarm when a warmup manifest is configured. |
+| `gxm_preload_program_cache` | `false` | GXM | Warm-cache experiment. Loads validated cached GXP stages into RAM before pipeline prewarm so first gameplay use avoids shader-cache file I/O. |
+| `gxm_program_cache_preload_limit` | `1024` | GXM | Maximum cached GXP stages loaded by the warm-cache preload. |
+| `gxm_seal_shader_cache_after_prewarm` | `false` | GXM | Strict warm-cache mode. After prewarm, cache misses are counted and rejected instead of invoking vitaShaRK. Use only after a training run has populated the per-title cache. |
 | `profile_split_vertex_phases` | `false` | Common | Profiling-only. Changes execution/cache behavior; do not compare its FPS directly with fused mode. |
 | `diagnostic_draw_limit` | `0` | Common | Diagnostic. Caps submitted GX draw packets for framebuffer bisection. |
 | `strict_unsupported` | `false` | Common | Diagnostic/development. Promotes unsupported paths to strict failures. |

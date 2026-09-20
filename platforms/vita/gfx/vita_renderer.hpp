@@ -26,6 +26,9 @@ struct RendererConfig {
   const char* programBinaryCachePath=nullptr;
   const char* pipelineWarmupPath=nullptr;
   size_t pipelinePrewarmLimit=192;
+  bool preloadProgramBinaryCache=false;
+  size_t programBinaryPreloadLimit=1024;
+  bool sealRuntimeShaderCompilationAfterPrewarm=false;
 };
 class Renderer {
 public:
@@ -36,6 +39,14 @@ public:
   bool readback_rgba8(std::vector<uint8_t>& pixels) noexcept;
   const char* last_error() const noexcept;
   bool failed() const noexcept { return failed_; }
+  void set_runtime_shader_compilation_enabled(bool enabled) noexcept;
+  bool runtime_shader_compilation_enabled() const noexcept;
+  bool last_pipeline_compile_blocked() const noexcept;
+  uint64_t runtime_shader_compiles() const noexcept;
+  uint64_t runtime_shader_compile_us() const noexcept;
+  uint64_t blocked_shader_compile_misses() const noexcept;
+  uint32_t program_cache_hits() const noexcept;
+  uint32_t program_cache_misses() const noexcept;
   static constexpr bool supports_fixed_vertex() noexcept {
     return true;
   }

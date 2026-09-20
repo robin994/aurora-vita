@@ -365,6 +365,10 @@ struct Renderer::Impl {
   bool efbCopyFlipX = false, efbCopyFlipY = false, efbCopyGeometryValid = false;
   ProgramBinaryCache programCache;
   uint32_t stageMemoryHits = 0, stageCompiles = 0;
+  uint64_t stageCompileUs = 0;
+  uint64_t blockedStageCompiles = 0;
+  bool runtimeShaderCompileEnabled = true;
+  bool pipelineCompileBlocked = false;
   uint64_t sceneWindowSum = 0;
   uint32_t sceneWindowFrames = 0;
   uint64_t displayQueueWindowSum = 0;
@@ -478,6 +482,11 @@ struct Renderer::Impl {
       error.clear();
       compiled->code.clear();
     }
+    if (!runtimeShaderCompileEnabled) {
+      ++blockedStageCompiles;
+      pipelineCompileBlocked = true;
+      return {};
+    }
     if (source.size() > UINT32_MAX) { fail("shader source too large"); return {}; }
     const uint64_t started = sceKernelGetProcessTimeWide();
     uint32_t size = uint32_t(source.size());
@@ -523,6 +532,7 @@ struct Renderer::Impl {
     stageCache.emplace(sourceHash, compiled);
     ++stageCompiles;
     const uint64_t elapsed = sceKernelGetProcessTimeWide() - started;
+    stageCompileUs += elapsed;
     if (stageCompiles <= 8 || (stageCompiles & (stageCompiles - 1)) == 0)
       AURORA_VITA_LOG_INFO(
           "[aurora-gxm] stage_compile stage=%c hash=%016llx us=%llu compiled=%u mem_hits=%u disk_hits=%u disk_misses=%u\n",
@@ -537,6 +547,30 @@ Renderer::Renderer() : impl_(new Impl) {}
 Renderer::~Renderer() { shutdown(); }
 const char* Renderer::last_error() const noexcept { return impl_->error.c_str(); }
 const FrameStats& Renderer::stats() const noexcept { return impl_->stats; }
+void Renderer::set_runtime_shader_compilation_enabled(bool enabled) noexcept {
+  impl_->runtimeShaderCompileEnabled = enabled;
+}
+bool Renderer::runtime_shader_compilation_enabled() const noexcept {
+  return impl_->runtimeShaderCompileEnabled;
+}
+bool Renderer::last_pipeline_compile_blocked() const noexcept {
+  return impl_->pipelineCompileBlocked;
+}
+uint64_t Renderer::runtime_shader_compiles() const noexcept {
+  return impl_->stageCompiles;
+}
+uint64_t Renderer::runtime_shader_compile_us() const noexcept {
+  return impl_->stageCompileUs;
+}
+uint64_t Renderer::blocked_shader_compile_misses() const noexcept {
+  return impl_->blockedStageCompiles;
+}
+uint32_t Renderer::program_cache_hits() const noexcept {
+  return impl_->programCache.hits();
+}
+uint32_t Renderer::program_cache_misses() const noexcept {
+  return impl_->programCache.misses();
+}
 
 bool Renderer::initialize(const Config& config) {
   auto& d = *impl_;
@@ -611,6 +645,20 @@ bool Renderer::initialize(const Config& config) {
   shark_install_log_cb(shader_log);
   shark_set_warnings_level(SHARK_WARN_HIGH);
   d.programCache.configure(config.programCachePath);
+  d.runtimeShaderCompileEnabled = true;
+  d.pipelineCompileBlocked = false;
+  if (config.preloadProgramCache && config.programCachePreloadLimit) {
+    std::vector<PreloadedProgram> programs;
+    d.programCache.preload(programs, config.programCachePreloadLimit);
+    for (auto& program : programs) {
+      if (program.words.empty() ||
+          sceGxmProgramCheck(reinterpret_cast<const SceGxmProgram*>(program.words.data())) < 0)
+        continue;
+      auto compiled = std::make_shared<Impl::CompiledStage>();
+      compiled->code = std::move(program.words);
+      d.stageCache.emplace(program.sourceHash, std::move(compiled));
+    }
+  }
   d.initialized = true;
   PipelineDesc clear{};
   clear.reversedZ = false; clear.cull = CullMode::None; clear.depthFunc = Compare::Always;
@@ -634,6 +682,7 @@ bool Renderer::initialize(const Config& config) {
 uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   auto& d = *impl_;
   if (!d.initialized) { d.fail("create pipeline before initialization"); return 0; }
+  d.pipelineCompileBlocked = false;
   PipelineDesc nativeDesc=desc;
   // Region clipping is tile-granular. Keep the requested fragment scissor for
   // exact GX edges; it may only be omitted by full-target internal passes.
@@ -656,8 +705,9 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   for(const auto& channel:nativeDesc.colorChannels)if(channel.lightingEnabled)
     for(unsigned i=0;i<MaxLights;++i)if(channel.lightMask&(1u<<i))p.lightTop=static_cast<uint8_t>(std::max<unsigned>(p.lightTop,i+1u));
   p.vertexCode = d.compile_stage(source.vertex, SHARK_VERTEX_SHADER, ProgramStage::Vertex);
+  if (!p.vertexCode) return 0;
   p.fragmentCode = d.compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
-  if (!p.vertexCode || !p.fragmentCode) return 0;
+  if (!p.fragmentCode) return 0;
   const auto* vp = reinterpret_cast<const SceGxmProgram*>(p.vertexCode->code.data());
   const auto* fp = reinterpret_cast<const SceGxmProgram*>(p.fragmentCode->code.data());
   const auto abort = [&]() { d.destroy_pipeline(p); return uint64_t{0}; };
@@ -1687,7 +1737,8 @@ void Renderer::shutdown() noexcept {
   d.initialized = false; d.displayed = false; d.resourceBytes = 0;
   d.frameActive=false;d.depthValid=false;d.boundTarget=0;d.blitVertices=0;d.displaySource=0;d.copyVertices=0;
   d.pendingVertexDependency=nullptr;d.displayCopySourceValid=false;d.efbCopyGeometryValid=false;
-  d.stageMemoryHits=0;d.stageCompiles=0;
+  d.stageMemoryHits=0;d.stageCompiles=0;d.stageCompileUs=0;d.blockedStageCompiles=0;
+  d.runtimeShaderCompileEnabled=true;d.pipelineCompileBlocked=false;
   d.clearVertices = d.clearIndices = 0; d.clearPipeline = 0;
   d.front = 0; d.back = 1;
 }

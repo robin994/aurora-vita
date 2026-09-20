@@ -42,6 +42,12 @@ struct PerformanceSnapshot {
   uint64_t staticGeometryLookupFallbacks=0;
   size_t staticGeometryBytes=0;
   size_t staticGeometryEntries=0;
+  bool shaderRuntimeCompilationEnabled=false;
+  uint64_t shaderRuntimeCompiles=0;
+  uint64_t shaderRuntimeCompileUs=0;
+  uint64_t shaderCompileBlockedMisses=0;
+  uint32_t shaderDiskCacheHits=0;
+  uint32_t shaderDiskCacheMisses=0;
 };
 struct BackendConfig {
   uint32_t width=960,height=544;
@@ -112,6 +118,12 @@ struct BackendConfig {
   const char* program_binary_cache_path=nullptr;
   const char* pipeline_warmup_path=nullptr;
   size_t pipeline_prewarm_limit=192;
+  // GXM warm-cache mode. Preload validated GXP binaries into RAM before the
+  // hot-pipeline prewarm, then optionally seal vitaShaRK so gameplay can never
+  // compile a new stage. Keep sealing off for cold/training runs.
+  bool gxm_preload_program_cache=false;
+  size_t gxm_program_cache_preload_limit=1024;
+  bool gxm_seal_shader_cache_after_prewarm=false;
   // Diagnostic only: submit at most this many GX draw packets per frame. Zero
   // disables the limit. Useful for framebuffer bisection of rendering faults.
   uint32_t diagnostic_draw_limit=0;
@@ -133,6 +145,10 @@ void discard_present() noexcept;
 void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
 uint64_t frame_index() noexcept;uint64_t last_frame_time_us() noexcept;uint32_t width() noexcept;uint32_t height() noexcept;
 PerformanceSnapshot performance_snapshot() noexcept;
+// GXM only: disabling runtime compilation guarantees that cache misses never
+// call vitaShaRK. Missing stages fail that draw instead of stalling to compile.
+void set_runtime_shader_compilation_enabled(bool enabled) noexcept;
+bool runtime_shader_compilation_enabled() noexcept;
 gfx::Renderer& renderer() noexcept;
 gxbridge::DrawSink& draw_sink() noexcept;
 gfx::Telemetry& telemetry() noexcept;

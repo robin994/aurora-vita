@@ -186,7 +186,11 @@ size_t PipelineCache::prewarm_hot(FrameStats* stats) noexcept {
   for(const auto& [key,record]:ordered){
     if(warmed>=prewarmLimit_||map_.size()>=maxEntries_)break;
     if(map_.contains(key))continue;
-    if(!native_->create_pipeline(record->desc)){failedKeys_.insert(key);++compileFailures_;continue;}
+    if(!native_->create_pipeline(record->desc)){
+      if(native_->last_pipeline_compile_blocked())blockedKeys_.insert(key);
+      else {failedKeys_.insert(key);++compileFailures_;}
+      continue;
+    }
     CompiledPipeline p{};p.key=key;p.desc=record->desc;p.lastUsed=++useSequence_;
     map_.emplace(key,std::move(p));++warmed;
     if(stats)++stats->pipelineHits;
@@ -224,9 +228,13 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& desc,Fr
   auto it=map_.find(key);
   if(it!=map_.end()) {it->second.lastUsed=++useSequence_;if(stats)++stats->pipelineHits;return &it->second;}
   if(stats)++stats->pipelineMisses;
-  if(!native_ || failedKeys_.contains(key))return nullptr;
+  if(!native_ || failedKeys_.contains(key) || blockedKeys_.contains(key))return nullptr;
   if(maxEntries_ && map_.size()>=maxEntries_)evict_one();
-  if(!native_->create_pipeline(desc)) {failedKeys_.insert(key);++compileFailures_;return nullptr;}
+  if(!native_->create_pipeline(desc)) {
+    if(native_->last_pipeline_compile_blocked())blockedKeys_.insert(key);
+    else {failedKeys_.insert(key);++compileFailures_;}
+    return nullptr;
+  }
   CompiledPipeline p{};p.key=key;p.desc=desc;p.lastUsed=++useSequence_;
   const auto result=map_.emplace(key,std::move(p));
   highWaterEntries_=std::max(highWaterEntries_,map_.size());
@@ -246,7 +254,7 @@ void PipelineCache::clear() noexcept {
   save_hot_manifest();
   if(native_)native_->finish();
   for(auto& [_,p]:map_)destroy_pipeline(p);
-  map_.clear();pinned_.clear();failedKeys_.clear();invalidate_bound();
+  map_.clear();pinned_.clear();failedKeys_.clear();blockedKeys_.clear();invalidate_bound();
 }
 
 EfbManager::~EfbManager() {clear();}
@@ -359,11 +367,15 @@ bool Renderer::initialize() noexcept {
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
   c.d16Depth=cfg_.nativeD16Depth;
   c.programCachePath=cfg_.programBinaryCachePath;
+  c.preloadProgramCache=cfg_.preloadProgramBinaryCache;
+  c.programCachePreloadLimit=cfg_.programBinaryPreloadLimit;
   c.maxPipelines=cfg_.pipelineBudget+16; // Native clear/blit variants are not GX cache entries.
   if(!native_->initialize(c))return false;
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=native_.get();
   pipelines_.configure_hot_manifest(cfg_.pipelineWarmupPath,cfg_.pipelinePrewarmLimit);
   pipelines_.prewarm_hot();
+  if(cfg_.sealRuntimeShaderCompilationAfterPrewarm)
+    native_->set_runtime_shader_compilation_enabled(false);
   targetWidth_=cfg_.width;targetHeight_=cfg_.height;initialized_=true;failed_=false;
   return true;
 }
@@ -374,6 +386,31 @@ void Renderer::shutdown() noexcept {
   native_->shutdown();initialized_=false;
 }
 const char* Renderer::last_error() const noexcept {return native_->last_error();}
+void Renderer::set_runtime_shader_compilation_enabled(bool enabled) noexcept {
+  if(enabled)pipelines_.clear_blocked_compile_misses();
+  native_->set_runtime_shader_compilation_enabled(enabled);
+}
+bool Renderer::runtime_shader_compilation_enabled() const noexcept {
+  return native_->runtime_shader_compilation_enabled();
+}
+bool Renderer::last_pipeline_compile_blocked() const noexcept {
+  return native_->last_pipeline_compile_blocked();
+}
+uint64_t Renderer::runtime_shader_compiles() const noexcept {
+  return native_->runtime_shader_compiles();
+}
+uint64_t Renderer::runtime_shader_compile_us() const noexcept {
+  return native_->runtime_shader_compile_us();
+}
+uint64_t Renderer::blocked_shader_compile_misses() const noexcept {
+  return native_->blocked_shader_compile_misses();
+}
+uint32_t Renderer::program_cache_hits() const noexcept {
+  return native_->program_cache_hits();
+}
+uint32_t Renderer::program_cache_misses() const noexcept {
+  return native_->program_cache_misses();
+}
 void Renderer::begin_frame() noexcept {
   pipelines_.clear_pins();pipelines_.trim_to_budget();stats_={};
   failed_=!native_->begin_frame();boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;

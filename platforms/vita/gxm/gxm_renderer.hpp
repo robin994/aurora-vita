@@ -20,6 +20,8 @@ struct Config {
   bool d16Depth = false;
   const char* shaderCompilerPath = nullptr;
   const char* programCachePath = nullptr;
+  bool preloadProgramCache = false;
+  size_t programCachePreloadLimit = 1024;
 };
 
 // Native implementation used by the public gfx::Renderer facade and the device
@@ -33,6 +35,14 @@ public:
   Renderer& operator=(const Renderer&) = delete;
   bool initialize(const Config& config = {});
   void shutdown() noexcept;
+  void set_runtime_shader_compilation_enabled(bool enabled) noexcept;
+  bool runtime_shader_compilation_enabled() const noexcept;
+  bool last_pipeline_compile_blocked() const noexcept;
+  uint64_t runtime_shader_compiles() const noexcept;
+  uint64_t runtime_shader_compile_us() const noexcept;
+  uint64_t blocked_shader_compile_misses() const noexcept;
+  uint32_t program_cache_hits() const noexcept;
+  uint32_t program_cache_misses() const noexcept;
   uint64_t create_pipeline(const gfx::PipelineDesc& desc);
   void destroy_pipeline(uint64_t key);
   gfx::Handle create_buffer(const void* data, size_t bytes);

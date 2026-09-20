@@ -22,6 +22,14 @@ void Renderer::shutdown() noexcept {if(!initialized_)return;pipelines_.clear();t
 void Renderer::begin_frame() noexcept {pipelines_.clear_pins();pipelines_.trim_to_budget();stats_={};invalidate_draw_state();}
 void Renderer::end_frame() noexcept {textures_.trim(frame_);frame_++;}
 const char* Renderer::last_error() const noexcept { return ""; }
+void Renderer::set_runtime_shader_compilation_enabled(bool) noexcept {}
+bool Renderer::runtime_shader_compilation_enabled() const noexcept { return true; }
+bool Renderer::last_pipeline_compile_blocked() const noexcept { return false; }
+uint64_t Renderer::runtime_shader_compiles() const noexcept { return 0; }
+uint64_t Renderer::runtime_shader_compile_us() const noexcept { return 0; }
+uint64_t Renderer::blocked_shader_compile_misses() const noexcept { return 0; }
+uint32_t Renderer::program_cache_hits() const noexcept { return 0; }
+uint32_t Renderer::program_cache_misses() const noexcept { return 0; }
 bool Renderer::present(bool display) noexcept {
 #if defined(__vita__)
   if(display) vglSwapBuffers(GL_FALSE);

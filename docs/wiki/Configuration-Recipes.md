@@ -78,6 +78,29 @@ cfg.gxm_lit_fixed_vertex_gpu = false;
 Do not combine the first comparison with reduced resolution, native GXM textures or D16. A
 single-variable experiment makes regressions bisectable.
 
+## GXM zero-gameplay shader compilation
+
+First perform a training run with the normal compiler path enabled:
+
+```cpp
+cfg.gxm_preload_program_cache = false;
+cfg.gxm_seal_shader_cache_after_prewarm = false;
+```
+
+Exercise the menus, stages, characters and effects that must be available without compilation.
+On the next warm run use:
+
+```cpp
+cfg.gxm_preload_program_cache = true;
+cfg.gxm_program_cache_preload_limit = 1024;
+cfg.pipeline_prewarm_limit = 512;
+cfg.gxm_seal_shader_cache_after_prewarm = true;
+```
+
+After initialization, `shark_compile_shader()` cannot run. A previously unseen shader stage becomes
+a counted blocked miss instead of a gameplay compile. Verify that
+`performance_snapshot().shaderCompileBlockedMisses == 0` for the complete test session.
+
 ## Conservative VitaGL debug control
 
 ```sh
