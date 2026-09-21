@@ -83,10 +83,14 @@ void GXCallDisplayListLE(const void* data, u32 nbytes) {
     __GXSendFlushPrim();
   }
 
-  // Decode little-endian lists separately after finishing the normal FIFO work.
+  // Decode little-endian lists on the same GX consumer that owns the frontend
+  // state and renderer. The call is synchronous because the caller may reuse
+  // the display-list storage immediately after this function returns.
+#if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::process_sync(static_cast<const u8*>(data), nbytes, false);
+#else
   aurora::gx::fifo::drain();
-
-  // Process the display list through the command processor (little-endian)
   aurora::gx::fifo::process(static_cast<const u8*>(data), nbytes, false);
+#endif
 }
 }

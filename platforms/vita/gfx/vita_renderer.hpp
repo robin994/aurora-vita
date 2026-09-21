@@ -11,6 +11,7 @@
 namespace aurora::vita::gfx {
 struct RendererConfig {
   uint32_t width=960,height=544;
+  uint32_t renderWidth=0,renderHeight=0;
   size_t textureBudget=24*1024*1024;
   size_t pipelineBudget=512;
   uint32_t displayBuffers=3;
@@ -80,6 +81,9 @@ public:
   // GX display copy: crop/scale the current EFB into the presentable backbuffer.
   // Hardware backends may implement this without a CPU readback.
   bool display_copy(const Scissor& src) noexcept;
+  // Physical presentation aspect. Native backends may letter/pillar-box the
+  // completed GX image without changing its logical camera or EFB coordinates.
+  void set_presentation_aspect(float aspect) noexcept;
   // Framebuffer copy. Source coordinates are top-left Aurora/GX coordinates.
   // Backends own synchronization and may use a conservative CPU conversion path.
   // flipX/flipY rotate only the sampled copy, leaving the display path untouched.
@@ -108,6 +112,7 @@ private:
   void invalidate_texture_bindings() noexcept;
   void invalidate_buffer_bindings() noexcept;
   RendererConfig cfg_{};uint32_t targetWidth_=960,targetHeight_=544;Handle boundEfb_=InvalidHandle;
+  Handle mainEfb_=InvalidHandle;
 #if defined(AURORA_VITA_RENDERER_GXM)
   // Declared before the resource facades: the native device outlives them.
   std::unique_ptr<gxm::Renderer> native_;

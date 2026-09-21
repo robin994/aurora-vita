@@ -2,6 +2,7 @@
 
 #if defined(MKW_TARGET_VITA)
 #include "../../vita/gfx_frontend.hpp"
+#include "../../gx/fifo.hpp"
 #else
 #include "../../gfx/depth_peek.hpp"
 #endif
@@ -38,6 +39,7 @@ void GXPokeARGB(u16, u16, u32) {
 }
 
 void GXPeekZ(u16, u16, u32* z) {
+  aurora::gx::fifo::drain_sync();
   if (z != nullptr) *z = g_gxState.clearDepth & 0x00ffffffu;
 }
 

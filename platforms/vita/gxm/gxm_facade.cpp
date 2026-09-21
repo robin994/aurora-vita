@@ -67,6 +67,24 @@ Handle TextureCache::get_or_upload(const TextureDesc& desc,uint64_t frame,FrameS
   if(desc.cacheable) {
     const auto it=byKey_.find(stableKey);
     if(it!=byKey_.end()) { it->second.lastUse=frame;if(stats)++stats->textureHits;return it->second.handle; }
+  } else {
+    // Streaming video updates the same GX texture sources every frame. Keep a
+    // four-frame native ring so GXM can consume older frames while the CPU
+    // transcodes directly into a retired slot instead of allocating, submitting,
+    // finishing and destroying three textures for every movie frame.
+    constexpr uint64_t VolatileSlots=4;
+    constexpr uint64_t VolatileSalt=0x9e3779b97f4a7c15ull;
+    const uint64_t ringKey=stableKey ^ (VolatileSalt*(1u+(frame%VolatileSlots)));
+    const auto it=byKey_.find(ringKey);
+    if(it!=byKey_.end() && it->second.volatileRing && it->second.lastUse<frame) {
+      if(native_->update_texture(it->second.handle,desc,true)) {
+        it->second.lastUse=frame;
+        it->second.sourceId=desc.sourceId;it->second.paletteSourceId=desc.paletteSourceId;
+        it->second.sourceBytes=desc.dataSize;it->second.paletteBytes=desc.paletteSize;
+        if(stats){++stats->textureMisses;++stats->textureUploads;}
+        return it->second.handle;
+      }
+    }
   }
   if(stats)++stats->textureMisses;
   if(failedFrame_!=frame) {failedFrame_=frame;failedKeys_.clear();}
@@ -90,13 +108,17 @@ Handle TextureCache::get_or_upload(const TextureDesc& desc,uint64_t frame,FrameS
   const auto handle=native_->create_texture(nativeDesc);
   if(!handle) {++allocFailTotal_;failedKeys_.insert(stableKey);return 0;}
   uint64_t key=stableKey;
+  bool volatileRing=false;
   if(!desc.cacheable) {
-    key^=uint64_t(handle)*0x9e3779b97f4a7c15ull;
-    while(byKey_.contains(key)) ++key;
+    constexpr uint64_t VolatileSlots=4;
+    constexpr uint64_t VolatileSalt=0x9e3779b97f4a7c15ull;
+    const uint64_t ringKey=stableKey ^ (VolatileSalt*(1u+(frame%VolatileSlots)));
+    if(!byKey_.contains(ringKey)) {key=ringKey;volatileRing=true;}
+    else {key^=uint64_t(handle)*VolatileSalt;while(byKey_.contains(key))++key;}
   }
   Entry entry{};
   entry.handle=handle;entry.key=key;entry.lastUse=frame;entry.bytes=native_->texture_bytes(handle);
-  entry.cacheable=desc.cacheable;entry.hasMipmaps=desc.mipCount>1 || desc.generateMipmaps;
+  entry.cacheable=desc.cacheable;entry.volatileRing=volatileRing;entry.hasMipmaps=desc.mipCount>1 || desc.generateMipmaps;
   entry.sourceId=desc.sourceId;entry.paletteSourceId=desc.paletteSourceId;
   entry.sourceBytes=desc.dataSize;entry.paletteBytes=desc.paletteSize;
   auto [it,ok]=byKey_.emplace(key,entry);
@@ -123,7 +145,9 @@ void TextureCache::clear() noexcept {
 }
 void TextureCache::trim(uint64_t frame) noexcept {
   for(auto it=byKey_.begin();it!=byKey_.end();) {
-    if(!it->second.cacheable && it->second.lastUse<frame) {
+    const bool expiredVolatile=it->second.volatileRing && it->second.lastUse+4u<frame;
+    const bool expiredOneShot=!it->second.cacheable && !it->second.volatileRing && it->second.lastUse<frame;
+    if(expiredVolatile || expiredOneShot) {
       const auto h=it->second.handle;++it;erase(h);++evictions_;
     } else ++it;
   }
@@ -372,16 +396,27 @@ bool Renderer::initialize() noexcept {
   c.maxPipelines=cfg_.pipelineBudget+16; // Native clear/blit variants are not GX cache entries.
   if(!native_->initialize(c))return false;
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=native_.get();
+  const uint32_t renderWidth=cfg_.renderWidth?cfg_.renderWidth:cfg_.width;
+  const uint32_t renderHeight=cfg_.renderHeight?cfg_.renderHeight:cfg_.height;
+  if(renderWidth!=cfg_.width || renderHeight!=cfg_.height) {
+    mainEfb_=efb_.create(renderWidth,renderHeight,true);
+    if(!mainEfb_) {
+      native_->shutdown();
+      buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=nullptr;
+      return false;
+    }
+  }
   pipelines_.configure_hot_manifest(cfg_.pipelineWarmupPath,cfg_.pipelinePrewarmLimit);
   pipelines_.prewarm_hot();
   if(cfg_.sealRuntimeShaderCompilationAfterPrewarm)
     native_->set_runtime_shader_compilation_enabled(false);
-  targetWidth_=cfg_.width;targetHeight_=cfg_.height;initialized_=true;failed_=false;
+  targetWidth_=renderWidth;targetHeight_=renderHeight;initialized_=true;failed_=false;
   return true;
 }
 void Renderer::shutdown() noexcept {
   if(!initialized_)return;
   native_->finish();pipelines_.clear();textures_.clear();buffers_.clear();efb_.clear();
+  mainEfb_=InvalidHandle;boundEfb_=InvalidHandle;
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=nullptr;
   native_->shutdown();initialized_=false;
 }
@@ -414,12 +449,21 @@ uint32_t Renderer::program_cache_misses() const noexcept {
 void Renderer::begin_frame() noexcept {
   pipelines_.clear_pins();pipelines_.trim_to_budget();stats_={};
   failed_=!native_->begin_frame();boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;
+  if(!failed_ && mainEfb_ && !bind_efb(mainEfb_)) failed_=true;
 }
 void Renderer::end_frame() noexcept {
   textures_.trim(frame_);++frame_;
-  if((frame_%300u)==0) pipelines_.save_hot_manifest();
+  // Training runs may keep refining the hot manifest. A sealed benchmark run
+  // must stay free of periodic filesystem writes while gameplay is measured.
+  if(native_->runtime_shader_compilation_enabled() && (frame_%300u)==0)
+    pipelines_.save_hot_manifest();
 }
 bool Renderer::present(bool display) noexcept {
+  if(!failed_ && mainEfb_ && boundEfb_==mainEfb_) {
+    const Scissor full{0,0,static_cast<int32_t>(targetWidth_),static_cast<int32_t>(targetHeight_)};
+    if(!native_->blit_to_default(mainEfb_,&full)) failed_=true;
+    else {boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;}
+  }
   const bool ok=native_->end_frame(display);failed_=failed_||!ok;
   // Include internal clears, copies and the final display scene. The last GX
   // draw alone is not a complete snapshot of the native frame.
@@ -458,8 +502,26 @@ bool Renderer::blit_efb(Handle h) noexcept {
   boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;return true;
 }
 bool Renderer::display_copy(const Scissor& src) noexcept {
+  if(mainEfb_ && boundEfb_==mainEfb_) {
+    if(src.x<0 || src.y<0 || src.width<=0 || src.height<=0 ||
+       uint64_t(src.x)+uint64_t(src.width)>targetWidth_ ||
+       uint64_t(src.y)+uint64_t(src.height)>targetHeight_) {
+      failed_=true;return false;
+    }
+    if(!native_->blit_to_default(mainEfb_,&src)) {failed_=true;return false;}
+    // Keep the successfully copied XFB/display surface bound through present.
+    // Rebinding the EFB here caused the following present to scan out black on
+    // hardware. The next begin_frame() rebinds the internal EFB before game draws.
+    boundEfb_=0;
+    targetWidth_=cfg_.width;
+    targetHeight_=cfg_.height;
+    return true;
+  }
   if(!native_->copy_display_region(src)) {failed_=true;return false;}
   boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;return true;
+}
+void Renderer::set_presentation_aspect(float aspect) noexcept {
+  native_->set_presentation_aspect(aspect);
 }
 Handle Renderer::capture_current(Handle existing,const Scissor& s,uint32_t dw,uint32_t dh,EfbCopyFormat f,bool fx,bool fy) noexcept {
   const int64_t y=int64_t(targetHeight_)-s.y-s.height;

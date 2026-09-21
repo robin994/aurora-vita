@@ -2504,6 +2504,33 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pos += 8;
   } else if (subCmd == GX_LOAD_AURORA_INVALIDATE_TEX_ALL) {
     invalidate_static_texture_cache();
+  } else if (subCmd == GX_LOAD_AURORA_SOURCE_VTX_DESC) {
+    CHECK(pos + 2 <= size, "GX_LOAD_AURORA_SOURCE_VTX_DESC read overrun");
+    const auto attr = static_cast<GXAttr>(data[pos++]);
+    const auto type = static_cast<GXAttrType>(data[pos++]);
+    if (attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR) {
+      g_gxState.sourceVtxDesc[attr] = type;
+    }
+  } else if (subCmd == GX_LOAD_AURORA_TEX_COPY_SRC) {
+    CHECK(pos + 9 <= size, "GX_LOAD_AURORA_TEX_COPY_SRC read overrun");
+    g_gxState.texCopySrc.x = static_cast<int32_t>(read_u16(data + pos, bigEndian));
+    pos += 2;
+    g_gxState.texCopySrc.y = static_cast<int32_t>(read_u16(data + pos, bigEndian));
+    pos += 2;
+    g_gxState.texCopySrc.width = static_cast<int32_t>(read_u16(data + pos, bigEndian));
+    pos += 2;
+    g_gxState.texCopySrc.height = static_cast<int32_t>(read_u16(data + pos, bigEndian));
+    pos += 2;
+    g_gxState.texCopySrcRenderSpace = data[pos++] != 0;
+  } else if (subCmd == GX_LOAD_AURORA_TEX_COPY_DST) {
+    CHECK(pos + 9 <= size, "GX_LOAD_AURORA_TEX_COPY_DST read overrun");
+    g_gxState.texCopyDstWidth = read_u16(data + pos, bigEndian);
+    pos += 2;
+    g_gxState.texCopyDstHeight = read_u16(data + pos, bigEndian);
+    pos += 2;
+    g_gxState.texCopyFmt = static_cast<GXTexFmt>(read_u32(data + pos, bigEndian));
+    pos += 4;
+    g_gxState.texCopyHalfScale = data[pos++] != 0;
   } else if (subCmd == GX_LOAD_AURORA_DEBUG_GROUP_PUSH) {
     auto label = read_string(data, pos, size, bigEndian);
     gfx::push_debug_group(std::move(label));

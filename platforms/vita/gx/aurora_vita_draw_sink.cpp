@@ -157,6 +157,21 @@ gfx::Handle DrawSink::white_texture() noexcept {
 #if defined(AURORA_VITA_UPSTREAM)
 namespace {
 #if defined(__vita__)
+const char* prepare_draw_error_name(gfx::PrepareDrawError error) noexcept {
+  switch(error){
+  case gfx::PrepareDrawError::None:return "none";
+  case gfx::PrepareDrawError::InvalidInput:return "invalid input";
+  case gfx::PrepareDrawError::VertexDecodeFailed:return "vertex decode failed";
+  case gfx::PrepareDrawError::VertexTransformFailed:return "vertex transform failed";
+  case gfx::PrepareDrawError::TooManyVertices:return "too many vertices";
+  case gfx::PrepareDrawError::UnsupportedLineExpansion:return "unsupported line expansion";
+  case gfx::PrepareDrawError::StreamingOverflow:return "streaming overflow";
+  case gfx::PrepareDrawError::PipelineFailed:return "pipeline creation failed";
+  }
+  return "unknown draw failure";
+}
+#endif
+#if defined(__vita__)
 struct ClipPoint { float x=0.f,y=0.f,z=0.f,w=1.f; };
 
 ClipPoint project_for_diag(const std::array<float,16>& m,const gfx::CanonicalVertex& v,bool alreadyClip) noexcept {
@@ -579,6 +594,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       rawIndices==nullptr&&indexCount==0;
   if(!footprint.valid){
     result.drawError=gfx::PrepareDrawError::TooManyVertices;
+    if(coverage_)coverage_->unsupported(static_cast<uint64_t>(result.drawError),prepare_draw_error_name(result.drawError));
     if(telemetry_)telemetry_->unsupported();
     return result;
   }
@@ -654,7 +670,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if (!gpuGeometry && !(useStreamed?streamed.ok():prepared.ok())) {
     result.drawError = useStreamed?streamed.error:prepared.error;
     if (coverage_) coverage_->unsupported(static_cast<uint64_t>(result.drawError),
-                                          useStreamed?"prepare_streamed_draw failed":"prepare_draw failed");
+                                          prepare_draw_error_name(result.drawError));
     if (telemetry_) telemetry_->unsupported();
     if (strictUnsupported_) strictFailed_ = true;
     return result;
@@ -797,7 +813,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
                          resolvedPipelineKey);
   if(!enqueued) {
     result.drawError = error;
-    if (coverage_) coverage_->unsupported(static_cast<uint64_t>(error), "enqueue_draw failed");
+    if (coverage_) coverage_->unsupported(static_cast<uint64_t>(error),prepare_draw_error_name(error));
     if (telemetry_) { telemetry_->arena_overflow(); telemetry_->unsupported(); }
     if (strictUnsupported_) strictFailed_ = true;
     return result;

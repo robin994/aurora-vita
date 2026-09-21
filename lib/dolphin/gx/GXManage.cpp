@@ -13,6 +13,12 @@ static __GXData_struct sGXData;
 __GXData_struct* __gx = &sGXData;
 static GXFifoObj sFifoObj;
 
+#if defined(MKW_TARGET_VITA)
+namespace {
+void vita_initialize_gx_state(void*) { aurora::gx::initialize(); }
+} // namespace
+#endif
+
 extern "C" {
 static GXDrawDoneCallback DrawDoneCB = nullptr;
 
@@ -26,7 +32,7 @@ GXFifoObj* GXInit(void* base, u32 size) {
 
   std::memset(&sGXData, 0, sizeof(sGXData));
 #if defined(MKW_TARGET_VITA)
-  aurora::gx::initialize();
+  aurora::gx::fifo::run_sync(vita_initialize_gx_state, nullptr);
 #endif
   __gx = &sGXData;
   __gx->inDispList = 0;
@@ -268,13 +274,21 @@ GXFifoObj* GXInit(void* base, u32 size) {
 }
 
 void GXDrawDone() {
+#if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::drain_sync();
+#else
   aurora::gx::fifo::drain();
+#endif
   if (DrawDoneCB != nullptr)
     DrawDoneCB();
 }
 
 void GXSetDrawDone() {
+#if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::drain_sync();
+#else
   aurora::gx::fifo::drain();
+#endif
   if (DrawDoneCB != nullptr)
     DrawDoneCB();
 }

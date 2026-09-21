@@ -154,15 +154,32 @@ static inline void SETVAT(u32* va, u32* vb, u32* vc, GXAttr attr, GXCompCnt cnt,
 }
 
 static inline bool AuroraVtxDescDiffers(GXAttr attr, GXAttrType type) {
+#if defined(MKW_TARGET_VITA)
+  (void)attr;
+  (void)type;
+  // The authoritative GXState now lives on the frontend thread. Producer-side
+  // redundancy checks against it would race, so always emit the VCD update.
+  return true;
+#else
   return attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR && g_gxState.vtxDesc[attr] != type;
+#endif
 }
 
 static inline bool AuroraVtxAttrFmtDiffers(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+#if defined(MKW_TARGET_VITA)
+  (void)vtxfmt;
+  (void)attr;
+  (void)cnt;
+  (void)type;
+  (void)frac;
+  return true;
+#else
   if (vtxfmt < GX_VTXFMT0 || vtxfmt >= GX_MAX_VTXFMT || attr < GX_VA_POS || attr >= GX_VA_MAX_ATTR) {
     return true;
   }
   const auto& fmt = g_gxState.vtxFmts[vtxfmt].attrs[attr];
   return fmt.cnt != cnt || fmt.type != type || fmt.frac != frac;
+#endif
 }
 
 extern "C" {
@@ -190,7 +207,13 @@ void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
 
 void GXSetSourceVtxDesc(GXAttr attr, GXAttrType type) {
   if (attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR) {
+#if defined(MKW_TARGET_VITA)
+    GX_WRITE_AURORA(GX_LOAD_AURORA_SOURCE_VTX_DESC);
+    GX_WRITE_U8(static_cast<u8>(attr));
+    GX_WRITE_U8(static_cast<u8>(type));
+#else
     g_gxState.sourceVtxDesc[attr] = type;
+#endif
   }
 }
 

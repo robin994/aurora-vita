@@ -52,6 +52,11 @@ public:
                      bool storageRetired=false);
   void destroy_buffer(gfx::Handle handle);
   gfx::Handle create_texture(const gfx::TextureDesc& desc);
+  // Update a texture whose storage/layout is unchanged. `storageRetired` is
+  // used by the facade's small volatile-texture ring after enough display
+  // frames have elapsed that the slot can no longer be referenced by GXM.
+  bool update_texture(gfx::Handle handle, const gfx::TextureDesc& desc,
+                      bool storageRetired=false);
   void destroy_texture(gfx::Handle handle);
   size_t texture_bytes(gfx::Handle handle) const noexcept;
   bool begin_frame();
@@ -65,8 +70,9 @@ public:
   bool upload_target(gfx::Handle handle, const void* rgba, uint32_t width, uint32_t height);
   bool copy_current_to_target(gfx::Handle handle, const gfx::Scissor& source,
                               gfx::EfbCopyFormat format, bool flipX, bool flipY);
-  bool blit_to_default(gfx::Handle handle);
+  bool blit_to_default(gfx::Handle handle,const gfx::Scissor* source=nullptr);
   bool copy_display_region(const gfx::Scissor& source);
+  void set_presentation_aspect(float aspect) noexcept;
   bool draw(const gfx::DrawPacket& packet);
   bool bind_pipeline(uint64_t key,const gfx::GpuDrawUniforms& uniforms,const gfx::Scissor& scissor={},
                      const gfx::FixedVertexUniforms* fixedVertex=nullptr,

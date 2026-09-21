@@ -63,6 +63,12 @@ extern "C" {
 
 #define GX_LOAD_AURORA_INVALIDATE_TEX_ALL 0x0035
 
+/* Vita threaded-frontend state that is not represented by the normal CP/BP/XF
+ * register stream. These commands keep the render-thread GXState authoritative. */
+#define GX_LOAD_AURORA_SOURCE_VTX_DESC 0x0036
+#define GX_LOAD_AURORA_TEX_COPY_SRC 0x0037
+#define GX_LOAD_AURORA_TEX_COPY_DST 0x0038
+
 
 /*
  * Debug marker stuff

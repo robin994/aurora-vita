@@ -21,6 +21,23 @@ extern const uint8_t* sStableSource;
 
 void init();
 
+#if defined(MKW_TARGET_VITA) || defined(TARGET_VITA)
+using VitaWorkerTask = void (*)(void*);
+
+// The Vita port runs GX decode/translation and renderer submission on a
+// dedicated consumer thread. The game thread remains the sole FIFO producer.
+bool start_worker();
+void shutdown_worker();
+bool worker_running();
+
+// `drain()` only seals/enqueues the producer buffer on Vita. Use these barriers
+// for APIs that need the decoded GX state or renderer side effects immediately.
+void drain_sync();
+void wait_idle();
+void run_sync(VitaWorkerTask task, void* context);
+void process_sync(const uint8_t* data, uint32_t size, bool bigEndian);
+#endif
+
 // Out-of-line slow path: grows internal buffer then appends data
 void write_data_grow(const void* data, uint32_t length);
 

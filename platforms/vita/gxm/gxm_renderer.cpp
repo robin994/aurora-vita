@@ -376,6 +376,7 @@ struct Renderer::Impl {
   uint64_t cpuFrameWindowSum = 0;
   uint32_t displayQueueBlockedFrames = 0;
   uint32_t displayQueueWindowFrames = 0;
+  float presentationAspect = 0.f;
 
   uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
   uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
@@ -1288,6 +1289,42 @@ bool Renderer::update_buffer(Handle handle,const void* data,size_t bytes,size_t 
   return true;
 }
 
+bool Renderer::update_texture(Handle handle,const TextureDesc& desc,bool storageRetired) {
+  auto& d=*impl_;
+  auto it=d.textures.find(handle);
+  if(it==d.textures.end() || !desc.data || !desc.width || !desc.height) return false;
+
+  auto& texture=*it->second;
+  if(texture.width!=desc.width || texture.height!=desc.height) return false;
+  auto native=prepare_native_texture(desc);
+  const uint8_t* pixels=nullptr;
+  size_t pixelBytes=0;
+  uint32_t stride=0;
+  uint32_t mipCount=1;
+  bool swizzled=false;
+  LinearTextureData fallback{};
+  if(native.valid && !native.pixels.empty()) {
+    pixels=native.pixels.data();pixelBytes=native.pixels.size();stride=native.stride;
+    swizzled=native.swizzled;
+  } else {
+    swizzled=(desc.width&(desc.width-1u))==0 && (desc.height&(desc.height-1u))==0;
+    fallback=swizzled?prepare_swizzled_texture(desc):prepare_linear_texture(desc);
+    if(!fallback.ok()) return false;
+    pixels=fallback.pixels.data();pixelBytes=fallback.pixels.size();
+    stride=((desc.width+7u)&~7u);mipCount=fallback.mipCount;
+  }
+  if(swizzled!=texture.swizzled || stride!=texture.stride || mipCount!=texture.mipCount ||
+     pixelBytes>texture.memory.size()) return false;
+
+  if(texture.inFlight && !storageRetired && !finish()) return false;
+  // The volatile texture ring only revisits a slot after more frames than the
+  // display queue can retain, matching StreamingArena's retirement contract.
+  if(storageRetired) texture.inFlight=false;
+  std::memcpy(texture.memory.data(),pixels,pixelBytes);
+  texture.descriptorSamplerValid=false;
+  return true;
+}
+
 void Renderer::destroy_buffer(Handle handle) {
   auto& d=*impl_;
   auto it=d.buffers.find(handle);
@@ -1577,12 +1614,21 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
   return true;
 }
 
-bool Renderer::blit_to_default(Handle handle) {
+bool Renderer::blit_to_default(Handle handle,const Scissor* source) {
   auto& d=*impl_;
-  if(d.textures.find(handle)==d.textures.end()) return d.fail("unknown blit texture");
+  const auto textureIt=d.textures.find(handle);
+  if(textureIt==d.textures.end()) return d.fail("unknown blit texture");
+  const auto& texture=*textureIt->second;
+  Scissor src{0,0,static_cast<int32_t>(texture.width),static_cast<int32_t>(texture.height)};
+  if(source) src=*source;
+  if(src.x<0 || src.y<0 || src.width<=0 || src.height<=0 ||
+     uint64_t(src.x)+uint64_t(src.width)>texture.width ||
+     uint64_t(src.y)+uint64_t(src.height)>texture.height)
+    return d.fail("invalid blit source rectangle");
   if(!bind_target(0)) return false;
   PipelineDesc p{};
   p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
+  p.positionIsClipSpace=true;
   p.layout.count=2;
   p.layout.attributes[0]={0,4,VertexScalar::F32,false,28,0};
   p.layout.attributes[1]={3,3,VertexScalar::F32,false,28,16};
@@ -1606,6 +1652,11 @@ bool Renderer::blit_to_default(Handle handle) {
   packet.scissor.width=d.config.width;packet.scissor.height=d.config.height;
   packet.textures[0].texture=handle;
   packet.textures[0].sampler.wrapS=packet.textures[0].sampler.wrapT=WrapMode::Clamp;
+  packet.textures[0].sampler.minFilter=packet.textures[0].sampler.magFilter=Filter::Linear;
+  packet.textures[0].uvScaleX=float(src.width)/float(texture.width);
+  packet.textures[0].uvScaleY=float(src.height)/float(texture.height);
+  packet.textures[0].uvBiasX=float(src.x)/float(texture.width);
+  packet.textures[0].uvBiasY=float(src.y)/float(texture.height);
   return draw(packet);
 }
 
@@ -1622,8 +1673,12 @@ bool Renderer::copy_display_region(const Scissor& source) {
   // target. When GXCopyDisp selects that complete image, the EFB is already the
   // exact XFB we need to scan out; a second textured scene would only resample
   // the same pixels and force an unnecessary scene dependency.
-  if(source.x==0 && source.y==0 && uint32_t(source.width)==d.config.width &&
-     uint32_t(source.height)==d.config.height) {
+  const float panelAspect=float(d.config.width)/float(d.config.height);
+  const float requestedAspect=std::isfinite(d.presentationAspect)&&d.presentationAspect>0.f?
+      d.presentationAspect:panelAspect;
+  const bool needsPresentationFit=std::abs(requestedAspect-panelAspect)>0.0001f;
+  if(!needsPresentationFit && source.x==0 && source.y==0 &&
+     uint32_t(source.width)==d.config.width && uint32_t(source.height)==d.config.height) {
     static uint64_t passthroughCount=0;
     const uint64_t count=++passthroughCount;
     if(count<=4 || (count&(count-1))==0)
@@ -1665,6 +1720,7 @@ bool Renderer::copy_display_region(const Scissor& source) {
   d.pendingVertexDependency=nullptr;
   PipelineDesc p{};
   p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
+  p.positionIsClipSpace=true;
   p.layout.count=2;
   p.layout.attributes[0]={0,4,VertexScalar::F32,false,28,0};
   p.layout.attributes[1]={3,3,VertexScalar::F32,false,28,16};
@@ -1689,11 +1745,24 @@ bool Renderer::copy_display_region(const Scissor& source) {
   }
   if(!d.blitVertices) return false;
   d.displayCopySource=source;d.displayCopySourceValid=true;
+  uint32_t presentX=0,presentY=0,presentWidth=d.config.width,presentHeight=d.config.height;
+  if(requestedAspect>panelAspect) {
+    presentHeight=std::max(1u,static_cast<uint32_t>(std::lround(float(d.config.width)/requestedAspect)));
+    presentHeight=std::min(presentHeight,d.config.height);
+    presentY=(d.config.height-presentHeight)/2u;
+  } else if(requestedAspect<panelAspect) {
+    presentWidth=std::max(1u,static_cast<uint32_t>(std::lround(float(d.config.height)*requestedAspect)));
+    presentWidth=std::min(presentWidth,d.config.width);
+    presentX=(d.config.width-presentWidth)/2u;
+  }
+  if(needsPresentationFit && !clear({0.f,0.f,0.f,1.f},1.f,true,true,false))return false;
   DrawPacket packet{};packet.pipelineKey=key;
   packet.vertices={d.blitVertices,0,84};packet.indices={d.clearIndices,0,6};
   packet.vertexCount=packet.indexCount=3;
-  packet.viewport.width=float(d.config.width);packet.viewport.height=float(d.config.height);
-  packet.scissor.width=d.config.width;packet.scissor.height=d.config.height;
+  packet.viewport.x=float(presentX);packet.viewport.y=float(presentY);
+  packet.viewport.width=float(presentWidth);packet.viewport.height=float(presentHeight);
+  packet.scissor.x=static_cast<int32_t>(presentX);packet.scissor.y=static_cast<int32_t>(presentY);
+  packet.scissor.width=static_cast<int32_t>(presentWidth);packet.scissor.height=static_cast<int32_t>(presentHeight);
   packet.textures[0].texture=d.displaySource;
   packet.textures[0].sampler.wrapS=packet.textures[0].sampler.wrapT=WrapMode::Clamp;
   packet.textures[0].sampler.minFilter=packet.textures[0].sampler.magFilter=Filter::Linear;
@@ -1713,6 +1782,10 @@ bool Renderer::copy_display_region(const Scissor& source) {
       static_cast<unsigned long long>(afterDraw-beforeDraw));
   }
   return ok;
+}
+
+void Renderer::set_presentation_aspect(float aspect) noexcept {
+  impl_->presentationAspect=std::isfinite(aspect)&&aspect>0.f?aspect:0.f;
 }
 
 void Renderer::shutdown() noexcept {

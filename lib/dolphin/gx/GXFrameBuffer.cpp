@@ -20,11 +20,25 @@
 #include "../vi/vi_internal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
+#if defined(MKW_TARGET_VITA)
+extern "C" void melee_vita_event_marker(const char* marker);
+#endif
+
 namespace {
+#if defined(MKW_TARGET_VITA)
+u32 sVitaCopyControlReg = 0;
+u16 sVitaDispCopySrcHeight = 480;
+
+void write_vita_copy_control() {
+  GX_WRITE_RAS_REG(0x52000000u | (sVitaCopyControlReg & 0x00ffffffu));
+}
+#endif
+
 struct CopyClearState {
   bool clearColor = false;
   bool clearAlpha = false;
@@ -238,6 +252,77 @@ u32 y_scale_to_integer(f32 yScale) {
   return static_cast<u32>(256.f / yScale) & 0x1ffu;
 }
 
+#if defined(MKW_TARGET_VITA)
+struct VitaCopyDispArgs {
+  bool clear = false;
+};
+
+void vita_copy_disp_task(void* opaque) {
+  const auto* args = static_cast<const VitaCopyDispArgs*>(opaque);
+  aurora::vita::draw_sink().flush();
+
+  const auto vitaRect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
+  const aurora::vita::gfx::Scissor source{
+      vitaRect.x, vitaRect.y, vitaRect.width, vitaRect.height};
+  static bool sLoggedDisplayCopy = false;
+  if (!sLoggedDisplayCopy) {
+    const auto& renderer = aurora::vita::renderer();
+    const bool fullSource = source.x == 0 && source.y == 0 &&
+        source.width == static_cast<int32_t>(renderer.target_width()) &&
+        source.height == static_cast<int32_t>(renderer.target_height());
+    melee_vita_event_marker(fullSource ? "present:source-full" : "present:source-crop");
+  }
+  const bool copied = aurora::vita::renderer().display_copy(source);
+  if (!sLoggedDisplayCopy) {
+    melee_vita_event_marker(copied ? "present:copy-ok" : "present:copy-fail");
+    sLoggedDisplayCopy = true;
+  }
+  if (!copied) {
+    static bool sWarnedDisplayCopy = false;
+    if (!sWarnedDisplayCopy) {
+      std::printf("[aurora-vita] display copy failed; presenting raw EFB\n");
+      sWarnedDisplayCopy = true;
+    }
+  }
+
+  if (args != nullptr && args->clear) {
+    aurora::vita::schedule_display_clear(
+        g_gxState.clearColor[0], g_gxState.clearColor[1],
+        g_gxState.clearColor[2], g_gxState.clearColor[3],
+        aurora::gx::clear_depth_value(),
+        g_gxState.colorUpdate, g_gxState.alphaUpdate, g_gxState.depthUpdate);
+  }
+}
+
+struct VitaCopyTexArgs {
+  void* dest = nullptr;
+  bool clear = false;
+};
+
+void vita_copy_tex_task(void* opaque) {
+  const auto* args = static_cast<const VitaCopyTexArgs*>(opaque);
+  if (args == nullptr || args->dest == nullptr) return;
+  if (aurora::vita::draw_sink().copy_tex(args->dest, args->clear)) {
+    auto& copy = g_gxState.copyTextures[args->dest];
+    ++copy.revision;
+    copy.width = std::max<u32>(g_gxState.texCopyDstWidth, 1);
+    copy.height = std::max<u32>(g_gxState.texCopyDstHeight, 1);
+    copy.format = g_gxState.texCopyFmt;
+    aurora::gx::notify_copy_texture_created();
+  }
+}
+
+void vita_clear_efb_task(void*) {
+  aurora::vita::draw_sink().flush();
+  const aurora::vita::gfx::Color clearColor{
+      g_gxState.clearColor[0], g_gxState.clearColor[1],
+      g_gxState.clearColor[2], g_gxState.clearColor[3]};
+  aurora::vita::renderer().clear_current(
+      clearColor, aurora::gx::clear_depth_value(),
+      g_gxState.colorUpdate, g_gxState.alphaUpdate, g_gxState.depthUpdate);
+}
+#endif
+
 } // namespace
 
 namespace aurora::gx {
@@ -353,44 +438,90 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
 }
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+#if defined(MKW_TARGET_VITA)
+  sVitaDispCopySrcHeight = ht;
+#else
   g_gxState.dispCopySrc = {left, top, wd, ht};
+#endif
   GX_WRITE_RAS_REG(0x49000000u | ((static_cast<u32>(top) & 0x3ffu) << 10) | (static_cast<u32>(left) & 0x3ffu));
   GX_WRITE_RAS_REG(0x4a000000u | (((static_cast<u32>(ht) - 1u) * 0x400u) & 0x000ffc00u) |
                    ((static_cast<u32>(wd) - 1u) & 0x3ffu));
 }
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+#if defined(MKW_TARGET_VITA)
+  GX_WRITE_AURORA(GX_LOAD_AURORA_TEX_COPY_SRC);
+  GX_WRITE_U16(left);
+  GX_WRITE_U16(top);
+  GX_WRITE_U16(wd);
+  GX_WRITE_U16(ht);
+  GX_WRITE_U8(0);
+#else
   g_gxState.texCopySrc = {left, top, wd, ht};
   g_gxState.texCopySrcRenderSpace = false;
+#endif
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {
+#if !defined(MKW_TARGET_VITA)
   g_gxState.dispCopyDstWidth = wd;
   g_gxState.dispCopyDstHeight = ht;
+#else
+  (void)ht;
+#endif
   GX_WRITE_RAS_REG(0x4d000000u | ((((static_cast<u32>(wd) & 0x7fffu) << 1) >> 5) & 0x3ffu));
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+#if defined(MKW_TARGET_VITA)
+  GX_WRITE_AURORA(GX_LOAD_AURORA_TEX_COPY_DST);
+  GX_WRITE_U16(wd);
+  GX_WRITE_U16(ht);
+  GX_WRITE_U32(static_cast<u32>(fmt));
+  GX_WRITE_U8(mipmap != GX_FALSE ? 1 : 0);
+  sVitaCopyControlReg = (sVitaCopyControlReg & ~(0x0fu << 3)) |
+                        ((static_cast<u32>(fmt) & 0x0fu) << 3);
+  sVitaCopyControlReg = (sVitaCopyControlReg & ~(1u << 9)) |
+                        ((mipmap != GX_FALSE ? 1u : 0u) << 9);
+  write_vita_copy_control();
+#else
   g_gxState.texCopyFmt = fmt;
   g_gxState.texCopyDstWidth = wd;
   g_gxState.texCopyDstHeight = ht;
   g_gxState.texCopyHalfScale = mipmap != GX_FALSE;
+#endif
 }
 
 void GXSetDispCopyFrame2Field(u32 mode) {
+#if defined(MKW_TARGET_VITA)
+  sVitaCopyControlReg = (sVitaCopyControlReg & ~(3u << 12)) | ((mode & 3u) << 12);
+  write_vita_copy_control();
+#else
   g_gxState.dispCopyFrame2Field = mode & 3;
+#endif
 }
 
 void GXSetCopyClamp(GXFBClamp clamp) {
+#if defined(MKW_TARGET_VITA)
+  sVitaCopyControlReg = (sVitaCopyControlReg & ~3u) | (static_cast<u32>(clamp) & 3u);
+  write_vita_copy_control();
+#else
   g_gxState.copyClamp = static_cast<GXFBClamp>(static_cast<u32>(clamp) & 3);
+#endif
 }
 
 u32 GXSetDispCopyYScale(f32 vscale) {
   const u32 iScale = y_scale_to_integer(vscale);
+#if !defined(MKW_TARGET_VITA)
   g_gxState.dispCopyYScale = vscale;
+#endif
   GX_WRITE_RAS_REG(0x4e000000u | iScale);
   __gx->bpSent = 0;
+#if defined(MKW_TARGET_VITA)
+  return get_num_xfb_lines_internal(sVitaDispCopySrcHeight, iScale);
+#else
   return get_num_xfb_lines_internal(static_cast<u16>(g_gxState.dispCopySrc.height), iScale);
+#endif
 }
 
 void GXSetCopyClear(GXColor color, u32 depth) {
@@ -417,6 +548,28 @@ void GXSetCopyClear(GXColor color, u32 depth) {
 }
 
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
+#if defined(MKW_TARGET_VITA)
+  std::array<std::array<u8, 2>, 12> samples{};
+  std::array<u8, 7> filter{};
+  for (auto& sample : samples) sample = {6, 6};
+  filter = {0, 0, 21, 22, 21, 0, 0};
+  if (aa && sample_pattern) {
+    for (size_t i = 0; i < samples.size(); ++i) {
+      samples[i][0] = sample_pattern[i][0];
+      samples[i][1] = sample_pattern[i][1];
+    }
+  }
+  if (vf && vfilter) {
+    for (size_t i = 0; i < filter.size(); ++i) filter[i] = vfilter[i];
+  }
+  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x01, samples, 0));
+  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x02, samples, 6));
+  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x03, samples, 12));
+  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x04, samples, 18));
+  GX_WRITE_RAS_REG(pack_copy_filter0(filter));
+  GX_WRITE_RAS_REG(pack_copy_filter1(filter));
+  __gx->bpSent = 0;
+#else
   g_gxState.copyFilterAa = aa;
   g_gxState.copyFilterVf = vf;
   if (sample_pattern) {
@@ -447,51 +600,32 @@ void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[
   GX_WRITE_RAS_REG(pack_copy_filter0(g_gxState.copyFilterVFilter));
   GX_WRITE_RAS_REG(pack_copy_filter1(g_gxState.copyFilterVFilter));
   __gx->bpSent = 0;
+#endif
 }
 
 void GXSetDispCopyGamma(GXGamma gamma) {
+#if defined(MKW_TARGET_VITA)
+  sVitaCopyControlReg = (sVitaCopyControlReg & ~(3u << 7)) |
+                        ((static_cast<u32>(gamma) & 3u) << 7);
+  write_vita_copy_control();
+#else
   g_gxState.dispCopyGamma = static_cast<GXGamma>(static_cast<u32>(gamma) & 3u);
   g_gxState.bpRegCache[0x52] = (g_gxState.bpRegCache[0x52] & ~(3u << 7)) |
                                ((static_cast<u32>(g_gxState.dispCopyGamma) & 3u) << 7);
+#endif
 }
 
 void GXCopyDisp(void* dest, GXBool clear) {
   (void)dest;
+#if defined(MKW_TARGET_VITA)
+  VitaCopyDispArgs args{clear != GX_FALSE};
+  aurora::gx::fifo::run_sync(vita_copy_disp_task, &args);
+  return;
+#else
   // Finish queued commands before this copy reads live EFB state.
   if (aurora::gx::fifo::get_buffer_size() != 0) {
     aurora::gx::fifo::drain();
   }
-#if defined(MKW_TARGET_VITA)
-  aurora::vita::draw_sink().flush();
-
-  // GameCube presents only dispCopySrc, scaled into the XFB. Presenting the
-  // raw 640x528 EFB on Vita exposes the unused rows below the game's visible
-  // image as a black band. Recreate the display copy on-GPU: crop the mapped
-  // source rectangle and scale it to the full Vita backbuffer before swap.
-  const auto vitaRect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
-  const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
-  const aurora::vita::gfx::Scissor source{
-      vitaRect.x, vitaRect.y, vitaRect.width, vitaRect.height};
-  if (!aurora::vita::renderer().display_copy(source)) {
-    static bool s_warnedDisplayCopy = false;
-    if (!s_warnedDisplayCopy) {
-      std::printf("[aurora-vita] display copy failed; presenting raw EFB\n");
-      s_warnedDisplayCopy = true;
-    }
-  }
-
-  if (clear) {
-    // GameCube copies the completed EFB to XFB first and clears the EFB only
-    // for the next frame. On Vita the presentable backbuffer is also our EFB;
-    // clearing it here erases the just-rendered frame before vglSwapBuffers().
-    // Defer the clear until begin_frame(), after the swap selected a new backbuffer.
-    aurora::vita::schedule_display_clear(
-        g_gxState.clearColor[0], g_gxState.clearColor[1],
-        g_gxState.clearColor[2], g_gxState.clearColor[3],
-        aurora::gx::clear_depth_value(),
-        g_gxState.colorUpdate, g_gxState.alphaUpdate, g_gxState.depthUpdate);
-  }
-  return;
 #endif
   const auto rect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
   const auto logicalDstWidth =
@@ -522,20 +656,15 @@ void GXCopyDisp(void* dest, GXBool clear) {
 }
 
 void GXCopyTex(void* dest, GXBool clear) {
+#if defined(MKW_TARGET_VITA)
+  VitaCopyTexArgs args{dest, clear != GX_FALSE};
+  aurora::gx::fifo::run_sync(vita_copy_tex_task, &args);
+  return;
+#else
   // Texture copies must see all earlier draws and state changes.
   if (aurora::gx::fifo::get_buffer_size() != 0) {
     aurora::gx::fifo::drain();
   }
-#if defined(MKW_TARGET_VITA)
-  if (aurora::vita::draw_sink().copy_tex(dest, clear != GX_FALSE)) {
-    auto& copy = g_gxState.copyTextures[dest];
-    ++copy.revision;
-    copy.width = std::max<u32>(g_gxState.texCopyDstWidth, 1);
-    copy.height = std::max<u32>(g_gxState.texCopyDstHeight, 1);
-    copy.format = g_gxState.texCopyFmt;
-    aurora::gx::notify_copy_texture_created();
-  }
-  return;
 #endif
   const auto sourceRect = map_texture_copy_source(g_gxState.texCopySrc, g_gxState.texCopySrcRenderSpace);
   const auto rect = sourceRect.clearRect;
@@ -626,30 +755,23 @@ void GXCopyTex(void* dest, GXBool clear) {
 
 #if defined(MKW_TARGET_VITA)
 void GXVitaClearEfb(void) {
-  // Preserve GX ordering but skip the texture capture. Strikers uses this for
-  // a scratch destination whose pixels are never sampled; only the clear side
-  // effect matters and the old path spent tens of milliseconds converting it.
-  if (aurora::gx::fifo::get_buffer_size() != 0) {
-    aurora::gx::fifo::drain();
-  }
-  aurora::vita::draw_sink().flush();
-  const aurora::vita::gfx::Color clearColor{
-      g_gxState.clearColor[0], g_gxState.clearColor[1],
-      g_gxState.clearColor[2], g_gxState.clearColor[3]};
-  aurora::vita::renderer().clear_current(
-      clearColor, aurora::gx::clear_depth_value(),
-      g_gxState.colorUpdate, g_gxState.alphaUpdate, g_gxState.depthUpdate);
+  aurora::gx::fifo::run_sync(vita_clear_efb_task, nullptr);
 }
 #endif
 
 void GXClearBoundingBox() {
+#if !defined(MKW_TARGET_VITA)
   g_gxState.boundingBox = {1023, 0, 1023, 0};
+#endif
   GX_WRITE_RAS_REG(0x550003FFu);
   GX_WRITE_RAS_REG(0x560003FFu);
   __gx->bpSent = 0;
 }
 
 void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom) {
+#if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::drain_sync();
+#endif
   if (left) {
     *left = g_gxState.boundingBox[0];
   }

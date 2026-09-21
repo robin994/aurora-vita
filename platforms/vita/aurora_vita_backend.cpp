@@ -128,6 +128,10 @@ void emit_periodic_diagnostics() noexcept {
       std::fwrite(memLine.data(),1,memLine.size(),fp); std::fwrite("\n",1,1,fp); std::fclose(fp);
     }
   }
+  if(g_coverageEnabled && g_config.coverage_log_path && *g_config.coverage_log_path) {
+    ensure_parent_dir(g_config.coverage_log_path);
+    g_coverage.write_report(g_config.coverage_log_path);
+  }
 }
 }
 
@@ -248,7 +252,9 @@ bool initialize(const BackendConfig& c) noexcept {
   glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
   glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glClearDepth(1.0f);
 #endif
-  gfx::RendererConfig rc{}; rc.width=c.width; rc.height=c.height; rc.textureBudget=c.texture_cache_budget;
+  gfx::RendererConfig rc{}; rc.width=c.width; rc.height=c.height;
+  rc.renderWidth=renderWidth; rc.renderHeight=renderHeight;
+  rc.textureBudget=c.texture_cache_budget;
   rc.displayBuffers=c.vgl_display_buffer_count;
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
@@ -358,6 +364,10 @@ void discard_present() noexcept {
   // backbuffer.  Because a discarded frame does not rotate buffers, re-arm it
   // so the same draw buffer is clean before the next real frame is built.
   if(g_displayClearValid) g_pendingDisplayClear.pending=true;
+}
+
+void set_presentation_aspect(float aspect) noexcept {
+  if(g_renderer)g_renderer->set_presentation_aspect(aspect);
 }
 
 void end_frame() noexcept {

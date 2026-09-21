@@ -18,6 +18,84 @@
 // Single definition for the `Log` that gx.hpp declares for this directory.
 aurora::Module Log("aurora::gx");
 
+#if defined(MKW_TARGET_VITA)
+namespace {
+struct VitaViewportPolicyTask {
+  AuroraViewportPolicy policy = AURORA_VIEWPORT_FIT;
+};
+
+void vita_set_viewport_policy_task(void* opaque) {
+  const auto* task = static_cast<const VitaViewportPolicyTask*>(opaque);
+  const bool changed = g_gxState.viewportPolicy != task->policy;
+  g_gxState.viewportPolicy = task->policy;
+  aurora::window::set_frame_buffer_aspect_fit(task->policy == AURORA_VIEWPORT_FIT);
+  aurora::window::set_present_surface_fill(task->policy == AURORA_VIEWPORT_STRETCH);
+  if (changed) {
+    aurora::gx::set_logical_viewport(g_gxState.logicalViewport);
+    aurora::gx::set_logical_scissor(g_gxState.logicalScissor);
+  }
+}
+
+struct VitaSafeAreaTask {
+  float aspect = 1.0f;
+  bool restore = false;
+};
+
+void vita_safe_area_task(void* opaque) {
+  const auto* task = static_cast<const VitaSafeAreaTask*>(opaque);
+  if (task->restore) {
+    const auto mapped = aurora::gx::map_logical_render_state();
+    aurora::gx::set_render_viewport(mapped.viewport);
+    aurora::gx::set_render_scissor(mapped.scissor);
+    return;
+  }
+
+  const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
+  if (targetWidth == 0 || targetHeight == 0 || !std::isfinite(task->aspect) || task->aspect <= 0.0f) return;
+  auto mapped = aurora::gx::map_logical_render_state();
+  const float targetAspect = static_cast<float>(targetWidth) / static_cast<float>(targetHeight);
+  float safeLeft = 0.0f, safeTop = 0.0f;
+  float safeWidth = static_cast<float>(targetWidth), safeHeight = static_cast<float>(targetHeight);
+  if (targetAspect > task->aspect) {
+    safeWidth = safeHeight * task->aspect;
+    safeLeft = (static_cast<float>(targetWidth) - safeWidth) * 0.5f;
+  } else if (targetAspect < task->aspect) {
+    safeHeight = safeWidth / task->aspect;
+    safeTop = (static_cast<float>(targetHeight) - safeHeight) * 0.5f;
+  }
+  const float scaleX = safeWidth / static_cast<float>(targetWidth);
+  const float scaleY = safeHeight / static_cast<float>(targetHeight);
+  mapped.viewport.left = safeLeft + mapped.viewport.left * scaleX;
+  mapped.viewport.top = safeTop + mapped.viewport.top * scaleY;
+  mapped.viewport.width *= scaleX;
+  mapped.viewport.height *= scaleY;
+  const float scissorLeft = safeLeft + static_cast<float>(mapped.scissor.x) * scaleX;
+  const float scissorTop = safeTop + static_cast<float>(mapped.scissor.y) * scaleY;
+  const float scissorRight = safeLeft + static_cast<float>(mapped.scissor.x + mapped.scissor.width) * scaleX;
+  const float scissorBottom = safeTop + static_cast<float>(mapped.scissor.y + mapped.scissor.height) * scaleY;
+  const int32_t left = std::clamp(static_cast<int32_t>(std::floor(scissorLeft)), 0, static_cast<int32_t>(targetWidth));
+  const int32_t top = std::clamp(static_cast<int32_t>(std::floor(scissorTop)), 0, static_cast<int32_t>(targetHeight));
+  const int32_t right = std::clamp(static_cast<int32_t>(std::ceil(scissorRight)), left, static_cast<int32_t>(targetWidth));
+  const int32_t bottom = std::clamp(static_cast<int32_t>(std::ceil(scissorBottom)), top, static_cast<int32_t>(targetHeight));
+  mapped.scissor = {left, top, right - left, bottom - top};
+  aurora::gx::set_render_viewport(mapped.viewport);
+  aurora::gx::set_render_scissor(mapped.scissor);
+}
+
+struct VitaOffscreenTask {
+  u32 width = 0;
+  u32 height = 0;
+  bool restore = false;
+};
+
+void vita_offscreen_task(void* opaque) {
+  const auto* task = static_cast<const VitaOffscreenTask*>(opaque);
+  if (task->restore) aurora::gfx::end_offscreen();
+  else aurora::gfx::begin_offscreen(task->width, task->height);
+}
+} // namespace
+#endif
+
 static void GXWriteString(const char* label) {
   auto length = strlen(label);
 
@@ -43,19 +121,20 @@ void GXInsertDebugMarker(const char* label) {
 }
 
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
+#if defined(MKW_TARGET_VITA)
+  VitaViewportPolicyTask task{policy};
+  aurora::gx::fifo::run_sync(vita_set_viewport_policy_task, &task);
+#else
   const bool changed = g_gxState.viewportPolicy != policy;
-  if (changed) {
-    // Finish commands using the old framebuffer mapping before changing it.
-    aurora::gx::fifo::drain();
-  }
+  if (changed) aurora::gx::fifo::drain();
   g_gxState.viewportPolicy = policy;
   aurora::window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
   aurora::window::set_present_surface_fill(policy == AURORA_VIEWPORT_STRETCH);
   if (changed) {
-    // Reapply the guest viewport and scissor after a resize.
     aurora::gx::set_logical_viewport(g_gxState.logicalViewport);
     aurora::gx::set_logical_scissor(g_gxState.logicalScissor);
   }
+#endif
 }
 
 void AuroraGetRenderSize(u32* width, u32* height) {
@@ -109,6 +188,11 @@ void WriteMappedRenderState(const aurora::gx::MappedRenderState& mapped) {
 } // namespace
 
 void GXSetViewportScissorRenderSafeArea(f32 aspect) {
+#if defined(MKW_TARGET_VITA)
+  VitaSafeAreaTask task{aspect, false};
+  aurora::gx::fifo::run_sync(vita_safe_area_task, &task);
+  return;
+#else
   const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
   if (targetWidth == 0 || targetHeight == 0 || !std::isfinite(aspect) || aspect <= 0.0f) {
     return;
@@ -155,25 +239,50 @@ void GXSetViewportScissorRenderSafeArea(f32 aspect) {
   mapped.scissor = {left, top, right - left, bottom - top};
 
   WriteMappedRenderState(mapped);
+#endif
 }
 
 void GXRestoreViewportScissorRender() {
+#if defined(MKW_TARGET_VITA)
+  VitaSafeAreaTask task{1.0f, true};
+  aurora::gx::fifo::run_sync(vita_safe_area_task, &task);
+#else
   // Run queued GX draws before leaving the direct layout safe area.
   aurora::gx::fifo::drain();
   WriteMappedRenderState(aurora::gx::map_logical_render_state());
+#endif
 }
 
 void GXSetTexCopySrcRender(u16 left, u16 top, u16 wd, u16 ht) {
+#if defined(MKW_TARGET_VITA)
+  GX_WRITE_AURORA(GX_LOAD_AURORA_TEX_COPY_SRC);
+  GX_WRITE_U16(left);
+  GX_WRITE_U16(top);
+  GX_WRITE_U16(wd);
+  GX_WRITE_U16(ht);
+  GX_WRITE_U8(1);
+#else
   aurora::gx::g_gxState.texCopySrc = {left, top, wd, ht};
   aurora::gx::g_gxState.texCopySrcRenderSpace = true;
+#endif
 }
 
 void GXCreateFrameBuffer(u32 width, u32 height) {
+#if defined(MKW_TARGET_VITA)
+  VitaOffscreenTask task{width, height, false};
+  aurora::gx::fifo::run_sync(vita_offscreen_task, &task);
+#else
   aurora::gx::fifo::drain();
   aurora::gfx::begin_offscreen(width, height);
+#endif
 }
 
 void GXRestoreFrameBuffer() {
+#if defined(MKW_TARGET_VITA)
+  VitaOffscreenTask task{0, 0, true};
+  aurora::gx::fifo::run_sync(vita_offscreen_task, &task);
+#else
   aurora::gx::fifo::drain();
   aurora::gfx::end_offscreen();
+#endif
 }
