@@ -401,10 +401,11 @@ struct Renderer::Impl {
           SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
       sceGxmDepthStencilSurfaceSetForceStoreMode(ds, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
     }
-    unsigned flags = sync ? SCE_GXM_SCENE_FRAGMENT_SET_DEPENDENCY : 0u;
-    SceGxmSyncObject* vertexDependency = pendingVertexDependency;
-    if (vertexDependency) flags |= SCE_GXM_SCENE_VERTEX_WAIT_FOR_DEPENDENCY;
-    if (pendingFragmentTransferSync) flags |= SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC;
+    // Scenes submitted through the same GXM context are already ordered. Do
+    // not turn render-target switches into sync-object dependencies: Strikers'
+    // offscreen EFB targets can make sceGxmBeginScene reject those pointers.
+    unsigned flags = pendingFragmentTransferSync ? SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC : 0u;
+    SceGxmSyncObject* vertexDependency = nullptr;
     if (!check(sceGxmBeginScene(context, flags, rt, nullptr, vertexDependency, sync, cs, ds), "begin native scene")) return false;
     ++stats.nativeSceneCount;
     pendingVertexDependency = nullptr;
@@ -1303,15 +1304,10 @@ bool Renderer::bind_target(Handle handle) {
   const auto it=d.textures.find(handle);
   if(handle && (it==d.textures.end() || !it->second->target)) return d.fail("unknown render target");
   if(handle==d.boundTarget) return true;
-  // Target switches only need GPU ordering, not a CPU-wide finish. End the
-  // current scene and make the next one wait on its fragment sync object. This
-  // preserves render-to-texture and depth ordering while allowing the CPU to
-  // continue preparing the next GX scene in parallel with the GPU.
+  // Same-context GXM scenes preserve submission order across target switches.
   if(d.inScene) {
-    SceGxmSyncObject* previousSync=d.boundTarget?
-        d.textures.at(d.boundTarget)->sync:d.surfaces[d.back].sync;
     if(!d.end_scene()) return false;
-    d.pendingVertexDependency=previousSync;
+    d.pendingVertexDependency=nullptr;
   }
   d.boundTarget=handle;
   return true;
@@ -1377,7 +1373,10 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     return d.fail("unsupported native EFB GPU copy");
 
   const Handle originalTarget=d.boundTarget;
-  const bool gpuFixup=flipX||flipY||format==EfbCopyFormat::RGB565;
+  // The transfer downscale path is restrictive and rejects Strikers' common
+  // half-scale GXCopyTex copies. Route them through the existing GPU blit path,
+  // which preserves crop/flip/copy semantics without falling back to the CPU.
+  const bool gpuFixup=halfScale||flipX||flipY||format==EfbCopyFormat::RGB565;
   if(gpuFixup && handle==originalTarget)
     return d.fail("native EFB feedback copy requires cached CPU fallback");
 
@@ -1593,7 +1592,9 @@ bool Renderer::copy_display_region(const Scissor& source) {
   alias->descriptorSamplerValid=false;
 
   d.back=destination;
-  d.pendingVertexDependency=d.surfaces[sourceBuffer].sync;
+  // The display-copy scene follows the source scene in the same context, so an
+  // explicit vertex dependency is unnecessary and can be rejected by GXM.
+  d.pendingVertexDependency=nullptr;
   PipelineDesc p{};
   p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
   p.layout.count=2;
