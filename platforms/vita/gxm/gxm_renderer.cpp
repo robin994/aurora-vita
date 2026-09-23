@@ -1421,13 +1421,18 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
 
   uint64_t fallbackEndSceneUs=0;
   uint64_t fallbackTransferSubmitUs=0;
-  // Hardware accepts Strikers' aligned full-EFB 960x544 -> 480x272 downscale,
-  // while the smaller 182x180 -> 91x90 copies return INVALID_VALUE. Keep the
-  // transfer fast path deliberately narrow and leave all cropped/mirrored copies
-  // on the already validated render-to-texture path.
+  // Hardware accepts Strikers' aligned full-EFB 960x544 -> 480x272 downscale.
+  // The common cropped 182x180 -> 91x90 case is rejected because the source
+  // width is not transfer-aligned. Its 96-texel target stride can hold the full
+  // result of a 192x180 -> 96x90 transfer: the first 91 outputs still consume
+  // exactly the requested first 182 source texels, while the extra five outputs
+  // land entirely in row padding and are never sampled by the logical 91x90 texture.
   const bool fullEfbCopy=source.x==0 && source.y==0 &&
       uint32_t(source.width)==sourceWidth && uint32_t(source.height)==sourceHeight;
-  const bool tryHalfScaleTransfer=halfScale && fullEfbCopy &&
+  const bool paddedStrikersCopy=source.width==182 && source.height==180 &&
+      destination.width==91 && destination.height==90 && destination.stride>=96 &&
+      uint64_t(source.x)+192u<=sourceWidth;
+  const bool tryHalfScaleTransfer=halfScale && (fullEfbCopy||paddedStrikersCopy) &&
       format==EfbCopyFormat::Passthrough && !flipX && !flipY && handle!=originalTarget;
   if(tryHalfScaleTransfer) {
     ++d.stats.nativeEfbDownscaleAttempts;
@@ -1441,9 +1446,10 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
           size_t(destination.height-1u)*destination.stride*4u;
       destinationStride=-destinationStride;
     }
+    const unsigned transferSourceWidth=paddedStrikersCopy?192u:static_cast<unsigned>(source.width);
     const int transferResult=sceGxmTransferDownscale(SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
         sourceData,static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),
-        static_cast<unsigned>(source.width),static_cast<unsigned>(source.height),
+        transferSourceWidth,static_cast<unsigned>(source.height),
         static_cast<int>(sourceStride*4u),SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
         destinationData,0,0,destinationStride,sourceSync,SCE_GXM_TRANSFER_FRAGMENT_SYNC,nullptr);
     const uint64_t afterTransfer=sceKernelGetProcessTimeWide();
@@ -1459,8 +1465,8 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
       const uint64_t n=++downscaleSuccessCount;
       if(n<=8 || (n&(n-1u))==0)
         std::fprintf(stderr,
-            "[aurora-gxm] efb_downscale_transfer n=%llu flip_y=%u source_end_us=%llu submit_us=%llu total_us=%llu\n",
-            static_cast<unsigned long long>(n),flipY?1u:0u,
+            "[aurora-gxm] efb_downscale_transfer n=%llu padded=%u flip_y=%u source_end_us=%llu submit_us=%llu total_us=%llu\n",
+            static_cast<unsigned long long>(n),paddedStrikersCopy?1u:0u,flipY?1u:0u,
             static_cast<unsigned long long>(afterSourceEnd-transferStarted),
             static_cast<unsigned long long>(afterTransfer-afterSourceEnd),
             static_cast<unsigned long long>(afterTransfer-transferStarted));
@@ -1473,8 +1479,8 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     const uint64_t n=++downscaleFallbackCount;
     if(n<=8 || (n&(n-1u))==0)
       std::fprintf(stderr,
-          "[aurora-gxm] efb_downscale_fallback n=%llu result=0x%08x flip_y=%u source_end_us=%llu submit_us=%llu\n",
-          static_cast<unsigned long long>(n),static_cast<unsigned>(transferResult),flipY?1u:0u,
+          "[aurora-gxm] efb_downscale_fallback n=%llu result=0x%08x padded=%u flip_y=%u source_end_us=%llu submit_us=%llu\n",
+          static_cast<unsigned long long>(n),static_cast<unsigned>(transferResult),paddedStrikersCopy?1u:0u,flipY?1u:0u,
           static_cast<unsigned long long>(fallbackEndSceneUs),
           static_cast<unsigned long long>(fallbackTransferSubmitUs));
   }
