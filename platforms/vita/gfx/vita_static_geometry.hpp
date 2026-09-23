@@ -24,7 +24,7 @@ public:
     const uint8_t* source=nullptr;
     std::vector<uint8_t> bytes{};
     size_t size=0;
-    uint64_t revision=0;
+    MemoryRangeStamp stamp{};
     VertexSemantic semantic=VertexSemantic::Position;
     bool revisionTracked=false;
   };
@@ -37,7 +37,7 @@ public:
     std::vector<Snapshot> snapshots{};
     const uint8_t* stableSource=nullptr;
     size_t stableSourceBytes=0;
-    uint64_t stableSourceRevision=0;
+    MemoryRangeStamp stableSourceStamp{};
     uint64_t lastUseFrame=0;
     size_t residentBytes=0;
     bool volatileSource=false;
@@ -135,7 +135,7 @@ public:
           if(telemetry)telemetry->geometry_reject(GeometryRejectReason::StableIdentity);
           return nullptr;
         }
-        if(memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
+        if(memory_range_changed(stableSource,bytes,e.stableSourceStamp)) {
           e.volatileSource=true;
           pressure_=true;
           remember_volatile_key(key);
@@ -148,10 +148,10 @@ public:
           if(telemetry)telemetry->geometry_reject(GeometryRejectReason::RawContent);return nullptr;
         }
       }
-      for(const auto& s:e.snapshots) {
+      for(auto& s:e.snapshots) {
         if(telemetry)telemetry->geometry_validate(0,s.revisionTracked?0:s.bytes.size(),s.revisionTracked?1u:0u);
         const bool changed=s.revisionTracked?
-          memory_range_revision(s.source,s.size)!=s.revision:
+          memory_range_changed(s.source,s.size,s.stamp):
           !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
         if(changed) {
           e.volatileSource=true;
@@ -173,7 +173,7 @@ public:
     auto entry=std::make_unique<Entry>();
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
     entry->stableSource=stableSource;entry->stableSourceBytes=stableSource?bytes:0;
-    entry->stableSourceRevision=stableSource?memory_range_revision(stableSource,bytes):0;
+    entry->stableSourceStamp=stableSource?memory_range_stamp(stableSource,bytes):MemoryRangeStamp{};
     if(!snapshot_sources(raw,bytes,count,layout,fixed_vertex_gpu_inputs(pipeline),entry->snapshots,stableSource!=nullptr)){
       if(telemetry)telemetry->geometry_reject(GeometryRejectReason::BuildFailure);return nullptr;
     }
@@ -262,7 +262,7 @@ public:
       if(total>4u*1024u*1024u)return false;
       Snapshot s{};s.source=a.array.data+start;s.semantic=a.semantic;
       s.size=end-start;s.revisionTracked=revisionTracked;
-      if(revisionTracked)s.revision=memory_range_revision(s.source,s.size);
+      if(revisionTracked)s.stamp=memory_range_stamp(s.source,s.size);
       else s.bytes.assign(s.source,s.source+s.size);
       output.push_back(std::move(s));
     }

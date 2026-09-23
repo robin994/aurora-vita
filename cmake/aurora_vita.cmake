@@ -52,6 +52,10 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_byte_compare_test.cpp)
     target_link_libraries(aurora_vita_byte_compare_test PRIVATE aurora::vita_common)
     add_test(NAME vita_byte_compare COMMAND aurora_vita_byte_compare_test)
+    add_executable(aurora_vita_memory_revision_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_memory_revision_test.cpp)
+    target_link_libraries(aurora_vita_memory_revision_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_memory_revision COMMAND aurora_vita_memory_revision_test)
     add_executable(aurora_vita_vertex_pack_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_vertex_pack_test.cpp)
     target_link_libraries(aurora_vita_vertex_pack_test PRIVATE aurora::vita_common)
