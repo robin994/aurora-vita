@@ -10,6 +10,7 @@
 #include "gfx/vita_hash_map.hpp"
 #include "gxm/gxm_texture_layout.hpp"
 #include "gxm/gxm_program_cache.hpp"
+#include "vita_data_paths.hpp"
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -424,6 +425,13 @@ void native_extended_contract() {
 }
 } // namespace
 int main() {
+  REQUIRE(sanitize_title_id("smsvita01")=="SMSVITA01");
+  REQUIRE(sanitize_title_id("../PCSE00001")=="PCSE00001");
+  REQUIRE(data_root_for_title("SMSVITA01")=="ux0:data/aurora-vita/SMSVITA01");
+  REQUIRE(data_root_for_title("").empty());
+  configure_data_root("ux0:data/aurora-vita/TEST00001");
+  REQUIRE(data_path("program_cache")=="ux0:data/aurora-vita/TEST00001/program_cache");
+  REQUIRE(data_path("/pipeline_hot_v1.bin")=="ux0:data/aurora-vita/TEST00001/pipeline_hot_v1.bin");
   {
     TextureDesc d{}; d.format=TextureFormat::RGBA8888; d.mipCount=1;
     d.width=d.height=4;

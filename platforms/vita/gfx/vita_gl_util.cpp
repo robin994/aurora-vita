@@ -13,9 +13,15 @@ namespace {
 std::string programCacheRoot;
 uint32_t programCacheHits=0,programCacheMisses=0;
 
+char program_cache_shard(uint64_t sourceHash) noexcept {
+  static constexpr char Hex[]="0123456789abcdef";
+  return Hex[(sourceHash>>60u)&0x0fu];
+}
+
 std::string program_cache_path(uint64_t sourceHash) {
   if(programCacheRoot.empty())return {};
-  char file[32];std::snprintf(file,sizeof(file),"/%016llx.bin",static_cast<unsigned long long>(sourceHash));
+  char file[36];std::snprintf(file,sizeof(file),"/%c/%016llx.bin",program_cache_shard(sourceHash),
+                              static_cast<unsigned long long>(sourceHash));
   return programCacheRoot+file;
 }
 
@@ -76,7 +82,14 @@ void configure_program_binary_cache(const char* path) noexcept {
   for(size_t i=programCacheRoot.find(':')+1;i<programCacheRoot.size();++i)
     if(programCacheRoot[i]=='/')sceIoMkdir(programCacheRoot.substr(0,i).c_str(),0777);
   sceIoMkdir(programCacheRoot.c_str(),0777);
-  std::fprintf(stderr,"[aurora-vita] program_cache abi=%s\n",AURORA_VITAGL_CACHE_ABI);
+  static constexpr char Hex[]="0123456789abcdef";
+  for(char shard:Hex) {
+    if(!shard)break;
+    const std::string dir=programCacheRoot+"/"+shard;
+    sceIoMkdir(dir.c_str(),0777);
+  }
+  std::fprintf(stderr,"[aurora-vita] program_cache abi=%s shards=16 root=%s\n",
+               AURORA_VITAGL_CACHE_ABI,programCacheRoot.c_str());
 }
 
 GLuint compile_shader(GLenum type,const char* src,std::string* diagnostics) noexcept {

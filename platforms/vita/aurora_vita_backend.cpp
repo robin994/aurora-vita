@@ -4,6 +4,7 @@
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_texture_decode.hpp"
+#include "vita_data_paths.hpp"
 #if !defined(AURORA_VITA_RENDERER_GXM)
 #include "gfx/vita_gl_util.hpp"
 #endif
@@ -44,6 +45,8 @@ std::unique_ptr<gxbridge::DrawSink> g_drawSink;
 gfx::Telemetry g_telemetry;
 integration::FeatureCoverage g_coverage;
 std::unique_ptr<integration::FrameTrace> g_trace;
+std::string g_programCachePath;
+std::string g_pipelineWarmupPath;
 InitFailure g_initFailure=InitFailure::None;
 char g_initFailureDetail[384]{};
 struct PendingDisplayClear {
@@ -72,9 +75,7 @@ bool path_exists(const char* path) noexcept {
 }
 
 void ensure_parent_dir(const char* path) noexcept {
-  if (!path) return;
-  // Probe/runtime paths use ux0:data/aurora-vita/*.log. Creating the known parent is harmless if it exists.
-  sceIoMkdir("ux0:data/aurora-vita", 0777);
+  ensure_parent_directory(path);
 }
 #else
 void ensure_parent_dir(const char*) noexcept {}
@@ -135,6 +136,9 @@ extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
+  configure_data_root(c.data_root_path);
+  g_programCachePath=c.program_binary_cache_path?c.program_binary_cache_path:data_path("program_cache");
+  g_pipelineWarmupPath=c.pipeline_warmup_path?c.pipeline_warmup_path:data_path("pipeline_hot_v1.bin");
   const uint32_t renderWidth=c.render_width?c.render_width:c.width;
   const uint32_t renderHeight=c.render_height?c.render_height:c.height;
   if(!renderWidth||!renderHeight||renderWidth>c.width||renderHeight>c.height) {
@@ -147,7 +151,7 @@ bool initialize(const BackendConfig& c) noexcept {
   aurora::vita::render_size::configure(renderWidth,renderHeight,c.width,c.height);
   gfx::set_texture_decode_diagnostics(c.texture_decode_diagnostics);
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
-  gfx::configure_program_binary_cache(c.program_binary_cache_path);
+  gfx::configure_program_binary_cache(g_programCachePath.empty()?nullptr:g_programCachePath.c_str());
 #endif
   g_telemetryEnabled=c.diagnostics||c.telemetry_log_path;
   g_coverageEnabled=c.diagnostics||c.coverage_log_path;
@@ -245,12 +249,10 @@ bool initialize(const BackendConfig& c) noexcept {
       (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
 #if defined(AURORA_VITA_RENDERER_GXM)
   // Native Cg/GXP compilation is expensive enough to stall first-use gameplay.
-  // Keep the generic override, but make the validated GXM cache persistent by
-  // default so games do not need renderer-specific configuration files.
-  rc.programBinaryCachePath=c.program_binary_cache_path ? c.program_binary_cache_path :
-      "ux0:data/aurora-vita/program_cache";
-  rc.pipelineWarmupPath=c.pipeline_warmup_path ? c.pipeline_warmup_path :
-      "ux0:data/aurora-vita/pipeline_hot_v1.bin";
+  // Keep each title isolated by default; explicit paths remain available to
+  // ports that intentionally own a custom writable cache root.
+  rc.programBinaryCachePath=g_programCachePath.empty()?nullptr:g_programCachePath.c_str();
+  rc.pipelineWarmupPath=g_pipelineWarmupPath.empty()?nullptr:g_pipelineWarmupPath.c_str();
   rc.pipelinePrewarmLimit=c.pipeline_prewarm_limit;
 #else
   rc.programBinaryCachePath=c.program_binary_cache_path;
@@ -276,6 +278,10 @@ bool initialize(const BackendConfig& c) noexcept {
                static_cast<unsigned long long>(c.static_geometry_budget/(1024u*1024u)),
                static_cast<unsigned long long>(c.stream_vertex_bytes),
                static_cast<unsigned long long>(c.stream_index_bytes),c.stream_slots);
+  std::fprintf(stderr,"[aurora-vita] data_root=%s program_cache=%s pipeline_warmup=%s\n",
+               data_root().empty()?"<disabled>":data_root().c_str(),
+               g_programCachePath.empty()?"<disabled>":g_programCachePath.c_str(),
+               g_pipelineWarmupPath.empty()?"<disabled>":g_pipelineWarmupPath.c_str());
   g_telemetry.reset(); g_coverage.reset(); g_trace=std::make_unique<integration::FrameTrace>(c.trace_capacity);
   g_telemetry.set_split_vertex_phases(c.profile_split_vertex_phases);
   gxbridge::DrawSinkConfig dc{};

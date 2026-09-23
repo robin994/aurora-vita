@@ -24,6 +24,7 @@ if (NOT TARGET robin_hood)
 endif ()
 
 add_library(aurora_vita_common STATIC
+    ${AURORA_VITA_SOURCE_DIR}/platforms/vita/vita_data_paths.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_cpu_workers.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_memory_revision.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_vertex_decode.cpp

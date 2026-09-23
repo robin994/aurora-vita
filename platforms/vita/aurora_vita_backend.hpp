@@ -68,6 +68,10 @@ struct BackendConfig {
   bool gxm_lit_fixed_vertex_gpu=false;
   // Opt-in until fixed-GPU lighting/texgen matches the CPU path on hardware.
   size_t static_geometry_budget=0;
+  // Null resolves to ux0:data/aurora-vita/<TITLE_ID> on Vita. All default
+  // renderer caches derive from this root so independent ports never share
+  // hot-pipeline state accidentally.
+  const char* data_root_path=nullptr;
   const char* program_binary_cache_path=nullptr;
   const char* pipeline_warmup_path=nullptr;
   size_t pipeline_prewarm_limit=192;
