@@ -589,9 +589,18 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
   const auto footprint = gfx::estimate_draw_footprint(source,vertexCount,indexCount,gpuStride);
+#if defined(AURORA_VITA_RENDERER_GXM)
   const bool useStreamed=!gpuGeometry&&!(telemetry_&&telemetry_->split_vertex_phases())&&
       source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&
       source!=gfx::SourcePrimitive::Points;
+#else
+  // Keep the VitaGL comparison on the older correctness-first path.  Native
+  // GXM has hardware-validated direct streaming, while the current VitaGL
+  // build renders the 2D frontend correctly but corrupts large 3D draws after
+  // they enter prepare_streamed_draw_into().  PreparedDraw also makes the
+  // existing geometry diagnostics available if this A/B does not restore 3D.
+  const bool useStreamed=false;
+#endif
   const bool exactTriangleDedup=!useStreamed&&source==gfx::SourcePrimitive::Triangles&&
       rawIndices==nullptr&&indexCount==0;
   if(!gpuGeometry&&telemetry_)telemetry_->cpu_fallback(vertexCount);
