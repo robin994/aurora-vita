@@ -513,6 +513,15 @@ struct FrameStats {
   uint32_t nativeVertexUniformReuses = 0;
   uint32_t nativeFragmentUniformReuses = 0;
   uint32_t nativeSceneCount = 0;
+  uint32_t nativeDepthLoadScenes = 0;
+  uint32_t nativeDepthWrittenScenes = 0;
+  uint32_t nativeDepthReadOnlyScenes = 0;
+  uint32_t nativeDepthClearSkippedLoads = 0;
+  uint32_t nativeSceneEndFrame = 0;
+  uint32_t nativeSceneEndTargetSwitch = 0;
+  uint32_t nativeSceneEndTransfer = 0;
+  uint32_t nativeSceneEndDisplayCopy = 0;
+  uint32_t nativeSceneEndFinish = 0;
   uint32_t nativeEfbCopies = 0;
   uint64_t nativeEfbEndSceneUs = 0;
   uint64_t nativeEfbTransferSubmitUs = 0;

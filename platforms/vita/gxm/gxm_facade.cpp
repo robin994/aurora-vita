@@ -412,6 +412,15 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeDrawUs=s.nativeDrawUs;stats_.nativeDisplayQueueAddUs=s.nativeDisplayQueueAddUs;
   stats_.pipelineMruHits=pipelines_.frame_mru_hits();
   stats_.nativeSceneCount=s.nativeSceneCount;
+  stats_.nativeDepthLoadScenes=s.nativeDepthLoadScenes;
+  stats_.nativeDepthWrittenScenes=s.nativeDepthWrittenScenes;
+  stats_.nativeDepthReadOnlyScenes=s.nativeDepthReadOnlyScenes;
+  stats_.nativeDepthClearSkippedLoads=s.nativeDepthClearSkippedLoads;
+  stats_.nativeSceneEndFrame=s.nativeSceneEndFrame;
+  stats_.nativeSceneEndTargetSwitch=s.nativeSceneEndTargetSwitch;
+  stats_.nativeSceneEndTransfer=s.nativeSceneEndTransfer;
+  stats_.nativeSceneEndDisplayCopy=s.nativeSceneEndDisplayCopy;
+  stats_.nativeSceneEndFinish=s.nativeSceneEndFinish;
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
   stats_.nativeEfbCopies=s.nativeEfbCopies;stats_.nativeEfbEndSceneUs=s.nativeEfbEndSceneUs;

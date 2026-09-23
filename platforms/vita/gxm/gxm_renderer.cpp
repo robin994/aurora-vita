@@ -251,6 +251,7 @@ NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
 } // namespace
 
 struct Renderer::Impl {
+  enum class SceneEndReason : uint8_t { EndFrame, TargetSwitch, Transfer, DisplayCopy, Finish };
   struct Surface { MemoryBlock memory; SceGxmColorSurface color{}; SceGxmSyncObject* sync = nullptr; };
   struct Buffer { MemoryBlock memory; size_t bytes = 0; bool inFlight = false; };
   struct Texture {
@@ -336,6 +337,7 @@ struct Renderer::Impl {
   uint32_t stride = 0, front = 0, back = 1;
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
   bool frameActive = false, depthValid = false;
+  bool sceneHasDepth = false, sceneDepthWritten = false;
   bool pipelineStateValid = false, viewportValid = false, scissorValid = false;
   bool vertexStreamValid = false;
   Viewport cachedViewport{};
@@ -368,10 +370,22 @@ struct Renderer::Impl {
 
   uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
   uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
-  bool end_scene() {
+  bool end_scene(SceneEndReason reason) {
     if (!inScene) return true;
     const int result = sceGxmEndScene(context, nullptr, nullptr);
     inScene = false;
+    if(sceneHasDepth) {
+      if(sceneDepthWritten) ++stats.nativeDepthWrittenScenes;
+      else ++stats.nativeDepthReadOnlyScenes;
+    }
+    switch(reason) {
+      case SceneEndReason::EndFrame: ++stats.nativeSceneEndFrame; break;
+      case SceneEndReason::TargetSwitch: ++stats.nativeSceneEndTargetSwitch; break;
+      case SceneEndReason::Transfer: ++stats.nativeSceneEndTransfer; break;
+      case SceneEndReason::DisplayCopy: ++stats.nativeSceneEndDisplayCopy; break;
+      case SceneEndReason::Finish: ++stats.nativeSceneEndFinish; break;
+    }
+    sceneHasDepth=false;sceneDepthWritten=false;
     // Store/load policy is specified before BeginScene. The next frame may
     // continue an offscreen target; EndFrame alone does not retire its depth.
     if (boundTarget) textures.at(boundTarget)->depthValid = result>=0;
@@ -400,6 +414,7 @@ struct Renderer::Impl {
       sceGxmDepthStencilSurfaceSetForceLoadMode(ds, loadDepth ?
           SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
       sceGxmDepthStencilSurfaceSetForceStoreMode(ds, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+      if(loadDepth) ++stats.nativeDepthLoadScenes;
     }
     // Scenes submitted through the same GXM context are already ordered. Do
     // not turn render-target switches into sync-object dependencies: Strikers'
@@ -414,6 +429,7 @@ struct Renderer::Impl {
     vertexUniformState.valid=false;fragmentUniformState.valid=false;
     textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
     inScene = true;
+    sceneHasDepth=ds!=nullptr;sceneDepthWritten=false;
     return true;
   }
 
@@ -822,6 +838,20 @@ bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool
   if (!d.initialized || !d.frameActive) return d.fail("clear outside a frame");
   if (!std::isfinite(depth) || depth<0.f || depth>1.f) return d.fail("invalid clear depth");
   if (!rgb && !alpha && !writeDepth) return true;
+  if(writeDepth && !d.inScene) {
+    if(d.boundTarget) {
+      auto& target=*d.textures.at(d.boundTarget);
+      if(target.depth.data() && target.depthValid) {
+        // This clear covers the complete target, so loading the previous Z
+        // contents into the new scene would only consume memory bandwidth.
+        target.depthValid=false;
+        ++d.stats.nativeDepthClearSkippedLoads;
+      }
+    } else if(d.depthValid) {
+      d.depthValid=false;
+      ++d.stats.nativeDepthClearSkippedLoads;
+    }
+  }
   auto desc=d.pipelines.at(d.clearPipeline)->desc;
   desc.fragmentScissor=false; // The clear always covers the complete target.
   desc.colorWrite=rgb; desc.alphaWrite=alpha; desc.depthWrite=writeDepth;
@@ -1107,6 +1137,7 @@ bool Renderer::draw(const DrawPacket& packet) {
   const auto primitive = pipeline.primitive == Primitive::Triangles ? SCE_GXM_PRIMITIVE_TRIANGLES :
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
   if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;
+  if(d.sceneHasDepth && pipeline.depthTest && pipeline.depthWrite) d.sceneDepthWritten=true;
   if(d.profileDraws) d.stats.nativeDrawUs+=sceKernelGetProcessTimeWide()-profileTick;
   pi->second->inFlight = true;
   vi->second.inFlight = true; ii->second.inFlight = true;
@@ -1119,7 +1150,7 @@ bool Renderer::end_frame(bool present) {
   auto& d = *impl_;
   if (!d.frameActive) return d.fail("end_frame outside a frame");
   const uint64_t timingStart=sceKernelGetProcessTimeWide();
-  if (!d.end_scene()) return false;
+  if (!d.end_scene(Impl::SceneEndReason::EndFrame)) return false;
   const uint64_t afterEnd=sceKernelGetProcessTimeWide();
   d.frameActive = false;
   auto& surface = d.surfaces[d.back];
@@ -1195,7 +1226,7 @@ bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) {
 bool Renderer::finish() {
   auto& d=*impl_;
   if(!d.context) return true;
-  if(!d.end_scene()) return false;
+  if(!d.end_scene(Impl::SceneEndReason::Finish)) return false;
   if(d.pendingFragmentTransferSync) {
     if(!d.check(sceGxmTransferFinish(),"finish pending native transfer"))return false;
     d.pendingFragmentTransferSync=false;
@@ -1306,7 +1337,7 @@ bool Renderer::bind_target(Handle handle) {
   if(handle==d.boundTarget) return true;
   // Same-context GXM scenes preserve submission order across target switches.
   if(d.inScene) {
-    if(!d.end_scene()) return false;
+    if(!d.end_scene(Impl::SceneEndReason::TargetSwitch)) return false;
     d.pendingVertexDependency=nullptr;
   }
   d.boundTarget=handle;
@@ -1474,7 +1505,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
   // Unmodified copies stay on the transfer engine. All mirror/opaque fixups use
   // the draw path above, so this transfer never needs a CPU-side pixel pass.
   const uint64_t copyStarted=sceKernelGetProcessTimeWide();
-  if(!d.end_scene())return false;
+  if(!d.end_scene(Impl::SceneEndReason::Transfer))return false;
   const uint64_t afterSourceFinish=sceKernelGetProcessTimeWide();
   const int transferResult=sameSize?
       sceGxmTransferCopy(destination.width,destination.height,0,0,SCE_GXM_TRANSFER_COLORKEY_NONE,
@@ -1570,7 +1601,7 @@ bool Renderer::copy_display_region(const Scissor& source) {
   const uint32_t sourceBuffer=d.back;
   // Submit the EFB scene without stalling the CPU. The following display-copy
   // scene waits on its fragment dependency in the GPU command stream.
-  if(!d.end_scene()) return false;
+  if(!d.end_scene(Impl::SceneEndReason::DisplayCopy)) return false;
   const uint64_t afterEnd=sceKernelGetProcessTimeWide();
   uint32_t destination=UINT32_MAX;
   for(uint32_t i=0;i<d.config.displayBuffers;++i)
