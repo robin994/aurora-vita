@@ -152,12 +152,14 @@ bool PipelineCache::evict_one() noexcept {
     if(!pinned_.contains(it->first) && (victim==map_.end() || it->second.lastUsed<victim->second.lastUsed))victim=it;
   if(victim==map_.end())return false;
   if(victim->first==bound_)invalidate_bound();
+  if(mruPipeline_==&victim->second){mruKey_=0;mruPipeline_=nullptr;}
   destroy_pipeline(victim->second);map_.erase(victim);++evictions_;return true;
 }
 void PipelineCache::set_max_entries(size_t n) noexcept {maxEntries_=n;trim_to_budget();}
 void PipelineCache::trim_to_budget() noexcept {while(maxEntries_ && map_.size()>maxEntries_ && evict_one()) {}}
 void PipelineCache::configure_hot_manifest(const char* path,size_t prewarmLimit) noexcept {
-  hotManifestPath_=path&&*path?path:"";prewarmLimit_=prewarmLimit;hot_.clear();hotDirty_=false;
+  hotManifestPath_=path&&*path?path:"";prewarmLimit_=prewarmLimit;hot_.clear();
+  newHotEntriesSinceSave_=0;hotDirty_=false;
   if(hotManifestPath_.empty())return;
   FILE* file=std::fopen(hotManifestPath_.c_str(),"rb");
   if(!file)return;
@@ -212,28 +214,42 @@ void PipelineCache::save_hot_manifest() noexcept {
   ok=ok&&std::fclose(file)==0;
   if(ok){std::remove(hotManifestPath_.c_str());ok=std::rename(temporary.c_str(),hotManifestPath_.c_str())==0;}
   if(!ok){std::remove(temporary.c_str());return;}
+  newHotEntriesSinceSave_=0;
   hotDirty_=false;
   std::fprintf(stderr,"[aurora-gxm] pipeline_manifest saved=%u\n",header.count);
 }
 const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& desc,FrameStats* stats) noexcept {
   const auto key=pipeline_key(desc);
   auto hotIt=hot_.find(key);
-  if(hotIt==hot_.end())hotIt=hot_.emplace(key,HotRecord{desc,0}).first;
+  if(hotIt==hot_.end()){
+    hotIt=hot_.emplace(key,HotRecord{desc,0}).first;
+    ++newHotEntriesSinceSave_;
+  }
   ++hotIt->second.hits;hotDirty_=true;
+  if(mruPipeline_&&mruKey_==key){
+    mruPipeline_->lastUsed=++useSequence_;++frameMruHits_;
+    if(stats)++stats->pipelineHits;
+    return mruPipeline_;
+  }
   auto it=map_.find(key);
-  if(it!=map_.end()) {it->second.lastUsed=++useSequence_;if(stats)++stats->pipelineHits;return &it->second;}
+  if(it!=map_.end()) {
+    it->second.lastUsed=++useSequence_;mruKey_=key;mruPipeline_=&it->second;
+    if(stats)++stats->pipelineHits;return &it->second;
+  }
   if(stats)++stats->pipelineMisses;
   if(!native_ || failedKeys_.contains(key))return nullptr;
   if(maxEntries_ && map_.size()>=maxEntries_)evict_one();
   if(!native_->create_pipeline(desc)) {failedKeys_.insert(key);++compileFailures_;return nullptr;}
   CompiledPipeline p{};p.key=key;p.desc=desc;p.lastUsed=++useSequence_;
   const auto result=map_.emplace(key,std::move(p));
+  mruKey_=key;mruPipeline_=&result.first->second;
   highWaterEntries_=std::max(highWaterEntries_,map_.size());
   return &result.first->second;
 }
 const CompiledPipeline* PipelineCache::find(uint64_t key) noexcept {
+  if(mruPipeline_&&mruKey_==key){mruPipeline_->lastUsed=++useSequence_;++frameMruHits_;return mruPipeline_;}
   auto it=map_.find(key);if(it==map_.end())return nullptr;
-  it->second.lastUsed=++useSequence_;return &it->second;
+  it->second.lastUsed=++useSequence_;mruKey_=key;mruPipeline_=&it->second;return &it->second;
 }
 void PipelineCache::bind(const CompiledPipeline& p,const GpuDrawUniforms& u,FrameStats* stats,
                           const FixedVertexUniforms* fixed) noexcept {
@@ -246,6 +262,7 @@ void PipelineCache::clear() noexcept {
   if(native_)native_->finish();
   for(auto& [_,p]:map_)destroy_pipeline(p);
   map_.clear();pinned_.clear();failedKeys_.clear();invalidate_bound();
+  mruKey_=0;mruPipeline_=nullptr;frameMruHits_=0;newHotEntriesSinceSave_=0;
 }
 
 EfbManager::~EfbManager() {clear();}
@@ -374,12 +391,16 @@ void Renderer::shutdown() noexcept {
 }
 const char* Renderer::last_error() const noexcept {return native_->last_error();}
 void Renderer::begin_frame() noexcept {
-  pipelines_.clear_pins();pipelines_.trim_to_budget();stats_={};
+  pipelines_.clear_pins();pipelines_.trim_to_budget();pipelines_.reset_frame_counters();stats_={};
   failed_=!native_->begin_frame();boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;
 }
 void Renderer::end_frame() noexcept {
   textures_.trim(frame_);++frame_;
-  if((frame_%300u)==0) pipelines_.save_hot_manifest();
+  // Persist newly discovered gameplay pipelines soon enough that a short
+  // hardware run becomes useful training data. Usage-only ranking updates can
+  // stay on the slower cadence to avoid unnecessary filesystem traffic.
+  if(((frame_%120u)==0 && pipelines_.has_unsaved_hot_entries()) || (frame_%300u)==0)
+    pipelines_.save_hot_manifest();
 }
 bool Renderer::present(bool display) noexcept {
   const bool ok=native_->end_frame(display);failed_=failed_||!ok;
@@ -389,6 +410,7 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeTimingsSampled=s.nativeTimingsSampled;
   stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;
   stats_.nativeDrawUs=s.nativeDrawUs;stats_.nativeDisplayQueueAddUs=s.nativeDisplayQueueAddUs;
+  stats_.pipelineMruHits=pipelines_.frame_mru_hits();
   stats_.nativeSceneCount=s.nativeSceneCount;
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
@@ -450,6 +472,7 @@ void Renderer::draw(const DrawPacket& packet) noexcept {
   if(!native_->draw(packet)) {failed_=true;return;}
   const auto& s=native_->stats();stats_.drawCalls=s.drawCalls;stats_.triangles=s.triangles;
   stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;stats_.nativeDrawUs=s.nativeDrawUs;
+  stats_.pipelineMruHits=pipelines_.frame_mru_hits();
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
   stats_.nativeSceneCount=s.nativeSceneCount;

@@ -91,6 +91,7 @@ void emit_periodic_diagnostics() noexcept {
   std::snprintf(rendererLine,sizeof(rendererLine),
       "[AURORA-VITA][RENDERER] frame=%llu display=%ux%u internal=%ux%u scenes=%u sampled=%u "
       "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu display_queue_us=%llu "
+      "pipeline_mru_hits=%u "
       "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u d16=%u gpu_geometry=%u split_vertex_phases=%u",
       static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
@@ -101,6 +102,7 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(rs.nativeTextureUs),
       static_cast<unsigned long long>(rs.nativeDrawUs),
       static_cast<unsigned long long>(rs.nativeDisplayQueueAddUs),
+      rs.pipelineMruHits,
       rs.nativeVertexUniformReuses,rs.nativeFragmentUniformReuses,rs.nativeEfbCopies,
       g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u,
       g_config.profile_split_vertex_phases?1u:0u);

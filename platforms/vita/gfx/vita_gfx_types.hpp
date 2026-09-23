@@ -496,6 +496,7 @@ struct FrameStats {
   uint32_t triangles = 0;
   uint32_t pipelineHits = 0;
   uint32_t pipelineMisses = 0;
+  uint32_t pipelineMruHits = 0;
   uint32_t textureHits = 0;
   uint32_t textureMisses = 0;
   uint32_t textureUploads = 0;

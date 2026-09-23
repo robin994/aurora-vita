@@ -52,6 +52,9 @@ public:
   void save_hot_manifest() noexcept;
   void pin(uint64_t key) noexcept { if(key) pinned_.insert(key); }
   void clear_pins() noexcept { pinned_.clear(); }
+  void reset_frame_counters() noexcept { frameMruHits_=0; }
+  uint32_t frame_mru_hits() const noexcept { return frameMruHits_; }
+  bool has_unsaved_hot_entries() const noexcept { return newHotEntriesSinceSave_!=0; }
   void trim_to_budget() noexcept;
   size_t pinned_entries() const noexcept { return pinned_.size(); }
   size_t max_entries() const noexcept{return maxEntries_;}
@@ -76,6 +79,9 @@ private:
   FlatHashSet<uint64_t> failedKeys_{};
   uint64_t bound_=0;
   CompiledPipeline* boundPipeline_=nullptr;
+  uint64_t mruKey_=0;
+  CompiledPipeline* mruPipeline_=nullptr;
+  uint32_t frameMruHits_=0;
   FixedStateSnapshot fixedState_{};
   bool fixedStateValid_=false;
   uint64_t useSequence_=0;
@@ -85,6 +91,7 @@ private:
   uint64_t evictions_=0;
   std::string hotManifestPath_{};
   size_t prewarmLimit_=192;
+  size_t newHotEntriesSinceSave_=0;
   bool hotDirty_=false;
 };
 } // namespace aurora::vita::gfx
