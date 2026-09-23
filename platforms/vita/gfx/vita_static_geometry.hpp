@@ -4,22 +4,28 @@
 #include "vita_byte_compare.hpp"
 #include "vita_hash_map.hpp"
 #include "vita_memory_revision.hpp"
+#include <algorithm>
 #include <cstdio>
 #include <memory>
+#include <vector>
 
 namespace aurora::vita::gfx {
 
 // Verified object-space geometry, immutable for its entire GPU lifetime. A
-// source which changes at the same key becomes volatile and takes the CPU path;
-// it is never overwritten while queued or in flight. This first bounded cache
-// intentionally does not evict during rendering.
+// source which changes at the same key becomes volatile and takes the CPU path.
+// Capacity pressure is handled only between frames after one GPU idle wait, so
+// buffers are never destroyed while queued or in flight.
 class StaticGeometryCache {
 public:
+  static constexpr size_t MaxEntries=1024;
+  static constexpr size_t MaxVolatileKeys=4096;
+  static constexpr uint64_t StaleFrames=8;
   struct Snapshot {
     const uint8_t* source=nullptr;
     std::vector<uint8_t> bytes{};
     size_t size=0;
     uint64_t revision=0;
+    VertexSemantic semantic=VertexSemantic::Position;
     bool revisionTracked=false;
   };
   struct Entry {
@@ -32,6 +38,8 @@ public:
     const uint8_t* stableSource=nullptr;
     size_t stableSourceBytes=0;
     uint64_t stableSourceRevision=0;
+    uint64_t lastUseFrame=0;
+    size_t residentBytes=0;
     bool volatileSource=false;
   };
 
@@ -46,6 +54,49 @@ public:
   uint64_t misses() const noexcept { return misses_; }
   uint64_t lookup_fallbacks() const noexcept { return lookupFallbacks_; }
 
+  void begin_frame(uint64_t frame,Telemetry* telemetry) noexcept {
+    currentFrame_=frame;
+    if(!pressure_) {
+      if(telemetry)telemetry->geometry_cache_state(entries_.size(),bytes_);
+      return;
+    }
+    struct Victim { uint64_t key=0,lastUse=0; size_t bytes=0; bool volatileSource=false; };
+    std::vector<Victim> victims;
+    victims.reserve(entries_.size());
+    for(const auto& [key,owned]:entries_) {
+      const auto& e=*owned;
+      const bool stale=frame>e.lastUseFrame && frame-e.lastUseFrame>StaleFrames;
+      if(e.volatileSource||stale)victims.push_back({key,e.lastUseFrame,e.residentBytes,e.volatileSource});
+    }
+    std::sort(victims.begin(),victims.end(),[](const Victim& a,const Victim& b){
+      if(a.volatileSource!=b.volatileSource)return a.volatileSource>b.volatileSource;
+      if(a.lastUse!=b.lastUse)return a.lastUse<b.lastUse;
+      return a.bytes>b.bytes;
+    });
+    const size_t targetEntries=MaxEntries*3u/4u;
+    const size_t targetBytes=budget_*3u/4u;
+    uint32_t evictions=0;uint64_t evictedBytes=0;
+    if(!victims.empty()) {
+      // Native GXM keeps an in-flight bit until finish(). Pay one synchronization
+      // per trim pass, then all victim buffers can be destroyed without repeated
+      // finish calls from BufferPool::destroy().
+      renderer_.buffers().wait_idle();
+      for(const auto& victim:victims) {
+        if(!victim.volatileSource&&entries_.size()<=targetEntries&&bytes_<=targetBytes)break;
+        auto it=entries_.find(victim.key);if(it==entries_.end())continue;
+        const size_t resident=it->second->residentBytes;
+        renderer_.buffers().destroy(it->second->vertices.buffer);
+        renderer_.buffers().destroy(it->second->indices.buffer);
+        bytes_=resident>bytes_?0:bytes_-resident;
+        entries_.erase(it);
+        ++evictions;evictedBytes+=resident;
+      }
+      if(telemetry&&evictions)telemetry->geometry_trim(evictions,evictedBytes,true);
+    }
+    pressure_=entries_.size()>targetEntries||bytes_>targetBytes;
+    if(telemetry)telemetry->geometry_cache_state(entries_.size(),bytes_);
+  }
+
   const Entry* get(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
                    const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
                    const VertexTransformState& state,Telemetry* telemetry,
@@ -56,66 +107,104 @@ public:
     const VertexLayout gpuLayout=fixed_vertex_gpu_layout(pipeline);
     uint64_t key=0;
     auto* detailed=telemetry&&telemetry->split_vertex_phases()?telemetry:nullptr;
+    if(telemetry)telemetry->geometry_lookup(stableSource!=nullptr,stableSource?0:bytes);
     { ScopedTelemetryPhase phase(detailed,TelemetryPhase::GeometryKey);
       key=stableSource?make_stable_key(stableSource,count,primitive,layout,gpuLayout):
                        make_key(raw,bytes,count,primitive,layout,gpuLayout);
+    }
+    if(volatileKeys_.contains(key)) {
+      if(telemetry)telemetry->geometry_volatile_bypass();
+      return nullptr;
     }
     auto it=entries_.find(key);
     if(it!=entries_.end()) {
       ScopedTelemetryPhase phase(detailed,TelemetryPhase::GeometryValidate);
       auto& e=*it->second;
-      if(e.volatileSource)return nullptr;
+      if(e.volatileSource){pressure_=true;if(telemetry)telemetry->geometry_reject(GeometryRejectReason::AlreadyVolatile);return nullptr;}
       // Hashes select a candidate only. Every byte that could influence a
       // decoded attribute is checked before an immutable GPU buffer is reused.
-      if(!same_layout(layout,e.sourceLayout)||!same_gpu_layout(gpuLayout,e.gpuLayout))return nullptr;
+      if(!same_layout(layout,e.sourceLayout)||!same_gpu_layout(gpuLayout,e.gpuLayout)){
+        if(telemetry)telemetry->geometry_reject(GeometryRejectReason::LayoutMismatch);return nullptr;
+      }
       if(stableSource) {
-        if(e.stableSource!=stableSource||e.stableSourceBytes!=bytes||
-           memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
+        if(telemetry)telemetry->geometry_validate(0,0,1);
+        if(e.stableSource!=stableSource||e.stableSourceBytes!=bytes) {
           e.volatileSource=true;
+          pressure_=true;
+          remember_volatile_key(key);
+          if(telemetry)telemetry->geometry_reject(GeometryRejectReason::StableIdentity);
           return nullptr;
         }
-      } else if(e.raw.size()!=bytes||!byte_spans_equal(raw,e.raw.data(),bytes)) return nullptr;
+        if(memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
+          e.volatileSource=true;
+          pressure_=true;
+          remember_volatile_key(key);
+          if(telemetry)telemetry->geometry_reject(GeometryRejectReason::StableRevision);
+          return nullptr;
+        }
+      } else {
+        if(telemetry)telemetry->geometry_validate(bytes,0,0);
+        if(e.raw.size()!=bytes||!byte_spans_equal(raw,e.raw.data(),bytes)){
+          if(telemetry)telemetry->geometry_reject(GeometryRejectReason::RawContent);return nullptr;
+        }
+      }
       for(const auto& s:e.snapshots) {
+        if(telemetry)telemetry->geometry_validate(0,s.revisionTracked?0:s.bytes.size(),s.revisionTracked?1u:0u);
         const bool changed=s.revisionTracked?
           memory_range_revision(s.source,s.size)!=s.revision:
           !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
         if(changed) {
           e.volatileSource=true;
+          pressure_=true;
+          remember_volatile_key(key);
+          if(telemetry)telemetry->geometry_reject(s.revisionTracked?GeometryRejectReason::SnapshotRevision:
+                                                  GeometryRejectReason::SnapshotContent,
+                                                  static_cast<uint32_t>(s.semantic));
           return nullptr;
         }
       }
       ++hits_;
+      e.lastUseFrame=currentFrame_;
       return &e;
     }
     ++misses_;
-    if(entries_.size()>=1024||bytes_>=budget_)return nullptr;
+    if(entries_.size()>=MaxEntries){pressure_=true;if(telemetry)telemetry->geometry_reject(GeometryRejectReason::EntryCapacity);return nullptr;}
+    if(bytes_>=budget_){pressure_=true;if(telemetry)telemetry->geometry_reject(GeometryRejectReason::ByteCapacity);return nullptr;}
     auto entry=std::make_unique<Entry>();
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
     entry->stableSource=stableSource;entry->stableSourceBytes=stableSource?bytes:0;
     entry->stableSourceRevision=stableSource?memory_range_revision(stableSource,bytes):0;
-    if(!snapshot_sources(raw,bytes,count,layout,fixed_vertex_gpu_inputs(pipeline),entry->snapshots,stableSource!=nullptr))return nullptr;
+    if(!snapshot_sources(raw,bytes,count,layout,fixed_vertex_gpu_inputs(pipeline),entry->snapshots,stableSource!=nullptr)){
+      if(telemetry)telemetry->geometry_reject(GeometryRejectReason::BuildFailure);return nullptr;
+    }
     size_t storedBytes=stableSource?0:bytes;
     for(const auto& s:entry->snapshots)storedBytes+=s.revisionTracked?0:s.bytes.size();
-    if(storedBytes>budget_-bytes_)return nullptr;
-    if(!prepare_draw_into(scratch_,raw,bytes,count,primitive,layout,pipeline,state,nullptr,{},telemetry,true))return nullptr;
-    if(scratch_.vertices.empty()||scratch_.indices.empty())return nullptr;
+    if(storedBytes>budget_-bytes_){pressure_=true;if(telemetry)telemetry->geometry_reject(GeometryRejectReason::ByteCapacity);return nullptr;}
+    if(!prepare_draw_into(scratch_,raw,bytes,count,primitive,layout,pipeline,state,nullptr,{},telemetry,true)){
+      if(telemetry)telemetry->geometry_reject(GeometryRejectReason::BuildFailure);return nullptr;
+    }
+    if(scratch_.vertices.empty()||scratch_.indices.empty()){
+      if(telemetry)telemetry->geometry_reject(GeometryRejectReason::BuildFailure);return nullptr;
+    }
     const size_t stride=gpuLayout.attributes[0].stride;
     const size_t vertexBytes=scratch_.vertices.size()*stride;
     const size_t indexBytes=scratch_.indices.size()*sizeof(uint16_t);
-    if(vertexBytes+indexBytes>budget_-bytes_-storedBytes)return nullptr;
+    if(vertexBytes+indexBytes>budget_-bytes_-storedBytes){pressure_=true;if(telemetry)telemetry->geometry_reject(GeometryRejectReason::ByteCapacity);return nullptr;}
     packed_.resize(vertexBytes);
     for(size_t i=0;i<scratch_.vertices.size();++i)
       pack_gpu_vertex_bytes(packed_.data()+i*stride,scratch_.vertices[i],gpuLayout);
     const Handle vb=renderer_.create_vertex_buffer(packed_.data(),vertexBytes,false);
-    if(!vb)return nullptr;
+    if(!vb){if(telemetry)telemetry->geometry_reject(GeometryRejectReason::BuildFailure);return nullptr;}
     const Handle ib=renderer_.create_index_buffer(scratch_.indices.data(),indexBytes,false);
-    if(!ib) {renderer_.buffers().destroy(vb);return nullptr;}
+    if(!ib) {renderer_.buffers().destroy(vb);if(telemetry)telemetry->geometry_reject(GeometryRejectReason::BuildFailure);return nullptr;}
     entry->vertices={vb,0,static_cast<uint32_t>(vertexBytes)};
     entry->indices={ib,0,static_cast<uint32_t>(indexBytes)};
     entry->vertexCount=static_cast<uint32_t>(scratch_.vertices.size());
     entry->indexCount=static_cast<uint32_t>(scratch_.indices.size());
+    entry->lastUseFrame=currentFrame_;
+    entry->residentBytes=storedBytes+vertexBytes+indexBytes;
     if(!stableSource)entry->raw.assign(raw,raw+bytes);
-    bytes_+=storedBytes+vertexBytes+indexBytes;
+    bytes_+=entry->residentBytes;
     auto* result=entry.get();
     entries_.emplace(key,std::move(entry));
     return result;
@@ -126,7 +215,7 @@ public:
       renderer_.buffers().destroy(pair.second->vertices.buffer);
       renderer_.buffers().destroy(pair.second->indices.buffer);
     }
-    entries_.clear();bytes_=0;hits_=misses_=lookupFallbacks_=0;
+    entries_.clear();volatileKeys_.clear();bytes_=0;hits_=misses_=lookupFallbacks_=0;pressure_=false;
   }
 
   static bool same_layout(const VertexDecodeLayout& a,const VertexDecodeLayout& b) noexcept {
@@ -171,7 +260,7 @@ public:
       if(end>a.array.size||start>=end||end-start>2u*1024u*1024u)return false;
       total+=end-start;
       if(total>4u*1024u*1024u)return false;
-      Snapshot s{};s.source=a.array.data+start;
+      Snapshot s{};s.source=a.array.data+start;s.semantic=a.semantic;
       s.size=end-start;s.revisionTracked=revisionTracked;
       if(revisionTracked)s.revision=memory_range_revision(s.source,s.size);
       else s.bytes.assign(s.source,s.source+s.size);
@@ -181,6 +270,10 @@ public:
   }
 
 private:
+  void remember_volatile_key(uint64_t key) noexcept {
+    if(volatileKeys_.size()<MaxVolatileKeys)volatileKeys_.insert(key);
+  }
+
   static size_t component_bytes(const VertexDecodeAttribute& a) noexcept {
     if(a.components<1||a.components>4)return 0;
     switch(a.component) {
@@ -243,7 +336,10 @@ private:
   Renderer& renderer_;
   size_t budget_=0,bytes_=0;
   uint64_t hits_=0,misses_=0,lookupFallbacks_=0;
+  uint64_t currentFrame_=0;
+  bool pressure_=false;
   FlatHashMap<uint64_t,std::unique_ptr<Entry>> entries_{};
+  FlatHashSet<uint64_t> volatileKeys_{};
   PreparedDraw scratch_{};
   std::vector<uint8_t> packed_{};
 };

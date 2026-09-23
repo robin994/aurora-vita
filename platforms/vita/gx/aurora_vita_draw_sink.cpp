@@ -106,6 +106,7 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
   frameDrawIndex_ = 0;
   fixedVertexUniforms_.clear();
   reset_pipeline_run_cache();
+  if(staticGeometry_)staticGeometry_->begin_frame(frame,telemetry_);
 #if defined(AURORA_VITA_UPSTREAM)
   resolvedTextureBindingsValid_=false;
 #endif
@@ -503,10 +504,19 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto source = translate_source_primitive(primitive);
   translatedVertexState_.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(
       aurora::gx::g_gxState.currentPnMtx,translatedVertexState_.postexMatrices.size()-1));
-  const bool fixedCandidate=staticGeometry_&&(!translatedLit_||allowLitFixedVertexGpu_)&&
-      vertexCount>=48&&rawIndices==nullptr&&indexCount==0&&
-      source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&source!=gfx::SourcePrimitive::Points&&
-      gfx::supports_fixed_vertex_gpu(pipeline,layout,translatedVertexState_);
+  gfx::FixedVertexReject fixedReject=gfx::FixedVertexReject::UnsupportedFeatures;
+  bool fixedCandidate=false;
+  if(!staticGeometry_)fixedReject=gfx::FixedVertexReject::NoCache;
+  else if(translatedLit_&&!allowLitFixedVertexGpu_)fixedReject=gfx::FixedVertexReject::LitDisabled;
+  else if(vertexCount<48)fixedReject=gfx::FixedVertexReject::SmallDraw;
+  else if(rawIndices!=nullptr||indexCount!=0)fixedReject=gfx::FixedVertexReject::IndexedDraw;
+  else if(source==gfx::SourcePrimitive::Lines||source==gfx::SourcePrimitive::LineStrip||source==gfx::SourcePrimitive::Points)
+    fixedReject=gfx::FixedVertexReject::Primitive;
+  else if(gfx::supports_fixed_vertex_gpu(pipeline,layout,translatedVertexState_))fixedCandidate=true;
+  if(telemetry_){
+    if(fixedCandidate)telemetry_->fixed_vertex_candidate(vertexCount);
+    else telemetry_->fixed_vertex_reject(fixedReject,vertexCount);
+  }
   // The GPU vertex path copies only the state its generated shader can consume.
   // Indexed-PN and lit draws include their position/normal palettes and lights;
   // unsupported bump/dynamic-tex-matrix cases remain on the CPU path.
@@ -572,6 +582,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       source!=gfx::SourcePrimitive::Points;
   const bool exactTriangleDedup=!useStreamed&&source==gfx::SourcePrimitive::Triangles&&
       rawIndices==nullptr&&indexCount==0;
+  if(!gpuGeometry&&telemetry_)telemetry_->cpu_fallback(vertexCount);
   if(!footprint.valid){
     result.drawError=gfx::PrepareDrawError::TooManyVertices;
     if(telemetry_)telemetry_->unsupported();

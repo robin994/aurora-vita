@@ -1,4 +1,5 @@
 #include "vita_telemetry.hpp"
+#include <algorithm>
 #include <chrono>
 #include <sstream>
 #if defined(__vita__)
@@ -61,6 +62,74 @@ void Telemetry::gpu_geometry(bool hit,uint32_t vertices) noexcept {
   else {++frame_.counters.gpuGeometryMisses;++lifetime_.gpuGeometryMisses;}
   frame_.counters.gpuVertices+=vertices;lifetime_.gpuVertices+=vertices;
 }
+void Telemetry::fixed_vertex_candidate(uint32_t vertices) noexcept {
+  frame_.counters.fixedCandidateVertices+=vertices;lifetime_.fixedCandidateVertices+=vertices;
+}
+void Telemetry::fixed_vertex_reject(FixedVertexReject reason,uint32_t vertices) noexcept {
+  uint64_t* frame=nullptr;uint64_t* lifetime=nullptr;
+  switch(reason) {
+    case FixedVertexReject::NoCache: frame=&frame_.counters.fixedRejectNoCacheVertices;lifetime=&lifetime_.fixedRejectNoCacheVertices;break;
+    case FixedVertexReject::LitDisabled: frame=&frame_.counters.fixedRejectLitVertices;lifetime=&lifetime_.fixedRejectLitVertices;break;
+    case FixedVertexReject::SmallDraw: frame=&frame_.counters.fixedRejectSmallVertices;lifetime=&lifetime_.fixedRejectSmallVertices;break;
+    case FixedVertexReject::IndexedDraw: frame=&frame_.counters.fixedRejectIndexedVertices;lifetime=&lifetime_.fixedRejectIndexedVertices;break;
+    case FixedVertexReject::Primitive: frame=&frame_.counters.fixedRejectPrimitiveVertices;lifetime=&lifetime_.fixedRejectPrimitiveVertices;break;
+    case FixedVertexReject::UnsupportedFeatures: frame=&frame_.counters.fixedRejectFeatureVertices;lifetime=&lifetime_.fixedRejectFeatureVertices;break;
+  }
+  if(frame&&lifetime){*frame+=vertices;*lifetime+=vertices;}
+}
+void Telemetry::cpu_fallback(uint32_t vertices) noexcept {
+  frame_.counters.cpuFallbackVertices+=vertices;lifetime_.cpuFallbackVertices+=vertices;
+  frame_.counters.cpuFallbackMaxVertices=std::max<uint64_t>(frame_.counters.cpuFallbackMaxVertices,vertices);
+  lifetime_.cpuFallbackMaxVertices=std::max<uint64_t>(lifetime_.cpuFallbackMaxVertices,vertices);
+}
+void Telemetry::geometry_lookup(bool stable,uint64_t hashBytes) noexcept {
+  if(stable){++frame_.counters.geometryStableLookups;++lifetime_.geometryStableLookups;}
+  else {++frame_.counters.geometryContentLookups;++lifetime_.geometryContentLookups;}
+  frame_.counters.geometryHashBytes+=hashBytes;lifetime_.geometryHashBytes+=hashBytes;
+}
+void Telemetry::geometry_validate(uint64_t rawCompareBytes,uint64_t snapshotCompareBytes,
+                                  uint32_t revisionChecks) noexcept {
+  frame_.counters.geometryRawCompareBytes+=rawCompareBytes;lifetime_.geometryRawCompareBytes+=rawCompareBytes;
+  frame_.counters.geometrySnapshotCompareBytes+=snapshotCompareBytes;lifetime_.geometrySnapshotCompareBytes+=snapshotCompareBytes;
+  frame_.counters.geometryRevisionChecks+=revisionChecks;lifetime_.geometryRevisionChecks+=revisionChecks;
+}
+void Telemetry::geometry_reject(GeometryRejectReason reason,uint32_t semantic) noexcept {
+  ++frame_.counters.geometryRejects;++lifetime_.geometryRejects;
+  uint64_t* frame=nullptr;uint64_t* lifetime=nullptr;
+  switch(reason) {
+    case GeometryRejectReason::AlreadyVolatile: frame=&frame_.counters.geometryRejectVolatile;lifetime=&lifetime_.geometryRejectVolatile;break;
+    case GeometryRejectReason::LayoutMismatch: frame=&frame_.counters.geometryRejectLayout;lifetime=&lifetime_.geometryRejectLayout;break;
+    case GeometryRejectReason::StableIdentity: frame=&frame_.counters.geometryRejectStableIdentity;lifetime=&lifetime_.geometryRejectStableIdentity;break;
+    case GeometryRejectReason::StableRevision: frame=&frame_.counters.geometryRejectStableRevision;lifetime=&lifetime_.geometryRejectStableRevision;break;
+    case GeometryRejectReason::RawContent: frame=&frame_.counters.geometryRejectRawContent;lifetime=&lifetime_.geometryRejectRawContent;break;
+    case GeometryRejectReason::SnapshotRevision: frame=&frame_.counters.geometryRejectSnapshotRevision;lifetime=&lifetime_.geometryRejectSnapshotRevision;break;
+    case GeometryRejectReason::SnapshotContent: frame=&frame_.counters.geometryRejectSnapshotContent;lifetime=&lifetime_.geometryRejectSnapshotContent;break;
+    case GeometryRejectReason::EntryCapacity: frame=&frame_.counters.geometryRejectEntryCapacity;lifetime=&lifetime_.geometryRejectEntryCapacity;break;
+    case GeometryRejectReason::ByteCapacity: frame=&frame_.counters.geometryRejectByteCapacity;lifetime=&lifetime_.geometryRejectByteCapacity;break;
+    case GeometryRejectReason::BuildFailure: frame=&frame_.counters.geometryRejectBuildFailure;lifetime=&lifetime_.geometryRejectBuildFailure;break;
+  }
+  if(frame&&lifetime){++*frame;++*lifetime;}
+  if((reason==GeometryRejectReason::SnapshotRevision||reason==GeometryRejectReason::SnapshotContent)&&semantic<64){
+    const uint64_t bit=1ull<<semantic;
+    frame_.counters.geometrySnapshotRejectSemanticMask|=bit;
+    lifetime_.geometrySnapshotRejectSemanticMask|=bit;
+  }
+}
+void Telemetry::geometry_cache_state(size_t entries,size_t bytes) noexcept {
+  frame_.counters.geometryCacheEntries=entries;
+  frame_.counters.geometryCacheBytes=bytes;
+  lifetime_.geometryCacheEntries=std::max<uint64_t>(lifetime_.geometryCacheEntries,entries);
+  lifetime_.geometryCacheBytes=std::max<uint64_t>(lifetime_.geometryCacheBytes,bytes);
+}
+void Telemetry::geometry_trim(uint32_t evictions,uint64_t bytes,bool waited) noexcept {
+  frame_.counters.geometryEvictions+=evictions;lifetime_.geometryEvictions+=evictions;
+  frame_.counters.geometryEvictedBytes+=bytes;lifetime_.geometryEvictedBytes+=bytes;
+  if(waited){++frame_.counters.geometryTrimWaits;++lifetime_.geometryTrimWaits;}
+}
+void Telemetry::geometry_volatile_bypass() noexcept {
+  ++frame_.counters.geometryVolatileBypasses;
+  ++lifetime_.geometryVolatileBypasses;
+}
 void Telemetry::pipeline(bool hit) noexcept {
   if (hit) { ++frame_.counters.pipelineHits; ++lifetime_.pipelineHits; }
   else { ++frame_.counters.pipelineMisses; ++lifetime_.pipelineMisses; }
@@ -91,6 +160,39 @@ std::string Telemetry::format_frame() const {
       << " gpu_geometry_hit=" << frame_.counters.gpuGeometryHits
       << " gpu_geometry_miss=" << frame_.counters.gpuGeometryMisses
       << " gpu_vertices=" << frame_.counters.gpuVertices
+      << " fixed_candidate_v=" << frame_.counters.fixedCandidateVertices
+      << " fixed_rej_nocache_v=" << frame_.counters.fixedRejectNoCacheVertices
+      << " fixed_rej_lit_v=" << frame_.counters.fixedRejectLitVertices
+      << " fixed_rej_small_v=" << frame_.counters.fixedRejectSmallVertices
+      << " fixed_rej_indexed_v=" << frame_.counters.fixedRejectIndexedVertices
+      << " fixed_rej_primitive_v=" << frame_.counters.fixedRejectPrimitiveVertices
+      << " fixed_rej_feature_v=" << frame_.counters.fixedRejectFeatureVertices
+      << " cpu_fallback_v=" << frame_.counters.cpuFallbackVertices
+      << " cpu_fallback_max_v=" << frame_.counters.cpuFallbackMaxVertices
+      << " geo_stable=" << frame_.counters.geometryStableLookups
+      << " geo_content=" << frame_.counters.geometryContentLookups
+      << " geo_hash_bytes=" << frame_.counters.geometryHashBytes
+      << " geo_raw_cmp_bytes=" << frame_.counters.geometryRawCompareBytes
+      << " geo_snap_cmp_bytes=" << frame_.counters.geometrySnapshotCompareBytes
+      << " geo_rev_checks=" << frame_.counters.geometryRevisionChecks
+      << " geo_reject=" << frame_.counters.geometryRejects
+      << " geo_rej_volatile=" << frame_.counters.geometryRejectVolatile
+      << " geo_rej_layout=" << frame_.counters.geometryRejectLayout
+      << " geo_rej_stable_id=" << frame_.counters.geometryRejectStableIdentity
+      << " geo_rej_stable_rev=" << frame_.counters.geometryRejectStableRevision
+      << " geo_rej_raw=" << frame_.counters.geometryRejectRawContent
+      << " geo_rej_snap_rev=" << frame_.counters.geometryRejectSnapshotRevision
+      << " geo_rej_snap_content=" << frame_.counters.geometryRejectSnapshotContent
+      << " geo_rej_entry_cap=" << frame_.counters.geometryRejectEntryCapacity
+      << " geo_rej_byte_cap=" << frame_.counters.geometryRejectByteCapacity
+      << " geo_rej_build=" << frame_.counters.geometryRejectBuildFailure
+      << " geo_rej_sem_mask=" << frame_.counters.geometrySnapshotRejectSemanticMask
+      << " geo_cache_entries=" << frame_.counters.geometryCacheEntries
+      << " geo_cache_bytes=" << frame_.counters.geometryCacheBytes
+      << " geo_evict=" << frame_.counters.geometryEvictions
+      << " geo_evict_bytes=" << frame_.counters.geometryEvictedBytes
+      << " geo_trim_wait=" << frame_.counters.geometryTrimWaits
+      << " geo_volatile_bypass=" << frame_.counters.geometryVolatileBypasses
       << " pipeline_hit=" << frame_.counters.pipelineHits
       << " pipeline_miss=" << frame_.counters.pipelineMisses
       << " texture_hit=" << frame_.counters.textureHits
