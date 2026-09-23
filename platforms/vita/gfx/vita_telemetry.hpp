@@ -21,6 +21,10 @@ enum class TelemetryPhase : uint8_t {
   GeometryCache,
   DrawFrontend,
   StateTranslate,
+  StatePipelineTranslate,
+  StateVertexLightweight,
+  StateVertexFull,
+  StateVertexFallback,
   GeometryKey,
   GeometryValidate,
   Count,
@@ -133,13 +137,15 @@ private:
 
 class ScopedTelemetryPhase {
 public:
-  ScopedTelemetryPhase(Telemetry* telemetry, TelemetryPhase phase) noexcept;
+  ScopedTelemetryPhase(Telemetry* telemetry, TelemetryPhase phase,
+                       TelemetryPhase aggregate = TelemetryPhase::Count) noexcept;
   ~ScopedTelemetryPhase();
   ScopedTelemetryPhase(const ScopedTelemetryPhase&) = delete;
   ScopedTelemetryPhase& operator=(const ScopedTelemetryPhase&) = delete;
 private:
   Telemetry* telemetry_ = nullptr;
   TelemetryPhase phase_ = TelemetryPhase::Submit;
+  TelemetryPhase aggregate_ = TelemetryPhase::Count;
   uint64_t startUs_ = 0;
 };
 

@@ -430,9 +430,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const bool translatedCacheHit = translatedStateValid_ && translatedStateGeneration_ == stateGeneration &&
                                   translatedPrimitive_ == primitive && translatedFmt_ == fmt;
   if (!translatedCacheHit) {
-    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
-    translatedPipeline_ = translate_current_pipeline(primitive, fmt);
-    translatedLayout_ = translate_current_vertex_layout(fmt);
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StatePipelineTranslate,
+                                    gfx::TelemetryPhase::StateTranslate);
+    translate_current_pipeline_and_layout(primitive,fmt,translatedPipeline_,translatedLayout_);
     translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
     if(staticGeometry_){
       translatedGpuPipeline_=translatedPipeline_;
@@ -522,7 +522,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // unsupported bump/dynamic-tex-matrix cases remain on the CPU path.
   if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty||
      (translatedVertexStateLightweight_&&!fixedCandidate)){
-    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
+    const auto statePhase=fixedCandidate?gfx::TelemetryPhase::StateVertexLightweight:
+                                         gfx::TelemetryPhase::StateVertexFull;
+    gfx::ScopedTelemetryPhase phase(telemetry_,statePhase,gfx::TelemetryPhase::StateTranslate);
     if(fixedCandidate) {
       translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_);
       translatedVertexStateLightweight_=true;
@@ -569,7 +571,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if(!gpuGeometry&&translatedVertexStateLightweight_) {
     // A shader/cache miss or a full geometry budget can reject a GPU candidate.
     // The CPU fallback needs its complete matrices, lights and texgen state.
-    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateVertexFallback,
+                                    gfx::TelemetryPhase::StateTranslate);
     translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
     translatedVertexStateLightweight_=false;
   }

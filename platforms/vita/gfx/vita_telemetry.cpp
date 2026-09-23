@@ -33,6 +33,10 @@ const char* telemetry_phase_name(TelemetryPhase phase) noexcept {
     case TelemetryPhase::GeometryCache: return "geometry_cache";
     case TelemetryPhase::DrawFrontend: return "draw_frontend";
     case TelemetryPhase::StateTranslate: return "state_translate";
+    case TelemetryPhase::StatePipelineTranslate: return "state_pipeline_translate";
+    case TelemetryPhase::StateVertexLightweight: return "state_vertex_lightweight";
+    case TelemetryPhase::StateVertexFull: return "state_vertex_full";
+    case TelemetryPhase::StateVertexFallback: return "state_vertex_fallback";
     case TelemetryPhase::GeometryKey: return "geometry_key";
     case TelemetryPhase::GeometryValidate: return "geometry_validate";
     case TelemetryPhase::Count: break;
@@ -233,10 +237,16 @@ bool Telemetry::append_frame_log(const char* path) const noexcept {
   return ok;
 }
 
-ScopedTelemetryPhase::ScopedTelemetryPhase(Telemetry* telemetry, TelemetryPhase phase) noexcept
-: telemetry_(telemetry), phase_(phase), startUs_(telemetry ? telemetry_now_us() : 0) {}
+ScopedTelemetryPhase::ScopedTelemetryPhase(Telemetry* telemetry, TelemetryPhase phase,
+                                           TelemetryPhase aggregate) noexcept
+    : telemetry_(telemetry), phase_(phase), aggregate_(aggregate),
+      startUs_(telemetry ? telemetry_now_us() : 0) {}
 ScopedTelemetryPhase::~ScopedTelemetryPhase() {
-  if (telemetry_) telemetry_->add_time(phase_, telemetry_now_us() - startUs_);
+  if (!telemetry_) return;
+  const uint64_t elapsed = telemetry_now_us() - startUs_;
+  telemetry_->add_time(phase_, elapsed);
+  if (aggregate_ != TelemetryPhase::Count && aggregate_ != phase_)
+    telemetry_->add_time(aggregate_, elapsed);
 }
 
 } // namespace aurora::vita::gfx
