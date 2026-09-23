@@ -34,6 +34,9 @@ const char* telemetry_phase_name(TelemetryPhase phase) noexcept {
     case TelemetryPhase::DrawFrontend: return "draw_frontend";
     case TelemetryPhase::StateTranslate: return "state_translate";
     case TelemetryPhase::StatePipelineTranslate: return "state_pipeline_translate";
+    case TelemetryPhase::StatePipelineBuild: return "state_pipeline_build";
+    case TelemetryPhase::StatePipelineKey: return "state_pipeline_key";
+    case TelemetryPhase::StatePipelineDerived: return "state_pipeline_derived";
     case TelemetryPhase::StateVertexLightweight: return "state_vertex_lightweight";
     case TelemetryPhase::StateVertexFull: return "state_vertex_full";
     case TelemetryPhase::StateVertexFallback: return "state_vertex_fallback";

@@ -119,41 +119,50 @@ uint8_t current_component_size(GXAttr attr, GXCompType type) noexcept {
   }
 }
 
+void build_current_attr_configs(GXVtxFmt fmt,
+                                std::array<aurora::gx::AttrConfig,aurora::gx::MaxVtxAttr>& attrs,
+                                uint8_t& vertexStride) noexcept {
+  const auto& g=aurora::gx::g_gxState;
+  const auto& vf=g.vtxFmts[static_cast<size_t>(fmt)];
+  uint16_t streamOffset=0;
+  for(int i=GX_VA_PNMTXIDX;i<=GX_VA_TEX0+7;++i){
+    const auto attr=static_cast<GXAttr>(i);
+    const auto source=g.vtxDesc[static_cast<size_t>(i)];
+    auto& m=attrs[static_cast<size_t>(i)];
+    if(source==GX_NONE){m={};continue;}
+    const auto& af=vf.attrs[static_cast<size_t>(i)];
+    const uint8_t count=current_component_count(attr,af.cnt);
+    m.attrType=source;
+    m.cnt=count;
+    m.compType=af.type;
+    m.offset=static_cast<decltype(m.offset)>(streamOffset);
+    m.frac=af.frac;
+    m.nrmIndexCount=attr==GX_VA_NRM&&af.cnt==GX_NRM_NBT3?3:
+                    (attr==GX_VA_NRM&&(source==GX_INDEX8||source==GX_INDEX16)?1:0);
+    if(source==GX_INDEX8||source==GX_INDEX16){
+      const auto& arr=g.arrays[static_cast<size_t>(i)];
+      m.stride=arr.stride;
+      m.le=arr.le;
+      const uint16_t indexSize=source==GX_INDEX16?2u:1u;
+      streamOffset+=static_cast<uint16_t>(indexSize*(m.nrmIndexCount==3?3u:1u));
+    }else{
+      m.stride=0;
+      m.le=false;
+      streamOffset+=static_cast<uint16_t>(current_component_size(attr,af.type)*count);
+    }
+  }
+  vertexStride=static_cast<uint8_t>(std::min<uint16_t>(streamOffset,255u));
+}
+
+gfx::VertexDecodeLayout translate_current_vertex_layout_direct(GXVtxFmt fmt) noexcept;
+
 aurora::gx::ShaderConfig build_current_shader_config(GXVtxFmt fmt, uint8_t lineMode) noexcept {
   const auto& g = aurora::gx::g_gxState;
   aurora::gx::ShaderConfig sc{};
   sc.fogType = static_cast<u8>(g.fog.type);
   sc.fogRangeAdjust = (g.fogRange[0] & (1u << 10)) != 0;
   sc.lineMode = lineMode;
-  const auto& vf = g.vtxFmts[static_cast<size_t>(fmt)];
-  uint16_t streamOffset = 0;
-  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX0 + 7; ++i) {
-    const auto attr = static_cast<GXAttr>(i);
-    const auto source = g.vtxDesc[static_cast<size_t>(i)];
-    auto& m = sc.attrs[static_cast<size_t>(i)];
-    if (source == GX_NONE) { m = {}; continue; }
-    const auto& af = vf.attrs[static_cast<size_t>(i)];
-    const uint8_t count = current_component_count(attr, af.cnt);
-    m.attrType = source;
-    m.cnt = count;
-    m.compType = af.type;
-    m.offset = static_cast<decltype(m.offset)>(streamOffset);
-    m.frac = af.frac;
-    m.nrmIndexCount = attr == GX_VA_NRM && af.cnt == GX_NRM_NBT3 ? 3 :
-                      (attr == GX_VA_NRM && (source == GX_INDEX8 || source == GX_INDEX16) ? 1 : 0);
-    if (source == GX_INDEX8 || source == GX_INDEX16) {
-      const auto& arr = g.arrays[static_cast<size_t>(i)];
-      m.stride = arr.stride;
-      m.le = arr.le;
-      const uint16_t indexSize = source == GX_INDEX16 ? 2u : 1u;
-      streamOffset += static_cast<uint16_t>(indexSize * (m.nrmIndexCount == 3 ? 3u : 1u));
-    } else {
-      m.stride = 0;
-      m.le = false;
-      streamOffset += static_cast<uint16_t>(current_component_size(attr, af.type) * count);
-    }
-  }
-  sc.vtxStride = static_cast<u8>(std::min<uint16_t>(streamOffset, 255u));
+  build_current_attr_configs(fmt,sc.attrs,sc.vtxStride);
   sc.tevSwapTable = g.tevSwapTable;
   sc.tevStageCount = std::min<u32>(g.numTevStages, aurora::gx::MaxTevStages);
   for (u32 i = 0; i < sc.tevStageCount; ++i) sc.tevStages[i] = g.tevStages[i];
@@ -183,6 +192,99 @@ aurora::gx::PipelineConfig build_current_pipeline_config(GXPrimitive primitive, 
   pc.alphaUpdate = g.alphaUpdate;
   return pc;
 }
+
+gfx::PipelineDesc translate_current_pipeline_direct() noexcept {
+  const auto& g=aurora::gx::g_gxState;
+  gfx::PipelineDesc o{};
+  o.primitive=gfx::Primitive::Triangles;
+  o.depthFunc=cmp(g.depthFunc);
+  o.cull=cull(g.cullMode);
+  o.blendMode=blend(g.blendMode);
+  o.srcFactor=blend_factor(g.blendFacSrc,false);
+  o.dstFactor=blend_factor(g.blendFacDst,true);
+  o.logicOp=logic(g.blendOp);
+  o.depthTest=g.depthCompare;
+  o.depthWrite=g.depthCompare&&g.depthUpdate;
+  o.colorWrite=g.colorUpdate;
+  o.alphaWrite=g.alphaUpdate;
+  o.reversedZ=aurora::gx::UseReversedZ;
+  o.dstAlpha=g.dstAlpha==UINT32_MAX?-1:static_cast<int16_t>(g.dstAlpha);
+  o.fogMode=fog_mode(g.fog.type);
+  o.fogOrthographic=(static_cast<unsigned>(g.fog.type)&0x08u)!=0;
+  o.fogRangeEnabled=(g.fogRange[0]&(1u<<10))!=0;
+
+  const unsigned texgenCount=std::min<unsigned>(g.numTexGens,aurora::gx::MaxTexCoord);
+  for(unsigned i=0;i<texgenCount&&i<gfx::MaxTextures;++i){
+    const auto&t=g.tcgs[i];
+    if(t.src==GX_MAX_TEXGENSRC)continue;
+    o.texgenCount=static_cast<uint8_t>(i+1);
+    auto&d=o.texgens[i];
+    d.type=texgen_type(t.type);
+    d.source=texgen_source(t.src);
+    d.matrix=tex_mtx(t.mtx);
+    d.postMatrix=post_mtx(t.postMtx);
+    d.embossSource=(t.type>=GX_TG_BUMP0&&t.type<=GX_TG_BUMP7)?static_cast<uint8_t>(t.type-GX_TG_BUMP0):0;
+    d.normalize=t.normalize;
+    d.matrixFromVertex=g.vtxDesc[static_cast<size_t>(GX_VA_TEX0MTXIDX+i)]!=GX_NONE;
+  }
+
+  for(unsigned i=0;i<o.colorChannels.size()&&i<g.colorChannelConfig.size();++i){
+    const auto&s=g.colorChannelConfig[i];
+    auto&d=o.colorChannels[i];
+    d.materialSource=color_source(s.matSrc);
+    d.ambientSource=color_source(s.ambSrc);
+    d.diffuse=diffuse(s.diffFn);
+    d.attenuation=attenuation(s.attnFn);
+    d.lightingEnabled=s.lightingEnabled;
+    d.lightMask=static_cast<uint8_t>(g.colorChannelState[i].lightMask.to_ulong());
+  }
+  for(unsigned i=0;i<o.tev.swapTable.size()&&i<g.tevSwapTable.size();++i){
+    const auto&s=g.tevSwapTable[i];
+    o.tev.swapTable[i]={tev_chan(s.red),tev_chan(s.green),tev_chan(s.blue),tev_chan(s.alpha)};
+  }
+
+  o.tev.indirectStageCount=static_cast<uint8_t>(std::min<unsigned>(g.numIndStages,gfx::MaxIndStages));
+  for(unsigned i=0;i<o.tev.indirectStageCount;++i){
+    const auto&s=g.indStages[i];
+    auto&d=o.tev.indirectStages[i];
+    d.texCoord=s.texCoordId>=GX_TEXCOORD0&&s.texCoordId<=GX_TEXCOORD7?static_cast<uint8_t>(s.texCoordId-GX_TEXCOORD0):0xff;
+    d.texture=s.texMapId>=GX_TEXMAP0&&s.texMapId<=GX_TEXMAP7?static_cast<uint8_t>(s.texMapId-GX_TEXMAP0):0xff;
+    d.scaleSShift=ind_scale(s.scaleS);
+    d.scaleTShift=ind_scale(s.scaleT);
+  }
+  o.tev.stageCount=static_cast<uint8_t>(std::min<unsigned>(g.numTevStages,gfx::MaxTevStages));
+  o.tev.texCoordCount=o.texgenCount;
+  o.tev.alphaCompare={cmp(g.alphaCompare.comp0),static_cast<uint8_t>(g.alphaCompare.ref0),
+                      static_cast<uint8_t>(g.alphaCompare.op),cmp(g.alphaCompare.comp1),
+                      static_cast<uint8_t>(g.alphaCompare.ref1)};
+  for(unsigned i=0;i<o.tev.stageCount;++i){
+    const auto&s=g.tevStages[i];
+    auto&d=o.tev.stages[i];
+    d.color={color_arg(s.colorPass.a),color_arg(s.colorPass.b),color_arg(s.colorPass.c),color_arg(s.colorPass.d)};
+    d.alpha={alpha_arg(s.alphaPass.a),alpha_arg(s.alphaPass.b),alpha_arg(s.alphaPass.c),alpha_arg(s.alphaPass.d)};
+    d.colorOp=tev_op(s.colorOp.op);d.alphaOp=tev_op(s.alphaOp.op);
+    d.colorBias=bias(s.colorOp.bias);d.alphaBias=bias(s.alphaOp.bias);
+    d.colorScale=scale(s.colorOp.scale);d.alphaScale=scale(s.alphaOp.scale);
+    d.colorOut=reg(s.colorOp.outReg);d.alphaOut=reg(s.alphaOp.outReg);
+    d.konstColor=kc(s.kcSel);d.konstAlpha=ka(s.kaSel);
+    d.texture=s.texMapId>=GX_TEXMAP0&&s.texMapId<=GX_TEXMAP7?static_cast<uint8_t>(s.texMapId-GX_TEXMAP0):0xff;
+    d.texCoord=s.texCoordId>=GX_TEXCOORD0&&s.texCoordId<=GX_TEXCOORD7?static_cast<uint8_t>(s.texCoordId-GX_TEXCOORD0):0xff;
+    d.rasterSource=raster(s.channelId);
+    d.rasSwap=static_cast<uint8_t>(s.tevSwapRas);d.texSwap=static_cast<uint8_t>(s.tevSwapTex);
+    d.colorClamp=s.colorOp.clamp;d.alphaClamp=s.alphaOp.clamp;
+    const bool alphaBump=s.channelId==GX_ALPHA_BUMP||s.channelId==GX_ALPHA_BUMPN;
+    d.indirectEnabled=static_cast<u32>(s.indTexStage)<o.tev.indirectStageCount&&
+      (s.indTexMtxId!=GX_ITM_OFF||s.indTexWrapS!=GX_ITW_OFF||s.indTexWrapT!=GX_ITW_OFF||
+       s.indTexAddPrev||s.indTexAlphaSel!=GX_ITBA_OFF||alphaBump);
+    d.indirectStage=static_cast<uint8_t>(s.indTexStage);
+    d.indirectFormat=ind_format(s.indTexFormat);d.indirectBias=ind_bias(s.indTexBiasSel);
+    d.indirectAlpha=ind_alpha(s.indTexAlphaSel);d.indirectMatrix=ind_mtx(s.indTexMtxId);
+    d.indirectWrapS=ind_wrap(s.indTexWrapS);d.indirectWrapT=ind_wrap(s.indTexWrapT);
+    d.indirectUseOrigLod=s.indTexUseOrigLOD;d.indirectAddPrev=s.indTexAddPrev;
+  }
+  o.layout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(o),gfx::pipeline_raster_color_mask(o));
+  return o;
+}
 }
 
 gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noexcept {
@@ -201,16 +303,12 @@ gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept {
 void translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt,
                                            gfx::PipelineDesc& pipeline,
                                            gfx::VertexDecodeLayout& layout) noexcept {
-  // Pipeline and vertex-layout translation consume the same attribute snapshot.
-  // Build it once instead of walking GX vertex/TEV state twice on every
-  // pipeline-state generation change. lineMode is irrelevant to layout decode.
-  const auto config=build_current_pipeline_config(static_cast<GXPrimitive>(primitive),
-                                                  static_cast<GXVtxFmt>(fmt));
-  pipeline=translate_pipeline(config);
-  const auto& g=aurora::gx::g_gxState;
-  for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)
-    pipeline.colorChannels[ch].lightMask=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
-  layout=translate_vertex_layout(config.shaderConfig);
+  // The Vita backend already consumes the decoded GX state directly. Avoid
+  // materializing the ~2.7 KB upstream ShaderConfig/PipelineConfig snapshot on
+  // every state generation change, while preserving the exact field mappings.
+  (void)primitive;
+  pipeline=translate_current_pipeline_direct();
+  layout=translate_current_vertex_layout_direct(static_cast<GXVtxFmt>(fmt));
 }
 
 Capabilities inspect_current(uint8_t primitive, uint8_t fmt) noexcept {
@@ -294,11 +392,12 @@ void copy_matrix(Matrix3x4& out, const aurora::Mat3x4<float>& in) noexcept {
 std::array<float,4> copy_vec4(const aurora::Vec4<float>& in) noexcept {
   return {in[0], in[1], in[2], in[3]};
 }
-}
 
-gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& c) noexcept {
+gfx::VertexDecodeLayout translate_vertex_layout_attrs(
+    const std::array<aurora::gx::AttrConfig,aurora::gx::MaxVtxAttr>& attrs,
+    uint8_t vertexStride) noexcept {
   gfx::VertexDecodeLayout out{};
-  out.streamStride = c.vtxStride;
+  out.streamStride = vertexStride;
   out.streamLittleEndian = false; // GX FIFO/display-list bytes are big-endian.
   auto add = [&](GXAttr attr, VertexSemantic semantic, const aurora::gx::AttrConfig& m,
                        uint8_t components, uint16_t streamExtra = 0, uint16_t valueExtra = 0) mutable {
@@ -318,21 +417,21 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
   };
 
   // Matrix indices are always byte-sized values in the GX vertex stream.
-  if (c.attrs[GX_VA_PNMTXIDX].attrType != GX_NONE) {
-    auto m = c.attrs[GX_VA_PNMTXIDX]; m.compType = GX_U8; m.cnt = 1; m.frac = 0;
+  if (attrs[GX_VA_PNMTXIDX].attrType != GX_NONE) {
+    auto m = attrs[GX_VA_PNMTXIDX]; m.compType = GX_U8; m.cnt = 1; m.frac = 0;
     add(GX_VA_PNMTXIDX, VertexSemantic::PnMatrixIndex, m, 1);
   }
   for (unsigned i = 0; i < MaxTextures; ++i) {
     const auto attr = static_cast<GXAttr>(GX_VA_TEX0MTXIDX + i);
-    if (c.attrs[attr].attrType == GX_NONE) continue;
-    auto m = c.attrs[attr]; m.compType = GX_U8; m.cnt = 1; m.frac = 0;
+    if (attrs[attr].attrType == GX_NONE) continue;
+    auto m = attrs[attr]; m.compType = GX_U8; m.cnt = 1; m.frac = 0;
     add(attr, tex_mtx_semantic(i), m, 1);
   }
 
-  add(GX_VA_POS, VertexSemantic::Position, c.attrs[GX_VA_POS],
-      std::min<uint8_t>(c.attrs[GX_VA_POS].cnt, 3));
+  add(GX_VA_POS, VertexSemantic::Position, attrs[GX_VA_POS],
+      std::min<uint8_t>(attrs[GX_VA_POS].cnt, 3));
 
-  const auto& n = c.attrs[GX_VA_NRM];
+  const auto& n = attrs[GX_VA_NRM];
   if (n.attrType != GX_NONE) {
     if (n.cnt == 9) {
       const uint16_t comp3 = static_cast<uint16_t>(3u * vertex_component_size(GX_VA_NRM, static_cast<GXCompType>(n.compType)));
@@ -347,14 +446,26 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
       add(GX_VA_NRM, VertexSemantic::Normal, n, std::min<uint8_t>(n.cnt, 3));
     }
   }
-  add(GX_VA_CLR0, VertexSemantic::Color0, c.attrs[GX_VA_CLR0], 4);
-  add(GX_VA_CLR1, VertexSemantic::Color1, c.attrs[GX_VA_CLR1], 4);
+  add(GX_VA_CLR0, VertexSemantic::Color0, attrs[GX_VA_CLR0], 4);
+  add(GX_VA_CLR1, VertexSemantic::Color1, attrs[GX_VA_CLR1], 4);
   for (unsigned i = 0; i < MaxTextures; ++i) {
     const auto attr = static_cast<GXAttr>(GX_VA_TEX0 + i);
-    add(attr, tex_semantic(i), c.attrs[attr], std::min<uint8_t>(c.attrs[attr].cnt, 2));
+    add(attr, tex_semantic(i), attrs[attr], std::min<uint8_t>(attrs[attr].cnt, 2));
   }
   gfx::compile_vertex_decode_layout(out);
   return out;
+}
+
+gfx::VertexDecodeLayout translate_current_vertex_layout_direct(GXVtxFmt fmt) noexcept {
+  std::array<aurora::gx::AttrConfig,aurora::gx::MaxVtxAttr> attrs{};
+  uint8_t vertexStride=0;
+  build_current_attr_configs(fmt,attrs,vertexStride);
+  return translate_vertex_layout_attrs(attrs,vertexStride);
+}
+}
+
+gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& c) noexcept {
+  return translate_vertex_layout_attrs(c.attrs,c.vtxStride);
 }
 
 void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms,

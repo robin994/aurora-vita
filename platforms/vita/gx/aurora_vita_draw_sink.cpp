@@ -432,25 +432,34 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if (!translatedCacheHit) {
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StatePipelineTranslate,
                                     gfx::TelemetryPhase::StateTranslate);
-    translate_current_pipeline_and_layout(primitive,fmt,translatedPipeline_,translatedLayout_);
-    translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
-    if(staticGeometry_){
-      translatedGpuPipeline_=translatedPipeline_;
-      translatedGpuPipeline_.fixedVertexOnGpu=true;
-      translatedGpuPipeline_.fixedVertexIndexedPn=gfx::vertex_layout_has_semantic(
-          translatedLayout_,gfx::VertexSemantic::PnMatrixIndex);
-      translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
+    {
+      gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineBuild);
+      translate_current_pipeline_and_layout(primitive,fmt,translatedPipeline_,translatedLayout_);
     }
-    translatedTextureMask_=gfx::pipeline_sampled_texture_mask(translatedPipeline_);
-    translatedUsesOrigLod_=false;
-    translatedHasIndirect_=translatedPipeline_.tev.indirectStageCount!=0;
-    translatedLit_=false;
-    for(unsigned i=0;i<translatedPipeline_.tev.stageCount&&i<translatedPipeline_.tev.stages.size();++i){
-      const auto&s=translatedPipeline_.tev.stages[i];
-      translatedUsesOrigLod_=translatedUsesOrigLod_||s.indirectUseOrigLod;
-      translatedHasIndirect_=translatedHasIndirect_||s.indirectEnabled;
+    {
+      gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineKey);
+      translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
     }
-    for(const auto&c:translatedPipeline_.colorChannels)translatedLit_=translatedLit_||c.lightingEnabled;
+    {
+      gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineDerived);
+      if(staticGeometry_){
+        translatedGpuPipeline_=translatedPipeline_;
+        translatedGpuPipeline_.fixedVertexOnGpu=true;
+        translatedGpuPipeline_.fixedVertexIndexedPn=gfx::vertex_layout_has_semantic(
+            translatedLayout_,gfx::VertexSemantic::PnMatrixIndex);
+        translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
+      }
+      translatedTextureMask_=gfx::pipeline_sampled_texture_mask(translatedPipeline_);
+      translatedUsesOrigLod_=false;
+      translatedHasIndirect_=translatedPipeline_.tev.indirectStageCount!=0;
+      translatedLit_=false;
+      for(unsigned i=0;i<translatedPipeline_.tev.stageCount&&i<translatedPipeline_.tev.stages.size();++i){
+        const auto&s=translatedPipeline_.tev.stages[i];
+        translatedUsesOrigLod_=translatedUsesOrigLod_||s.indirectUseOrigLod;
+        translatedHasIndirect_=translatedHasIndirect_||s.indirectEnabled;
+      }
+      for(const auto&c:translatedPipeline_.colorChannels)translatedLit_=translatedLit_||c.lightingEnabled;
+    }
     translatedStateGeneration_ = stateGeneration;
     translatedPrimitive_ = primitive;
     translatedFmt_ = fmt;
