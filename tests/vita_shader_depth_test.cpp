@@ -9,6 +9,9 @@ namespace {
 using aurora::vita::gfx::FogMode;
 using aurora::vita::gfx::PipelineDesc;
 using aurora::vita::gfx::build_tev_glsl;
+using aurora::vita::gfx::AlphaTestStaticResult;
+using aurora::vita::gfx::Compare;
+using aurora::vita::gfx::alpha_compare_static_result;
 
 TEST(VitaShaderDepth, ReversedZMatchesAuroraThenMapsToOpenGLClipRange) {
   PipelineDesc desc{};
@@ -171,6 +174,24 @@ TEST(VitaShaderInputs, AlphaBumpRasterDoesNotRequireVertexColor) {
   EXPECT_EQ(shader.vertex.find("attribute vec4 a_color0"), std::string::npos);
   EXPECT_EQ(shader.vertex.find("attribute vec4 a_color1"), std::string::npos);
   EXPECT_NE(shader.fragment.find("vec4 raw_ras=vec4(vec3(ind_alpha),ind_alpha)"), std::string::npos);
+}
+
+TEST(VitaShaderAlpha, StaticBooleanCombinationsAvoidUnnecessaryDiscard) {
+  PipelineDesc desc{};
+  desc.tev.alphaCompare = {Compare::Always, 7, 1, Compare::Less, 128}; // true OR dynamic
+  EXPECT_EQ(alpha_compare_static_result(desc.tev.alphaCompare), AlphaTestStaticResult::Pass);
+  auto shader = build_tev_glsl(desc);
+  EXPECT_EQ(shader.fragment.find("discard"), std::string::npos);
+
+  desc.tev.alphaCompare = {Compare::Never, 7, 0, Compare::Greater, 128}; // false AND dynamic
+  EXPECT_EQ(alpha_compare_static_result(desc.tev.alphaCompare), AlphaTestStaticResult::Fail);
+  shader = build_tev_glsl(desc);
+  EXPECT_NE(shader.fragment.find("discard;"), std::string::npos);
+
+  desc.tev.alphaCompare = {Compare::Less, 7, 0, Compare::Greater, 128};
+  EXPECT_EQ(alpha_compare_static_result(desc.tev.alphaCompare), AlphaTestStaticResult::Dynamic);
+  shader = build_tev_glsl(desc);
+  EXPECT_NE(shader.fragment.find("discard"), std::string::npos);
 }
 
 } // namespace

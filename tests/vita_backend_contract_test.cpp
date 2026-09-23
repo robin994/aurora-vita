@@ -1,5 +1,6 @@
 #include "gxm/gxm_shader_gen.hpp"
 #include "gfx/vita_pipeline_key.hpp"
+#include "gfx/vita_shader_gen.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_vertex_pipeline.hpp"
@@ -49,9 +50,13 @@ void no_undeclared_inputs(const gxm::ShaderSources& s) {
     if (name.compare(0, 5, "u_tex") == 0)
       REQUIRE(s.fragment.find("uniform sampler2D " + name + " : TEXUNIT") != std::string::npos);
     else {
-      const std::string type = name.compare(0, 5, "v_tex") == 0 ? "float3 " : "float4 ";
-      REQUIRE(s.fragment.find(type + name + " : ") != std::string::npos);
-      REQUIRE(s.vertex.find("out " + type + name + " : ") != std::string::npos);
+      if(name.compare(0,5,"v_tex")==0) {
+        REQUIRE(s.fragment.find("float3 " + name + " : ") != std::string::npos);
+        REQUIRE(s.vertex.find("out float3 " + name + " : ") != std::string::npos);
+      } else {
+        REQUIRE(s.fragment.find("half4 " + name + " : ") != std::string::npos);
+        REQUIRE(s.vertex.find("out float4 " + name + " : ") != std::string::npos);
+      }
     }
   }
   REQUIRE(s.vertex.find("gl_") == std::string::npos);
@@ -111,6 +116,42 @@ void shader_operations() {
     REQUIRE(source.fragment.find("WPOS") == std::string::npos);
     REQUIRE(source.fragment.find("window_position.x<u_clip_rect") == std::string::npos);
     REQUIRE(source.fragment.find("discard") == std::string::npos);
+    REQUIRE(!source.usesDiscard);
+  }
+  {
+    auto d=basic();
+    d.fragmentScissor=false;
+    d.colorWrite=false;d.alphaWrite=false;
+    auto source=gxm::build_tev_cg(d);
+    REQUIRE(source.ok());REQUIRE(!source.usesDiscard);
+    REQUIRE(!gxm::fragment_program_required(d,source));
+    d.fragmentScissor=true;
+    source=gxm::build_tev_cg(d);
+    REQUIRE(source.usesDiscard);REQUIRE(gxm::fragment_program_required(d,source));
+    d.fragmentScissor=false;
+    d.tev.alphaCompare={Compare::Less,127,0,Compare::Always,0};
+    source=gxm::build_tev_cg(d);
+    REQUIRE(source.usesDiscard);REQUIRE(gxm::fragment_program_required(d,source));
+  }
+  {
+    auto d=basic();
+    d.fragmentScissor=false;
+    d.tev.alphaCompare={Compare::Always,0,1,Compare::Less,127}; // true OR dynamic
+    REQUIRE(alpha_compare_static_result(d.tev.alphaCompare)==AlphaTestStaticResult::Pass);
+    const auto glsl=build_tev_glsl(d);
+    REQUIRE(glsl.fragment.find("discard")==std::string::npos);
+    d.tev.alphaCompare={Compare::Never,0,0,Compare::Greater,127}; // false AND dynamic
+    REQUIRE(alpha_compare_static_result(d.tev.alphaCompare)==AlphaTestStaticResult::Fail);
+    REQUIRE(build_tev_glsl(d).fragment.find("discard;")!=std::string::npos);
+  }
+  {
+    auto d = basic();
+    const auto source = gxm::build_tev_cg(d);
+    REQUIRE(source.ok());
+    REQUIRE(source.usesDiscard); // Exact partial scissor keeps a fragment kill.
+    REQUIRE(source.vertex.find("out float4 v_color0 : COLOR0") != std::string::npos);
+    REQUIRE(source.fragment.find("half4 v_color0 : COLOR0") != std::string::npos);
+    REQUIRE(source.fragment.find("float4 raw_ras=v_color0") != std::string::npos);
   }
   for (unsigned av = 0; av < 2; ++av) for (unsigned bv = 0; bv < 2; ++bv)
     for (unsigned op = 0; op < 4; ++op) {
@@ -124,6 +165,7 @@ void shader_operations() {
       REQUIRE(shader.fragment.find("if(!(false)) discard;") == std::string::npos);
       REQUIRE(shader.discardAll == !pass[op]);
       REQUIRE(shader.fragment.find("discard") == std::string::npos);
+      REQUIRE(!shader.usesDiscard);
     }
   for (unsigned op = 0; op < 4; ++op) {
     auto d = basic();
@@ -136,7 +178,10 @@ void shader_operations() {
       REQUIRE(shader.discardAll);
       REQUIRE(shader.fragment.find("discard") == std::string::npos);
     }
-    else REQUIRE(shader.fragment.find("if(!((floor(result.a*255.0+0.5)<91.0))) discard;") != std::string::npos);
+    else {
+      REQUIRE(shader.fragment.find("if(!((floor(result.a*255.0+0.5)<91.0))) discard;") != std::string::npos);
+      REQUIRE(shader.usesDiscard);
+    }
   }
   {
     auto d = basic();
@@ -391,6 +436,28 @@ void native_extended_contract() {
   REQUIRE(native.ok());REQUIRE(native.pixels.size()==160);
   REQUIRE(native.pixels[64]==33);REQUIRE(native.pixels[96]==77);REQUIRE(native.pixels[128]==155);
 
+  {
+    // UBC1 swizzles 4x4 compressed blocks, not individual texels. Give every
+    // GX CMPR sub-block a distinct endpoint byte and verify the Morton order.
+    std::array<uint8_t,160> cmpr{};
+    for(unsigned block=0;block<16;++block)cmpr[block*8u+1]=uint8_t(block+1u);
+    for(unsigned block=0;block<4;++block)cmpr[128u+block*8u+1]=uint8_t(101u+block);
+    TextureDesc compressed{};
+    compressed.width=compressed.height=16;
+    compressed.format=TextureFormat::CMPR;
+    compressed.data=cmpr.data();compressed.dataSize=cmpr.size();compressed.mipCount=2;
+    const auto ubc1=gxm::prepare_ubc1_texture(compressed);
+    REQUIRE(ubc1.ok());REQUIRE(ubc1.mipCount==2);REQUIRE(ubc1.pixels.size()==160);
+    const uint8_t expectedLevel0[]{1,3,2,4,9,11,10,12,5,7,6,8,13,15,14,16};
+    for(unsigned i=0;i<16;++i)REQUIRE(ubc1.pixels[i*8u]==expectedLevel0[i]);
+    const uint8_t expectedLevel1[]{101,103,102,104};
+    for(unsigned i=0;i<4;++i)REQUIRE(ubc1.pixels[128u+i*8u]==expectedLevel1[i]);
+    compressed.width=12;
+    REQUIRE(!gxm::prepare_ubc1_texture(compressed).ok());
+    compressed.width=16;compressed.generateMipmaps=true;
+    REQUIRE(!gxm::prepare_ubc1_texture(compressed).ok());
+  }
+
   const uint8_t rgba[]{255,0,0,255, 0,255,0,255, 0,0,255,128, 255,255,255,64};
   std::vector<uint8_t> copy;
   const Scissor all{0,0,2,2};
@@ -465,7 +532,8 @@ int main() {
     const auto normalKey=pipeline_key(p);p.nativeTextureWrapMask=1;
     REQUIRE(pipeline_key(p)!=normalKey);
     const auto shader=gxm::build_tev_cg(p); REQUIRE(shader.ok());
-    REQUIRE(shader.fragment.find("tex2D(u_tex0,gx_sample_uv(")!=std::string::npos);
+    REQUIRE(shader.fragment.find("tex2D(u_tex0,v_tex0.xy)")!=std::string::npos);
+    REQUIRE(shader.fragment.find("tex2D(u_tex0,gx_sample_uv(")==std::string::npos);
   }
   {
     DrawPacket a{}, b{};

@@ -258,6 +258,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
     prepared.indices.size()>4?prepared.indices[4]:0u,prepared.indices.size()>5?prepared.indices[5]:0u);
 }
 #endif
+
 }
 
 bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
@@ -319,14 +320,32 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const uint32_t rawCopyFormat = static_cast<uint32_t>(g.texCopyFmt);
   const gfx::EfbCopyFormat copyFormat = gfx::efb_copy_format_from_gx_raw(rawCopyFormat);
 #endif
+  uint32_t captureW=dstW,captureH=dstH;
+#if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
+  const bool promoteFullFrameHalfScale =
+      copyFormat==gfx::EfbCopyFormat::RGB565 &&
+      src.x==0 && src.y==0 &&
+      static_cast<uint32_t>(src.width)==renderer_->target_width() &&
+      static_cast<uint32_t>(src.height)==renderer_->target_height() &&
+      static_cast<uint32_t>(src.width)==dstW*2u &&
+      static_cast<uint32_t>(src.height)==dstH*2u;
+  if(promoteFullFrameHalfScale){
+    // Strikers uses a logical half-resolution EFB copy for the pre-match
+    // fullscreen effect. Keep the guest-visible 480x272 identity, but retain
+    // the Vita framebuffer's physical resolution so the fullscreen resample
+    // does not discard every second source pixel.
+    captureW=static_cast<uint32_t>(src.width);
+    captureH=static_cast<uint32_t>(src.height);
+  }
+#endif
 #if defined(__vita__)
   {
     static uint64_t copyLogCount=0;
     const uint64_t n=++copyLogCount;
     if(n<=8 || (n&(n-1))==0)
       std::fprintf(stderr,
-        "[aurora-vita] gx_copy_tex n=%llu src=%d,%d %dx%d dst=%ux%u fmt=0x%x mapped=%u clear=%u\n",
-        static_cast<unsigned long long>(n),src.x,src.y,src.width,src.height,dstW,dstH,
+        "[aurora-vita] gx_copy_tex n=%llu src=%d,%d %dx%d dst=%ux%u physical=%ux%u fmt=0x%x mapped=%u clear=%u\n",
+        static_cast<unsigned long long>(n),src.x,src.y,src.width,src.height,dstW,dstH,captureW,captureH,
         rawCopyFormat,static_cast<unsigned>(copyFormat),clear?1u:0u);
   }
 #endif
@@ -359,13 +378,16 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const auto sampleFormat=deferR4?gfx::EfbCopyFormat::R4:
       (deferA8?gfx::EfbCopyFormat::A8:gfx::EfbCopyFormat::Passthrough);
 #else
-  constexpr bool physicalFlipX=true,physicalFlipY=true;
+  // The source EFB and the sampled copy already use the same horizontal
+  // orientation on vitaGL. Mirroring here makes full-frame copy textures
+  // (notably Strikers' 960x544 -> 480x272 pre-match image) appear reversed.
+  constexpr bool physicalFlipX=false,physicalFlipY=true;
   constexpr bool logicalFlipX=false,logicalFlipY=false;
   constexpr bool forceOpaque=false;
   const auto physicalFormat=copyFormat;
   constexpr auto sampleFormat=gfx::EfbCopyFormat::Passthrough;
 #endif
-  const auto h = renderer_->capture_current(oldHandle, src, dstW, dstH, physicalFormat, physicalFlipX, physicalFlipY);
+  const auto h = renderer_->capture_current(oldHandle, src, captureW, captureH, physicalFormat, physicalFlipX, physicalFlipY);
   if (!h) {
     // capture_current may destroy an incompatible old target before allocation/copy; never retain
     // a potentially stale handle in the guest-destination map after failure.
@@ -467,6 +489,14 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
   const auto& pipeline = translatedPipeline_;
   const auto& layout = translatedLayout_;
+  if(!aurora::gx::g_gxState.zCompLocBeforeTex &&
+     gfx::alpha_compare_static_result(pipeline.tev.alphaCompare)==gfx::AlphaTestStaticResult::Fail) {
+    // GX alpha compare rejects every fragment, so the draw cannot affect color
+    // or late depth. ZCompLoc-before-texture is intentionally excluded because
+    // its early depth semantics can outlive a later alpha reject. Otherwise
+    // drop before vertex decode and before it reaches the TBDR.
+    return result;
+  }
 #if defined(__vita__)
   static bool memoryProfileLogged=false;
   if(!memoryProfileLogged&&telemetry_&&telemetry_->split_vertex_phases()&&vertexCount>=100) {
@@ -511,6 +541,24 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (translatedLit_) coverage_->observe(integration::FeatureClass::Lighting, translatedPipelineKey, "GX lighting");
   }
   const auto source = translate_source_primitive(primitive);
+  const auto drawViewport=translate_viewport();
+  const auto drawScissor=translate_scissor();
+  auto pipelineForDraw=pipeline;
+  auto gpuPipelineForDraw=translatedGpuPipeline_;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  // GXM region clipping is tile-granular, so partial GX scissors still need
+  // the exact fragment-side test.  For a full-target scissor that test can
+  // never reject a pixel.  Omitting its discard keeps the draw in the opaque
+  // HSR path instead of forcing SGX into a discard/punch-through pass.
+  const bool fullTargetScissor=
+      drawScissor.x<=0&&drawScissor.y<=0&&
+      int64_t(drawScissor.x)+drawScissor.width>=renderer_->target_width()&&
+      int64_t(drawScissor.y)+drawScissor.height>=renderer_->target_height();
+  if(fullTargetScissor) {
+    pipelineForDraw.fragmentScissor=false;
+    gpuPipelineForDraw.fragmentScissor=false;
+  }
+#endif
   translatedVertexState_.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(
       aurora::gx::g_gxState.currentPnMtx,translatedVertexState_.postexMatrices.size()-1));
   gfx::FixedVertexReject fixedReject=gfx::FixedVertexReject::UnsupportedFeatures;
@@ -553,12 +601,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     const bool debugGpu=telemetry_&&telemetry_->split_vertex_phases()&&debugGpuDraws++<4;
     if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe begin count=%u primitive=%u key=%llx\n",vertexCount,primitive,static_cast<unsigned long long>(translatedPipelineKey));
 #endif
-    const uint64_t gpuPipelineDescKey=gfx::pipeline_key(translatedGpuPipeline_);
+    const uint64_t gpuPipelineDescKey=gfx::pipeline_key(gpuPipelineForDraw);
     auto key=fixedPipelineKeys_.find(gpuPipelineDescKey);
     if(key!=fixedPipelineKeys_.end()&&renderer_->pipelines().find(key->second))fixedPipelineKey=key->second;
     else{
       gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::PipelineResolve);
-      fixedPipelineKey=renderer_->create_pipeline(translatedGpuPipeline_);
+      fixedPipelineKey=renderer_->create_pipeline(gpuPipelineForDraw);
       if(fixedPipelineKey)fixedPipelineKeys_[gpuPipelineDescKey]=fixedPipelineKey;
     }
 #if defined(__vita__)
@@ -767,6 +815,51 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
   resolvedTextureBindingsValid_=true;
   }
+#if defined(AURORA_VITA_RENDERER_GXM)
+  // Keep the shader-side direct-sample specialization available, but do not
+  // select it automatically yet. Hardware validation showed missing in-match
+  // HUD elements while this path was active. The exact GX sampling path is the
+  // correctness baseline until direct sampling can be constrained by stronger
+  // texcoord/sampler invariants.
+  pipelineForDraw.nativeTextureWrapMask=0;
+#endif
+#if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
+  // Diagnose Strikers' full-screen EFB consumer without changing sampler or
+  // shader semantics. The visible vertical seams are regularly spaced, so
+  // capture the per-draw screen/UV ranges and the exact guest sampler state.
+  if(!gpuGeometry&&!useStreamed&&!prepared.vertices.empty()){
+    static unsigned fullFrameEfbReports=0;
+    for(unsigned slot=0;slot<gfx::MaxTextures&&fullFrameEfbReports<48;++slot){
+      const auto& binding=bindings[slot];
+      if(binding.source!=gfx::TextureSource::Efb||!binding.texture)continue;
+      uint32_t physicalW=0,physicalH=0;
+      if(!renderer_->efb().dimensions(binding.texture,physicalW,physicalH))continue;
+      if(physicalW!=renderer_->target_width()||physicalH!=renderer_->target_height())continue;
+      const auto& loaded=aurora::gx::g_gxState.loadedTextures[slot];
+      const auto& scale=aurora::gx::g_gxState.texCoordScales[slot];
+      float minX=prepared.vertices[0].position[0],maxX=minX;
+      float minY=prepared.vertices[0].position[1],maxY=minY;
+      float minS=prepared.vertices[0].texcoord[slot][0],maxS=minS;
+      float minT=prepared.vertices[0].texcoord[slot][1],maxT=minT;
+      for(const auto& v:prepared.vertices){
+        minX=std::min(minX,v.position[0]);maxX=std::max(maxX,v.position[0]);
+        minY=std::min(minY,v.position[1]);maxY=std::max(maxY,v.position[1]);
+        minS=std::min(minS,v.texcoord[slot][0]);maxS=std::max(maxS,v.texcoord[slot][0]);
+        minT=std::min(minT,v.texcoord[slot][1]);maxT=std::max(maxT,v.texcoord[slot][1]);
+      }
+      ++fullFrameEfbReports;
+      std::fprintf(stderr,
+        "[aurora-vita] efb_sample n=%u pipe=%llx slot=%u verts=%u logical=%ux%u physical=%ux%u "
+        "wrap=%u,%u filter=%u,%u tcscale=%u,%u pos=[%.4f,%.4f]x[%.4f,%.4f] uv=[%.6f,%.6f]x[%.6f,%.6f]\n",
+        fullFrameEfbReports,static_cast<unsigned long long>(translatedPipelineKey),slot,
+        static_cast<unsigned>(prepared.vertices.size()),loaded.width(),loaded.height(),physicalW,physicalH,
+        static_cast<unsigned>(binding.sampler.wrapS),static_cast<unsigned>(binding.sampler.wrapT),
+        static_cast<unsigned>(binding.sampler.minFilter),static_cast<unsigned>(binding.sampler.magFilter),
+        static_cast<unsigned>(scale.scaleS)+1u,static_cast<unsigned>(scale.scaleT)+1u,
+        minX,maxX,minY,maxY,minS,maxS,minT,maxT);
+    }
+  }
+#endif
   if (result.fallbackTextureMask != 0) {
     uint32_t fallbackCount = 0;
     for (uint8_t bits = result.fallbackTextureMask; bits; bits >>= 1) fallbackCount += bits & 1u;
@@ -792,15 +885,19 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     const bool preparedClipSpace=useStreamed?streamed.positionIsClipSpace:prepared.positionIsClipSpace;
     if (queuedPipelineValid_ && translatedPipelineKey == queuedTranslatedPipelineKey_ &&
         preparedPrimitive == queuedPrimitive_ &&
-        preparedClipSpace == queuedPositionIsClipSpace_) {
+        preparedClipSpace == queuedPositionIsClipSpace_ &&
+        pipelineForDraw.fragmentScissor == queuedFragmentScissor_ &&
+        pipelineForDraw.nativeTextureWrapMask == queuedNativeTextureWrapMask_) {
     resolvedPipelineKey = queuedResolvedPipelineKey_;
     } else {
-      resolvedPipelineKey = gfx::resolve_draw_pipeline(*renderer_,preparedPrimitive,preparedClipSpace,pipeline,telemetry_);
+      resolvedPipelineKey = gfx::resolve_draw_pipeline(*renderer_,preparedPrimitive,preparedClipSpace,pipelineForDraw,telemetry_);
       if (resolvedPipelineKey) {
         queuedTranslatedPipelineKey_ = translatedPipelineKey;
         queuedResolvedPipelineKey_ = resolvedPipelineKey;
         queuedPrimitive_ = preparedPrimitive;
         queuedPositionIsClipSpace_ = preparedClipSpace;
+        queuedFragmentScissor_ = pipelineForDraw.fragmentScissor;
+        queuedNativeTextureWrapMask_ = pipelineForDraw.nativeTextureWrapMask;
         queuedPipelineValid_ = true;
       }
     }
@@ -812,15 +909,15 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     gfx::DrawPacket& packet=stream_.emplace_draw();
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
-    packet.textures=bindings;packet.uniforms=uniforms;packet.viewport=translate_viewport();packet.scissor=translate_scissor();
+    packet.textures=bindings;packet.uniforms=uniforms;packet.viewport=drawViewport;packet.scissor=drawScissor;
     packet.fixedVertexUniforms=&fixedVertexUniforms_.back();
     enqueued=true;
     queuedPipelineValid_=false;
   }else if(useStreamed) {
     enqueued=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
-                         translate_viewport(),translate_scissor(),bindings,&error);
-  }else enqueued=gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipeline, uniforms,
-                         translate_viewport(), translate_scissor(), bindings, &error, telemetry_,
+                         drawViewport,drawScissor,bindings,&error);
+  }else enqueued=gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipelineForDraw, uniforms,
+                         drawViewport, drawScissor, bindings, &error, telemetry_,
                          resolvedPipelineKey);
   if(!enqueued) {
     result.drawError = error;

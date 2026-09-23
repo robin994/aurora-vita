@@ -3,8 +3,11 @@
 # integration/syntax gate while Aurora's upstream GX target still owns Dawn.
 option(AURORA_VITA_DIRECT_STREAM_WRITE "Write frame streaming data directly into mapped Vita GL buffers" OFF)
 option(AURORA_VITA_RUNTIME_MIPMAP_GENERATION "Generate missing texture mip chains at runtime on Vita" OFF)
-option(AURORA_VITA_NATIVE_CMPR "Upload GameCube CMPR through vitaGL's native DXT1 path" ON)
+option(AURORA_VITA_NATIVE_CMPR "Keep GameCube CMPR compressed in a native UBC1 GXM backing store" ON)
 option(AURORA_VITA_NATIVE_GX_TEXTURES "Upload exact GX I/I+A/RGB565 formats through native vitaGL texture formats" ON)
+option(AURORA_VITA_NATIVE_GX_I "Allow native I4/I8 VitaGL uploads" ON)
+option(AURORA_VITA_NATIVE_GX_IA "Allow native IA4/IA8 VitaGL uploads" ON)
+option(AURORA_VITA_NATIVE_GX_RGB565 "Allow native RGB565 VitaGL uploads" ON)
 
 set(AURORA_VITA_BACKEND_SOURCES
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_gl_util.cpp
@@ -68,6 +71,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Vita" OR DEFINED VITASDK OR CMAKE_CXX_COMPILER M
     endif ()
     if (AURORA_VITA_NATIVE_GX_TEXTURES)
         target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_NATIVE_GX_TEXTURES=1)
+        target_compile_definitions(aurora_vita_backend PRIVATE
+            AURORA_VITA_NATIVE_GX_I=$<BOOL:${AURORA_VITA_NATIVE_GX_I}>
+            AURORA_VITA_NATIVE_GX_IA=$<BOOL:${AURORA_VITA_NATIVE_GX_IA}>
+            AURORA_VITA_NATIVE_GX_RGB565=$<BOOL:${AURORA_VITA_NATIVE_GX_RGB565}>)
     endif ()
     target_compile_options(aurora_vita_backend PRIVATE
         -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti

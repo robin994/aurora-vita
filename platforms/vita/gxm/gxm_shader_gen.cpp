@@ -351,8 +351,13 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     if(inputColor)
       vp.push_back("float4 a_color" + n + " : COLOR" + n);
     if(out.colorMask & (1u << i)) {
+      // GX raster colours are quantized to eight bits before interpolation.
+      // Keep the vertex output full precision: SGX vertex outputs are native
+      // float and declaring half there can add promotion instructions.  Ask
+      // UITR to deliver half4 only to the fragment stage, halving interpolant
+      // transfer bandwidth while TEV arithmetic remains full float.
       vp.push_back("out float4 v_color" + n + " : COLOR" + n);
-      fp.push_back("float4 v_color" + n + " : COLOR" + n);
+      fp.push_back("half4 v_color" + n + " : COLOR" + n);
     }
   }
   if(d.fixedVertexOnGpu) {
@@ -448,8 +453,10 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
         "float4 main(\n";
   signature(fs, fp);
   fs << ") : COLOR {\n";
-  if (d.fragmentScissor)
+  if (d.fragmentScissor) {
+    out.usesDiscard = true;
     fs << "if(window_position.x<u_clip_rect.x||window_position.y<u_clip_rect.y||window_position.x>=u_clip_rect.z||window_position.y>=u_clip_rect.w) discard;\n";
+  }
   fs << "float4 prev=u_tevreg[0],reg0=u_tevreg[1],reg1=u_tevreg[2],reg2=u_tevreg[3];\n"
         "float2 prev_ind_uv=float2(0.0);\n";
   std::array<bool, 4> cn{}, an{};
@@ -459,11 +466,18 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     indirect(fs,d,s);
     fs << "float4 raw_tex=";
     if (tev_stage_uses_texture(s) && s.texture < MaxTextures) {
-      const bool nativeWrap=(d.nativeTextureWrapMask&(1u<<s.texture))!=0;
+      const bool nativeDirect=(d.nativeTextureWrapMask&(1u<<s.texture))!=0;
       fs << "tex2D(u_tex" << unsigned(s.texture) << ",";
-      if(!nativeWrap) fs << "gx_wrap_uv(";
-      fs << "gx_sample_uv(tev_uv,u_tex_transform[" << unsigned(s.texture) << "])";
-      if(!nativeWrap) fs << ",u_tex_wrap[" << unsigned(s.texture) << "].xy)";
+      if(nativeDirect) {
+        // An unmodified TEXCOORD.xy lets PDS/TITR issue this lookup before the
+        // USSE thread starts. The USSE optimization guide calls this a
+        // non-dependent texture read and specifically recommends it for
+        // latency-sensitive fragment workloads.
+        fs << coordinate(d,s.texCoord);
+      } else {
+        fs << "gx_wrap_uv(gx_sample_uv(tev_uv,u_tex_transform[" << unsigned(s.texture)
+           << "]),u_tex_wrap[" << unsigned(s.texture) << "].xy)";
+      }
       fs << ");\nif(u_tex_copy_mode[" << unsigned(s.texture)
          << "]>1.5){float a=raw_tex.a;raw_tex=float4(a,a,a,a);}\n"
          << "else if(u_tex_copy_mode[" << unsigned(s.texture)
@@ -505,7 +519,10 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   // marking the pipeline as side-effect-free instead; the native renderer then
   // disables color/depth writes while compiling this shader without a kill.
   if (predicate == "false") out.discardAll = true;
-  else if (predicate != "true") fs << "if(!(" << predicate << ")) discard;\n";
+  else if (predicate != "true") {
+    out.usesDiscard = true;
+    fs << "if(!(" << predicate << ")) discard;\n";
+  }
   if (d.dstAlpha >= 0) fs << "result.a=" << d.dstAlpha << ".0/255.0;\n";
   if(d.fogMode!=FogMode::None) {
     fs<<"{float fd="<<(d.reversedZ?"window_position.z":"(1.0-window_position.z)")<<";\nfloat fb="

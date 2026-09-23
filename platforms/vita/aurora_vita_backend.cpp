@@ -88,12 +88,14 @@ void emit_periodic_diagnostics() noexcept {
   const auto frameLine = g_telemetry.format_frame();
   const auto memLine = g_drawSink->memory_budget().format();
   const auto& rs=g_renderer->stats();
-  char rendererLine[768];
+  char rendererLine[896];
   std::snprintf(rendererLine,sizeof(rendererLine),
       "[AURORA-VITA][RENDERER] frame=%llu display=%ux%u internal=%ux%u scenes=%u sampled=%u "
       "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu display_queue_us=%llu "
       "pipeline_mru_hits=%u "
-      "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u "
+      "vertex_uniform_reuse=%u fragment_uniform_reuse=%u "
+      "hsr_opaque=%u hsr_discard=%u hsr_translucent=%u hsr_pass_switch=%u "
+      "direct_tex_draws=%u direct_tex_slots=%u efb_copies=%u "
       "efb_downscale_attempts=%u efb_downscale_success=%u efb_downscale_fallback=%u "
       "depth_load_scenes=%u depth_written_scenes=%u depth_readonly_scenes=%u depth_clear_skipped_loads=%u "
       "scene_end_frame=%u scene_end_target=%u scene_end_transfer=%u scene_end_display=%u scene_end_finish=%u "
@@ -108,7 +110,10 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(rs.nativeDrawUs),
       static_cast<unsigned long long>(rs.nativeDisplayQueueAddUs),
       rs.pipelineMruHits,
-      rs.nativeVertexUniformReuses,rs.nativeFragmentUniformReuses,rs.nativeEfbCopies,
+      rs.nativeVertexUniformReuses,rs.nativeFragmentUniformReuses,
+      rs.nativeHsrOpaqueDraws,rs.nativeHsrDiscardDraws,rs.nativeHsrTranslucentDraws,
+      rs.nativeHsrPassSwitches,rs.nativeDirectTextureDraws,rs.nativeDirectTextureSlots,
+      rs.nativeEfbCopies,
       rs.nativeEfbDownscaleAttempts,rs.nativeEfbDownscaleSuccesses,rs.nativeEfbDownscaleFallbacks,
       rs.nativeDepthLoadScenes,rs.nativeDepthWrittenScenes,rs.nativeDepthReadOnlyScenes,
       rs.nativeDepthClearSkippedLoads,

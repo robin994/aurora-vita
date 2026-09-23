@@ -177,6 +177,30 @@ struct AlphaCompareDesc {
   Compare comp1 = Compare::Always;
   uint8_t ref1 = 0;
 };
+enum class AlphaTestStaticResult : uint8_t { Dynamic, Pass, Fail };
+inline constexpr AlphaTestStaticResult alpha_compare_static_result(const AlphaCompareDesc& a) noexcept {
+  const auto known=[](Compare c) constexpr -> int {
+    return c==Compare::Always?1:c==Compare::Never?0:-1;
+  };
+  const int lhs=known(a.comp0),rhs=known(a.comp1);
+  switch(a.op&3u) {
+  case 0: // AND
+    if(lhs==0||rhs==0)return AlphaTestStaticResult::Fail;
+    if(lhs==1&&rhs==1)return AlphaTestStaticResult::Pass;
+    break;
+  case 1: // OR
+    if(lhs==1||rhs==1)return AlphaTestStaticResult::Pass;
+    if(lhs==0&&rhs==0)return AlphaTestStaticResult::Fail;
+    break;
+  case 2: // XOR
+    if(lhs>=0&&rhs>=0)return lhs!=rhs?AlphaTestStaticResult::Pass:AlphaTestStaticResult::Fail;
+    break;
+  case 3: // XNOR
+    if(lhs>=0&&rhs>=0)return lhs==rhs?AlphaTestStaticResult::Pass:AlphaTestStaticResult::Fail;
+    break;
+  }
+  return AlphaTestStaticResult::Dynamic;
+}
 struct TevProgramDesc {
   std::array<TevStage, MaxTevStages> stages{};
   std::array<TevSwapDesc, 4> swapTable{};
@@ -210,7 +234,11 @@ struct PipelineDesc {
   bool fogRangeEnabled = false;
   bool positionIsClipSpace = false; // CPU-expanded GX lines/points already contain clip-space xyzw.
   bool fragmentScissor = true; // Native GXM may omit clipping only for the complete target.
-  uint8_t nativeTextureWrapMask = 0; // Swizzled samplers perform wrapping/filtering at seams.
+  // GXM-only specialization: these sampled slots can use the hardware sampler
+  // directly with an unmodified interpolated .xy coordinate. This both avoids
+  // shader-side wrap/transform arithmetic and lets vitaShaRK classify eligible
+  // tex2D calls as non-dependent texture reads.
+  uint8_t nativeTextureWrapMask = 0;
   bool fixedVertexOnGpu = false; // Raw object-space inputs; GX vertex processing runs in the shader.
   bool fixedVertexIndexedPn = false; // Per-vertex GX PNMTXIDX selects the 10-entry position/normal palette.
   VertexLayout layout{};
@@ -512,6 +540,12 @@ struct FrameStats {
   uint64_t nativeDisplayQueueAddUs = 0;
   uint32_t nativeVertexUniformReuses = 0;
   uint32_t nativeFragmentUniformReuses = 0;
+  uint32_t nativeHsrOpaqueDraws = 0;
+  uint32_t nativeHsrDiscardDraws = 0;
+  uint32_t nativeHsrTranslucentDraws = 0;
+  uint32_t nativeHsrPassSwitches = 0;
+  uint32_t nativeDirectTextureDraws = 0;
+  uint32_t nativeDirectTextureSlots = 0;
   uint32_t nativeSceneCount = 0;
   uint32_t nativeDepthLoadScenes = 0;
   uint32_t nativeDepthWrittenScenes = 0;

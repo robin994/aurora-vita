@@ -461,13 +461,17 @@ ShaderSources build_tev_glsl(const PipelineDesc& desc) noexcept {
   if(!alphaNormalized[static_cast<unsigned>(last.alphaOut)]) fs << " prev.a=tev_overflow1(prev.a);\n";
 
   const auto& ac = desc.tev.alphaCompare;
-  const std::string alpha255 = "floor(prev.a*255.0+0.5)";
-  const std::string r0 = std::to_string(static_cast<unsigned>(ac.ref0)) + ".0";
-  const std::string r1 = std::to_string(static_cast<unsigned>(ac.ref1)) + ".0";
-  const auto c0 = fmtcmp(ac.comp0, alpha255, r0), c1 = fmtcmp(ac.comp1, alpha255, r1);
-  std::string pass;
-  switch (ac.op & 3) { case 0: pass = "(" + c0 + " && " + c1 + ")"; break; case 1: pass = "(" + c0 + " || " + c1 + ")"; break; case 2: pass = "(" + c0 + " != " + c1 + ")"; break; default: pass = "(" + c0 + " == " + c1 + ")"; break; }
-  if (ac.comp0 != Compare::Always || ac.comp1 != Compare::Always) fs << " if(!" << pass << ") discard;\n";
+  const auto staticAlpha=alpha_compare_static_result(ac);
+  if(staticAlpha==AlphaTestStaticResult::Fail) fs << " discard;\n";
+  else if(staticAlpha==AlphaTestStaticResult::Dynamic) {
+    const std::string alpha255 = "floor(prev.a*255.0+0.5)";
+    const std::string r0 = std::to_string(static_cast<unsigned>(ac.ref0)) + ".0";
+    const std::string r1 = std::to_string(static_cast<unsigned>(ac.ref1)) + ".0";
+    const auto c0 = fmtcmp(ac.comp0, alpha255, r0), c1 = fmtcmp(ac.comp1, alpha255, r1);
+    std::string pass;
+    switch (ac.op & 3) { case 0: pass = "(" + c0 + " && " + c1 + ")"; break; case 1: pass = "(" + c0 + " || " + c1 + ")"; break; case 2: pass = "(" + c0 + " != " + c1 + ")"; break; default: pass = "(" + c0 + " == " + c1 + ")"; break; }
+    fs << " if(!" << pass << ") discard;\n";
+  }
   if (desc.dstAlpha >= 0) fs << " prev.a=" << (static_cast<float>(desc.dstAlpha) / 255.0f) << ";\n";
   if (desc.fogMode != FogMode::None) {
     // gl_FragCoord.z now matches WebGPU fragment position.z after the vertex

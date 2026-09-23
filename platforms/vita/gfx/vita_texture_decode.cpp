@@ -8,8 +8,10 @@ namespace aurora::vita::gfx {
 namespace {
 bool textureDiagnostics=false;
 unsigned textureReports=0;
+unsigned textureInspections=0;
 void report_texture_colors(const TextureDesc& d,const std::vector<uint8_t>& rgba) noexcept {
-  if(!textureDiagnostics||textureReports>=32)return;
+  if(!textureDiagnostics||textureReports>=32||textureInspections>=256)return;
+  ++textureInspections;
   size_t magenta=0,transparentMagenta=0,transparent=0;
   for(size_t i=0;i+3<rgba.size();i+=4){
     if(rgba[i+3]<128)++transparent;
@@ -171,7 +173,9 @@ void cmpr_block(const uint8_t* src, std::vector<uint8_t>& out, uint32_t w, uint3
 }
 }
 
-void set_texture_decode_diagnostics(bool enabled) noexcept {textureDiagnostics=enabled;textureReports=0;}
+void set_texture_decode_diagnostics(bool enabled) noexcept {
+  textureDiagnostics=enabled;textureReports=0;textureInspections=0;
+}
 
 size_t encoded_texture_size(uint32_t w,uint32_t h,TextureFormat f) noexcept {
   switch(f){

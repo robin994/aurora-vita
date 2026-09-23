@@ -423,6 +423,12 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeSceneEndFinish=s.nativeSceneEndFinish;
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
+  stats_.nativeHsrOpaqueDraws=s.nativeHsrOpaqueDraws;
+  stats_.nativeHsrDiscardDraws=s.nativeHsrDiscardDraws;
+  stats_.nativeHsrTranslucentDraws=s.nativeHsrTranslucentDraws;
+  stats_.nativeHsrPassSwitches=s.nativeHsrPassSwitches;
+  stats_.nativeDirectTextureDraws=s.nativeDirectTextureDraws;
+  stats_.nativeDirectTextureSlots=s.nativeDirectTextureSlots;
   stats_.nativeEfbCopies=s.nativeEfbCopies;stats_.nativeEfbEndSceneUs=s.nativeEfbEndSceneUs;
   stats_.nativeEfbDownscaleAttempts=s.nativeEfbDownscaleAttempts;
   stats_.nativeEfbDownscaleSuccesses=s.nativeEfbDownscaleSuccesses;
@@ -487,6 +493,12 @@ void Renderer::draw(const DrawPacket& packet) noexcept {
   stats_.pipelineMruHits=pipelines_.frame_mru_hits();
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
+  stats_.nativeHsrOpaqueDraws=s.nativeHsrOpaqueDraws;
+  stats_.nativeHsrDiscardDraws=s.nativeHsrDiscardDraws;
+  stats_.nativeHsrTranslucentDraws=s.nativeHsrTranslucentDraws;
+  stats_.nativeHsrPassSwitches=s.nativeHsrPassSwitches;
+  stats_.nativeDirectTextureDraws=s.nativeDirectTextureDraws;
+  stats_.nativeDirectTextureSlots=s.nativeDirectTextureSlots;
   stats_.nativeSceneCount=s.nativeSceneCount;
 }
 void Renderer::execute(const CommandStream& stream) noexcept {

@@ -203,21 +203,26 @@ struct NativeTextureUpload {
   std::vector<uint8_t> pixels;
   SceGxmTextureFormat format=SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR;
   uint32_t stride=0;
+  uint32_t mipCount=1;
   bool swizzled=false;
   bool valid=false;
 };
 NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
   NativeTextureUpload out;
-  if(desc.mipCount>1||desc.generateMipmaps)return out;
   if(desc.format==TextureFormat::CMPR) {
 #if AURORA_VITA_NATIVE_CMPR
-    if(!transcode_cmpr_to_dxt1(desc,out.pixels))return out;
+    auto compressed=prepare_ubc1_texture(desc);
+    if(!compressed.ok())return out;
+    out.pixels=std::move(compressed.pixels);
     out.format=SCE_GXM_TEXTURE_FORMAT_UBC1_ABGR;
     out.stride=desc.width;
+    out.mipCount=compressed.mipCount;
+    out.swizzled=true;
     out.valid=true;
 #endif
     return out;
   }
+  if(desc.mipCount>1||desc.generateMipmaps)return out;
 #if AURORA_VITA_NATIVE_GX_TEXTURES
   NativeTextureFormat native=NativeTextureFormat::None;
   std::vector<uint8_t> tight;
@@ -292,6 +297,8 @@ struct Renderer::Impl {
     uint8_t usedTextureCount = 0;
     uint8_t fixedTextureUniformMask = 0;
     uint8_t lightTop = 0;
+    bool fragmentEnabled = true;
+    bool usesDiscard = false;
     bool inFlight = false;
   };
   struct FragmentUniformState {
@@ -338,6 +345,7 @@ struct Renderer::Impl {
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
   bool frameActive = false, depthValid = false;
   bool sceneHasDepth = false, sceneDepthWritten = false;
+  uint8_t sceneHsrPass = 0xff;
   bool pipelineStateValid = false, viewportValid = false, scissorValid = false;
   bool vertexStreamValid = false;
   Viewport cachedViewport{};
@@ -385,7 +393,7 @@ struct Renderer::Impl {
       case SceneEndReason::DisplayCopy: ++stats.nativeSceneEndDisplayCopy; break;
       case SceneEndReason::Finish: ++stats.nativeSceneEndFinish; break;
     }
-    sceneHasDepth=false;sceneDepthWritten=false;
+    sceneHasDepth=false;sceneDepthWritten=false;sceneHsrPass=0xff;
     // Store/load policy is specified before BeginScene. The next frame may
     // continue an offscreen target; EndFrame alone does not retire its depth.
     if (boundTarget) textures.at(boundTarget)->depthValid = result>=0;
@@ -430,6 +438,7 @@ struct Renderer::Impl {
     textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
     inScene = true;
     sceneHasDepth=ds!=nullptr;sceneDepthWritten=false;
+    sceneHsrPass=0xff;
     return true;
   }
 
@@ -653,7 +662,17 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
     nativeDesc.dstAlpha = -1;
   }
   auto pipeline = std::make_unique<Impl::Pipeline>();
-  auto& p = *pipeline; p.desc = nativeDesc; p.textureMask = source.textureMask;
+  auto& p = *pipeline;
+  p.desc = nativeDesc;
+  // Correctness A/B: keep the fragment stage enabled for every GX pipeline.
+  // Hardware validation showed the in-match HUD can remain invisible until a
+  // sprite/effect forces another fragment-enabled pipeline. That points at the
+  // depth-only fragment-disable optimization leaking state across draws/passes.
+  // Keep the helper/telemetry in place, but do not disable fragment execution
+  // until this state transition is proven safe on hardware.
+  p.fragmentEnabled = true;
+  p.usesDiscard = source.usesDiscard;
+  p.textureMask = source.textureMask;
   for(unsigned i=0;i<MaxTextures;++i)if(p.textureMask&(1u<<i))p.usedTextureCount=static_cast<uint8_t>(i+1u);
   for(const auto& channel:nativeDesc.colorChannels)if(channel.lightingEnabled)
     for(unsigned i=0;i<MaxLights;++i)if(channel.lightMask&(1u<<i))p.lightTop=static_cast<uint8_t>(std::max<unsigned>(p.lightTop,i+1u));
@@ -764,14 +783,14 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
     auto owned=std::make_unique<Impl::Texture>();
     auto& texture=*owned;
     texture.width=desc.width;texture.height=desc.height;texture.stride=native.stride;
-    texture.mipCount=1;texture.swizzled=native.swizzled;
+    texture.mipCount=native.mipCount;texture.swizzled=native.swizzled;
     if(d.alloc(texture.memory,native.pixels.size(),MemoryKind::GpuResource)) {
       std::memcpy(texture.memory.data(),native.pixels.data(),native.pixels.size());
       const int nativeResult=native.swizzled?
           sceGxmTextureInitSwizzled(&texture.descriptor,texture.memory.data(),native.format,
-                                    desc.width,desc.height,1):
+                                    desc.width,desc.height,native.mipCount):
           sceGxmTextureInitLinear(&texture.descriptor,texture.memory.data(),native.format,
-                                  desc.width,desc.height,1);
+                                  desc.width,desc.height,native.mipCount);
       if(nativeResult>=0) {
         d.resourceBytes+=texture.memory.size();
         const Handle handle=d.nextHandle++;
@@ -876,8 +895,9 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
       s.wrapS>WrapMode::Mirror || s.wrapT>WrapMode::Mirror ||
       !std::isfinite(s.lodBias) || !std::isfinite(s.minLod) || !std::isfinite(s.maxLod) ||
       s.minLod<0 || s.maxLod<s.minLod) return d.fail("invalid native texture binding");
-  if(requireNativeWrap&&!it->second->swizzled)
-    return d.fail("native wrapping requires a swizzled texture");
+  if(requireNativeWrap&&!it->second->swizzled &&
+     (s.wrapS!=WrapMode::Clamp || s.wrapT!=WrapMode::Clamp))
+    return d.fail("native repeat/mirror wrapping requires a swizzled texture");
   if(!d.ensure_scene()) return false;
   if((d.textureBindingValidMask&(1u<<unit))&&d.boundTextureHandles[unit]==handle&&
      same_sampler(d.boundTextureSamplers[unit],s)) {
@@ -931,6 +951,9 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(!d.pipelineStateValid||d.boundPipelineKey!=key) {
     sceGxmSetVertexProgram(d.context,p.vertex);
     sceGxmSetFragmentProgram(d.context,p.fragment);
+    const auto fragmentMode=p.fragmentEnabled?SCE_GXM_FRAGMENT_PROGRAM_ENABLED:SCE_GXM_FRAGMENT_PROGRAM_DISABLED;
+    sceGxmSetFrontFragmentProgramEnable(d.context,fragmentMode);
+    sceGxmSetBackFragmentProgramEnable(d.context,fragmentMode);
     const auto compare=pipeline.depthTest?depth_func(pipeline.depthFunc):SCE_GXM_DEPTH_FUNC_ALWAYS;
     const auto write=pipeline.depthTest&&pipeline.depthWrite?SCE_GXM_DEPTH_WRITE_ENABLED:SCE_GXM_DEPTH_WRITE_DISABLED;
     sceGxmSetFrontDepthFunc(d.context,compare);sceGxmSetBackDepthFunc(d.context,compare);
@@ -978,6 +1001,10 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
       if(fixedVertex)next.fixed=*fixedVertex;
       next.valid=true;
     }
+  }
+  if(!p.fragmentEnabled) {
+    p.inFlight=true;
+    return true;
   }
   std::array<uint16_t,MaxTextures> textureFlags{};
   std::array<std::array<float,4>,MaxTextures> textureTransform{};
@@ -1096,6 +1123,24 @@ bool Renderer::draw(const DrawPacket& packet) {
       int64_t(packet.scissor.x)+packet.scissor.width<d.width()||
       int64_t(packet.scissor.y)+packet.scissor.height<d.height()))
     return d.fail("full-target pipeline requires a full-target scissor");
+  // Track the SGX ISP pass categories described by the HSR guide.  This does
+  // not reorder GX draws; it tells hardware validation whether state translation
+  // is causing avoidable Opaque/Discard/Translucent transitions.
+  uint8_t hsrPass=0;
+  if(p.usesDiscard) {
+    hsrPass=1;++d.stats.nativeHsrDiscardDraws;
+  } else if(p.fragmentEnabled &&
+            (pipeline.blendMode!=BlendMode::None||!pipeline.colorWrite||!pipeline.alphaWrite)) {
+    hsrPass=2;++d.stats.nativeHsrTranslucentDraws;
+  } else {
+    ++d.stats.nativeHsrOpaqueDraws;
+  }
+  if(d.sceneHsrPass!=0xff&&d.sceneHsrPass!=hsrPass)++d.stats.nativeHsrPassSwitches;
+  d.sceneHsrPass=hsrPass;
+  if(const uint8_t directMask=static_cast<uint8_t>(pipeline.nativeTextureWrapMask&p.textureMask)) {
+    ++d.stats.nativeDirectTextureDraws;
+    for(uint8_t bits=directMask;bits;bits>>=1)d.stats.nativeDirectTextureSlots+=bits&1u;
+  }
   uint64_t profileTick = d.profileDraws ? sceKernelGetProcessTimeWide() : 0;
   d.resolvedPipelineHint=pi->second.get();d.resolvedPipelineHintKey=packet.pipelineKey;
   const bool pipelineBound=bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures);

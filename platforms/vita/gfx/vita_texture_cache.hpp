@@ -27,10 +27,11 @@ private:
 #if defined(AURORA_VITA_RENDERER_GXM)
   gxm::Renderer* native_=nullptr;
 #endif
-  struct Entry{Handle handle=InvalidHandle;unsigned gl=0;uint64_t key=0,lastUse=0;size_t bytes=0;bool hasMipmaps=false,cacheable=true;uint64_t sourceId=0,paletteSourceId=0;size_t sourceBytes=0,paletteBytes=0;SamplerDesc sampler{};bool samplerValid=false;uint8_t explicitMipCount=0,appliedMipCount=0;};
+  struct Entry{Handle handle=InvalidHandle;unsigned gl=0;uint64_t key=0,lastUse=0;size_t bytes=0;uint32_t width=0,height=0;TextureFormat format=TextureFormat::RGBA8;uint8_t mipCount=0;bool hasMipmaps=false,cacheable=true;uint64_t sourceId=0,paletteSourceId=0;size_t sourceBytes=0,paletteBytes=0;SamplerDesc sampler{};bool samplerValid=false;uint8_t explicitMipCount=0,appliedMipCount=0;};
   // Evict LRU entries (never the entry keyed protectKey) until bytes_+requiredBytes fits
   // under budget_ with headroom. Runs BEFORE any vitaGL allocation.
   void pre_evict(size_t requiredBytes,uint64_t frame,uint64_t protectKey) noexcept;
+  void log_resident_breakdown() const noexcept;
   NodeHashMap<uint64_t,Entry> byKey_;
   // Node-map references are stable across rehash, so handles resolve
   // directly to Entry with one lookup instead of handle->key->entry. Keep only
@@ -38,6 +39,7 @@ private:
   // indexed by them would grow for the lifetime of a long-running game.
   FlatHashMap<Handle,Entry*> byHandle_{};
   Handle next_=1;size_t budget_=0,bytes_=0,highWaterBytes_=0;uint64_t evictions_=0;
+  bool pressureBreakdownLogged_=false;
   uint64_t allocFailTotal_=0,preEvictions_=0,preEvictedBytes_=0,lastRequestedBytes_=0,retrySuppressTotal_=0;
   // A failed GPU allocation used to be retried by every draw that referenced the
   // same GX texture. Under pressure this can turn one OOM into hundreds of decode /
@@ -45,9 +47,6 @@ private:
   // the texture can be retried normally after older cache entries become evictable.
   uint64_t failedFrame_=~uint64_t{0};
   FlatHashSet<uint64_t> failedKeys_{};
-  // Reused by the CMPR -> DXT1 fast path so streaming new textures does not
-  // allocate and free a temporary buffer for every cache miss.
-  std::vector<uint8_t> nativeCompressedScratch_{};
   // Reused tiled-GX -> linear native-format staging. I/I+A/RGB565 stay at
   // 1/2 bytes per texel instead of expanding to a 4-byte RGBA upload.
   std::vector<uint8_t> nativeLinearScratch_{};

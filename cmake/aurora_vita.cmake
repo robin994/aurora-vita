@@ -45,6 +45,7 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
     enable_testing()
     add_executable(aurora_vita_backend_contract_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_backend_contract_test.cpp
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_shader_gen.cpp
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp)
     target_link_libraries(aurora_vita_backend_contract_test PRIVATE aurora::vita_common)
     add_test(NAME vita_backend_contract COMMAND aurora_vita_backend_contract_test)

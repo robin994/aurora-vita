@@ -134,6 +134,8 @@ private:
   uint64_t queuedResolvedPipelineKey_ = 0;
   gfx::Primitive queuedPrimitive_ = gfx::Primitive::Triangles;
   bool queuedPositionIsClipSpace_ = false;
+  bool queuedFragmentScissor_ = true;
+  uint8_t queuedNativeTextureWrapMask_ = 0;
   bool queuedPipelineValid_ = false;
 #endif
   uint64_t submittedDraws_ = 0;

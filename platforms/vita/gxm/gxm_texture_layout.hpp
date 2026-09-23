@@ -15,4 +15,8 @@ LinearTextureData prepare_linear_texture(const gfx::TextureDesc& desc);
 // Power-of-two images in native Y/X Morton order, with each mip level swizzled
 // independently and packed consecutively for sceGxmTextureInitSwizzled.
 LinearTextureData prepare_swizzled_texture(const gfx::TextureDesc& desc);
+// GX CMPR converted to UBC1/DXT1. SceGxm's compressed textures use swizzled
+// block order, so Morton-order the 4x4 compressed blocks (8 bytes each), not
+// the individual texels. Explicit mip levels are packed consecutively.
+LinearTextureData prepare_ubc1_texture(const gfx::TextureDesc& desc);
 }
