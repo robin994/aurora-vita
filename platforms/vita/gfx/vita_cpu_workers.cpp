@@ -71,7 +71,10 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
     lane.done=sceKernelCreateSema("aurora_cpu_done",0,0,1,nullptr);
     if(lane.wake<0 || lane.done<0) {destroy_lane(lane);break;}
     char name[24];std::snprintf(name,sizeof(name),"aurora_cpu_%u",i+1);
-    const int affinity=i==0?SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2;
+    // Strikers reserves core 1 for audio when only one helper is requested.
+    // Keep the historical core 1/core 2 placement for two-worker callers.
+    const int affinity=requested==1?SCE_KERNEL_CPU_MASK_USER_2:
+        (i==0?SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2);
     lane.thread=sceKernelCreateThread(name,cpu_worker_main,0x10000110,
                                      WorkerStackBytes,0,affinity,nullptr);
     if(lane.thread<0 || sceKernelStartThread(lane.thread,sizeof(i),&i)<0) {
@@ -82,8 +85,9 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
 
   g_workers.initialized = true;
   std::fprintf(stderr,
-               "[aurora-vita] cpu workers=%u lanes=%u sync=paired_semaphores cores=1,2 parallel_min_items=%llu\n",
+               "[aurora-vita] cpu workers=%u lanes=%u sync=paired_semaphores helper_core=%s parallel_min_items=%llu\n",
                g_workers.workerCount, g_workers.workerCount + 1,
+               g_workers.workerCount==0?"none":(requested==1?"2":"1,2"),
                static_cast<unsigned long long>(g_workers.minItems));
   return true;
 }
