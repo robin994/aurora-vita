@@ -1404,9 +1404,84 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     return d.fail("unsupported native EFB GPU copy");
 
   const Handle originalTarget=d.boundTarget;
-  // The transfer downscale path is restrictive and rejects Strikers' common
-  // half-scale GXCopyTex copies. Route them through the existing GPU blit path,
-  // which preserves crop/flip/copy semantics without falling back to the CPU.
+  const void* sourceData=nullptr;
+  uint32_t sourceStride=0;
+  SceGxmSyncObject* sourceSync=nullptr;
+  if(originalTarget) {
+    const auto sourceIt=d.textures.find(originalTarget);
+    if(sourceIt==d.textures.end())return d.fail("missing native EFB source");
+    sourceData=sourceIt->second->memory.data();
+    sourceStride=sourceIt->second->stride;
+    sourceSync=sourceIt->second->sync;
+  } else {
+    sourceData=d.surfaces[d.back].memory.data();
+    sourceStride=d.stride;
+    sourceSync=d.surfaces[d.back].sync;
+  }
+
+  uint64_t fallbackEndSceneUs=0;
+  uint64_t fallbackTransferSubmitUs=0;
+  // Hardware accepts Strikers' aligned full-EFB 960x544 -> 480x272 downscale,
+  // while the smaller 182x180 -> 91x90 copies return INVALID_VALUE. Keep the
+  // transfer fast path deliberately narrow and leave all cropped/mirrored copies
+  // on the already validated render-to-texture path.
+  const bool fullEfbCopy=source.x==0 && source.y==0 &&
+      uint32_t(source.width)==sourceWidth && uint32_t(source.height)==sourceHeight;
+  const bool tryHalfScaleTransfer=halfScale && fullEfbCopy &&
+      format==EfbCopyFormat::Passthrough && !flipX && !flipY && handle!=originalTarget;
+  if(tryHalfScaleTransfer) {
+    ++d.stats.nativeEfbDownscaleAttempts;
+    const uint64_t transferStarted=sceKernelGetProcessTimeWide();
+    if(!d.end_scene(Impl::SceneEndReason::Transfer))return false;
+    const uint64_t afterSourceEnd=sceKernelGetProcessTimeWide();
+    void* destinationData=destination.memory.data();
+    int destinationStride=static_cast<int>(destination.stride*4u);
+    if(flipY) {
+      destinationData=static_cast<uint8_t*>(destination.memory.data())+
+          size_t(destination.height-1u)*destination.stride*4u;
+      destinationStride=-destinationStride;
+    }
+    const int transferResult=sceGxmTransferDownscale(SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
+        sourceData,static_cast<unsigned>(source.x),static_cast<unsigned>(source.y),
+        static_cast<unsigned>(source.width),static_cast<unsigned>(source.height),
+        static_cast<int>(sourceStride*4u),SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
+        destinationData,0,0,destinationStride,sourceSync,SCE_GXM_TRANSFER_FRAGMENT_SYNC,nullptr);
+    const uint64_t afterTransfer=sceKernelGetProcessTimeWide();
+    if(transferResult>=0) {
+      ++d.stats.nativeEfbDownscaleSuccesses;
+      ++d.stats.nativeEfbCopies;
+      d.stats.nativeEfbEndSceneUs+=afterSourceEnd-transferStarted;
+      d.stats.nativeEfbTransferSubmitUs+=afterTransfer-afterSourceEnd;
+      d.pendingFragmentTransferSync=true;
+      destination.inFlight=true;
+      d.boundTarget=originalTarget;
+      static uint64_t downscaleSuccessCount=0;
+      const uint64_t n=++downscaleSuccessCount;
+      if(n<=8 || (n&(n-1u))==0)
+        std::fprintf(stderr,
+            "[aurora-gxm] efb_downscale_transfer n=%llu flip_y=%u source_end_us=%llu submit_us=%llu total_us=%llu\n",
+            static_cast<unsigned long long>(n),flipY?1u:0u,
+            static_cast<unsigned long long>(afterSourceEnd-transferStarted),
+            static_cast<unsigned long long>(afterTransfer-afterSourceEnd),
+            static_cast<unsigned long long>(afterTransfer-transferStarted));
+      return true;
+    }
+    ++d.stats.nativeEfbDownscaleFallbacks;
+    fallbackEndSceneUs=afterSourceEnd-transferStarted;
+    fallbackTransferSubmitUs=afterTransfer-afterSourceEnd;
+    static uint64_t downscaleFallbackCount=0;
+    const uint64_t n=++downscaleFallbackCount;
+    if(n<=8 || (n&(n-1u))==0)
+      std::fprintf(stderr,
+          "[aurora-gxm] efb_downscale_fallback n=%llu result=0x%08x flip_y=%u source_end_us=%llu submit_us=%llu\n",
+          static_cast<unsigned long long>(n),static_cast<unsigned>(transferResult),flipY?1u:0u,
+          static_cast<unsigned long long>(fallbackEndSceneUs),
+          static_cast<unsigned long long>(fallbackTransferSubmitUs));
+  }
+
+  // Unsupported transfer variants stay on the render-to-texture fixup path.
+  // A failed experimental downscale reaches the same path without poisoning
+  // the renderer state, so hardware can report the exact GXM error safely.
   const bool gpuFixup=halfScale||flipX||flipY||format==EfbCopyFormat::RGB565;
   if(gpuFixup && handle==originalTarget)
     return d.fail("native EFB feedback copy requires cached CPU fallback");
@@ -1472,8 +1547,8 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     const uint64_t afterDraw=sceKernelGetProcessTimeWide();
     if(!bind_target(originalTarget))return false;
     ++d.stats.nativeEfbCopies;
-    d.stats.nativeEfbEndSceneUs+=afterSourceEnd-copyStarted;
-    d.stats.nativeEfbTransferSubmitUs+=afterDraw-afterSourceEnd;
+    d.stats.nativeEfbEndSceneUs+=fallbackEndSceneUs+(afterSourceEnd-copyStarted);
+    d.stats.nativeEfbTransferSubmitUs+=fallbackTransferSubmitUs+(afterDraw-afterSourceEnd);
     static uint64_t gpuCopyCount=0;
     const uint64_t n=++gpuCopyCount;
     if(n<=8||(n&(n-1u))==0)
@@ -1485,21 +1560,6 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
           static_cast<unsigned long long>(afterDraw-afterSourceEnd),
           static_cast<unsigned long long>(afterDraw-copyStarted));
     return true;
-  }
-
-  const void* sourceData=nullptr;
-  uint32_t sourceStride=0;
-  SceGxmSyncObject* sourceSync=nullptr;
-  if(originalTarget) {
-    const auto sourceIt=d.textures.find(originalTarget);
-    if(sourceIt==d.textures.end())return d.fail("missing native EFB source");
-    sourceData=sourceIt->second->memory.data();
-    sourceStride=sourceIt->second->stride;
-    sourceSync=sourceIt->second->sync;
-  } else {
-    sourceData=d.surfaces[d.back].memory.data();
-    sourceStride=d.stride;
-    sourceSync=d.surfaces[d.back].sync;
   }
 
   // Unmodified copies stay on the transfer engine. All mirror/opaque fixups use

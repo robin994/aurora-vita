@@ -424,6 +424,9 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
   stats_.nativeEfbCopies=s.nativeEfbCopies;stats_.nativeEfbEndSceneUs=s.nativeEfbEndSceneUs;
+  stats_.nativeEfbDownscaleAttempts=s.nativeEfbDownscaleAttempts;
+  stats_.nativeEfbDownscaleSuccesses=s.nativeEfbDownscaleSuccesses;
+  stats_.nativeEfbDownscaleFallbacks=s.nativeEfbDownscaleFallbacks;
   stats_.nativeEfbTransferSubmitUs=s.nativeEfbTransferSubmitUs;
   stats_.nativeEfbTransferWaitUs=s.nativeEfbTransferWaitUs;
   stats_.nativeEfbCpuFixupUs=s.nativeEfbCpuFixupUs;

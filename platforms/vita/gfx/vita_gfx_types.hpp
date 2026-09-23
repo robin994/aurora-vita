@@ -523,6 +523,9 @@ struct FrameStats {
   uint32_t nativeSceneEndDisplayCopy = 0;
   uint32_t nativeSceneEndFinish = 0;
   uint32_t nativeEfbCopies = 0;
+  uint32_t nativeEfbDownscaleAttempts = 0;
+  uint32_t nativeEfbDownscaleSuccesses = 0;
+  uint32_t nativeEfbDownscaleFallbacks = 0;
   uint64_t nativeEfbEndSceneUs = 0;
   uint64_t nativeEfbTransferSubmitUs = 0;
   uint64_t nativeEfbTransferWaitUs = 0;
