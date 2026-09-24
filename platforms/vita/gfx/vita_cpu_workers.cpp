@@ -72,7 +72,11 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
     lane.done=sceKernelCreateSema("aurora_cpu_done",0,0,1,nullptr);
     if(lane.wake<0 || lane.done<0) {destroy_lane(lane);break;}
     char name[24];std::snprintf(name,sizeof(name),"aurora_cpu_%u",i+1);
-    const int affinity=i==0?SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2;
+    // With one helper, leave core 1 available to the title's audio thread and
+    // put Aurora's parallel vertex/decode work on core 2. Two-worker callers
+    // retain the historical core 1/core 2 placement.
+    const int affinity=requested==1?SCE_KERNEL_CPU_MASK_USER_2:
+        (i==0?SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2);
     lane.thread=sceKernelCreateThread(name,cpu_worker_main,0x10000110,
                                      WorkerStackBytes,0,affinity,nullptr);
     if(lane.thread<0 || sceKernelStartThread(lane.thread,sizeof(i),&i)<0) {
