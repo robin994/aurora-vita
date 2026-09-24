@@ -3,6 +3,7 @@
 #include "../platforms/vita/gfx/vita_shader_gen.hpp"
 #include "../platforms/vita/gfx/vita_pipeline_key.hpp"
 #include "../platforms/vita/gfx/vita_program_binary_cache.hpp"
+#include "../platforms/vita/gxm/gxm_shader_gen.hpp"
 #include <gtest/gtest.h>
 #include <array>
 #include <cmath>
@@ -51,7 +52,7 @@ struct IndexedFixture {
   }
 };
 
-TEST(VitaFixedVertex, RejectsLightingAndPerVertexPaletteSelectors) {
+TEST(VitaFixedVertex, RejectsUnsupportedHostGpuFeaturesButIgnoresUnusedSelectors) {
   IndexedFixture f;
   EXPECT_TRUE(supports_fixed_vertex_gpu(f.pipeline,f.layout,f.state));
   f.pipeline.tev.stages[0].color.d=TevColorArg::RasColor;
@@ -62,6 +63,14 @@ TEST(VitaFixedVertex, RejectsLightingAndPerVertexPaletteSelectors) {
   f.layout.count=2;
   EXPECT_FALSE(supports_fixed_vertex_gpu(f.pipeline,f.layout,f.state));
   f.layout.attributes[1].semantic=VertexSemantic::TexMatrixIndex0;
+  // Merely carrying an unused selector is harmless. It becomes a GPU input only
+  // when a live texgen requests matrixFromVertex.
+  EXPECT_TRUE(supports_fixed_vertex_gpu(f.pipeline,f.layout,f.state));
+  f.pipeline.texgenCount=1;
+  f.pipeline.tev.stages[0].texture=0;
+  f.pipeline.tev.stages[0].texCoord=0;
+  f.pipeline.tev.stages[0].color.a=TevColorArg::TexColor;
+  f.pipeline.texgens[0].matrixFromVertex=true;
   EXPECT_FALSE(supports_fixed_vertex_gpu(f.pipeline,f.layout,f.state));
 }
 
@@ -201,6 +210,66 @@ TEST(VitaFixedVertex, PackedMatrixSelectorLayoutUsesOneFloat3Slot) {
   EXPECT_EQ(selector.location,14u);
   EXPECT_EQ(selector.components,3u);
   EXPECT_EQ(selector.scalar,VertexScalar::F32);
+}
+
+TEST(VitaFixedVertex, NativeCgConsumesPackedTextureMatrixSelectors) {
+  PipelineDesc p{};
+  p.fixedVertexOnGpu=true;
+  p.fixedVertexTexMtxMask=1;
+  p.texgenCount=1;
+  p.tev.stages[0].texture=0;
+  p.tev.stages[0].texCoord=0;
+  p.tev.stages[0].color.a=TevColorArg::TexColor;
+  p.texgens[0].source=TexGenSource::Position;
+  p.texgens[0].matrixFromVertex=true;
+  p.layout=fixed_vertex_gpu_layout(p);
+  const auto shader=aurora::vita::gxm::build_tev_cg(p);
+  ASSERT_TRUE(shader.ok())<<shader.error;
+  EXPECT_NE(shader.vertex.find("a_matrix_sel"),std::string::npos);
+  EXPECT_NE(shader.vertex.find("gx_tm0"),std::string::npos);
+  EXPECT_NE(shader.vertex.find("u_gx_texture_palette"),std::string::npos);
+}
+
+TEST(VitaFixedVertex, NativeCgKeepsBumpBasisAndSelectedLightOnGpu) {
+  PipelineDesc p{};
+  p.fixedVertexOnGpu=true;
+  p.texgenCount=2;
+  p.tev.stages[0].texture=0;
+  p.tev.stages[0].texCoord=1;
+  p.tev.stages[0].color.a=TevColorArg::TexColor;
+  p.texgens[0].source=TexGenSource::Tex0;
+  p.texgens[1].type=TexGenType::Bump3;
+  p.texgens[1].embossSource=0;
+  const auto inputs=fixed_vertex_gpu_inputs(p);
+  EXPECT_NE(inputs&vertex_semantic_bit(VertexSemantic::Binormal),0u);
+  EXPECT_NE(inputs&vertex_semantic_bit(VertexSemantic::Tangent),0u);
+  p.layout=fixed_vertex_gpu_layout(p);
+  const auto shader=aurora::vita::gxm::build_tev_cg(p);
+  ASSERT_TRUE(shader.ok())<<shader.error;
+  EXPECT_NE(shader.vertex.find("a_binormal"),std::string::npos);
+  EXPECT_NE(shader.vertex.find("a_tangent"),std::string::npos);
+  EXPECT_NE(shader.vertex.find("u_gx_light[15]"),std::string::npos);
+}
+
+TEST(VitaFixedVertex, NativeCgExpandsCachedPointsAndLinesInVertexShader) {
+  PipelineDesc point{};
+  point.fixedVertexOnGpu=true;
+  point.fixedPointSprite=true;
+  point.primitive=Primitive::Triangles;
+  point.layout=fixed_vertex_gpu_layout(point);
+  auto shader=aurora::vita::gxm::build_tev_cg(point);
+  ASSERT_TRUE(shader.ok())<<shader.error;
+  EXPECT_NE(shader.vertex.find("u_gx_primitive_expand"),std::string::npos);
+  EXPECT_NE(shader.vertex.find("gx_corner"),std::string::npos);
+
+  PipelineDesc line=point;
+  line.fixedPointSprite=false;
+  line.fixedLineSprite=true;
+  line.layout=fixed_vertex_gpu_layout(line);
+  shader=aurora::vita::gxm::build_tev_cg(line);
+  ASSERT_TRUE(shader.ok())<<shader.error;
+  EXPECT_NE(shader.vertex.find("a_line_other"),std::string::npos);
+  EXPECT_NE(shader.vertex.find("gx_other"),std::string::npos);
 }
 
 TEST(VitaFixedVertex, ChangedArrayDataCannotReuseAnInFlightImmutableBuffer) {

@@ -507,6 +507,14 @@ void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUni
     uniforms.channelMaterial[ch]=state.channelMaterial[ch];
     if(pipeline.colorChannels[ch].lightingEnabled)requiredLights|=pipeline.colorChannels[ch].lightMask;
   }
+  // Bump texgen consumes the selected GX light in the native vertex shader even
+  // when no raster colour channel is lit. Mirror the full CPU-state translation
+  // so bump-only materials do not see the default/zero light snapshot.
+  for(unsigned i=0;i<pipeline.texgenCount&&i<gfx::MaxTextures;++i)if(texgenMask&(1u<<i)) {
+    const auto type=pipeline.texgens[i].type;
+    if(gfx::texgen_type_is_bump(type))requiredLights|=1u<<std::min<unsigned>(
+      static_cast<unsigned>(type)-static_cast<unsigned>(gfx::TexGenType::Bump0),gfx::MaxLights-1);
+  }
   for(unsigned i=0;i<gfx::MaxLights;++i)if(requiredLights&(1u<<i)) {
     const auto& s=g.lights[i];auto& d=state.lights[i];
     d.position=copy_vec4(s.pos);d.direction=copy_vec4(s.dir);d.color=copy_vec4(s.color);

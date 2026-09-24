@@ -11,6 +11,19 @@ if (NOT TARGET gtest)
   FetchContent_MakeAvailable(googletest)
 endif ()
 
+# The Vita backend unit sources use the same compact hash-map wrapper as the
+# target renderer. Host-only test configurations do not include
+# aurora_vita_common.cmake, so provide its header-only dependency here too.
+if (NOT TARGET robin_hood)
+  FetchContent_Declare(robin_hood
+    GIT_REPOSITORY https://github.com/martinus/robin-hood-hashing.git
+    GIT_TAG 9145f963d80d6a02f0f96a47758050a89184a3ed
+    GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
+  )
+  FetchContent_MakeAvailable(robin_hood)
+endif ()
+
 if (AURORA_ENABLE_GX)
   # GX FIFO round-trip tests
   # Compile GX sources directly to avoid pulling in the full renderer/WebGPU runtime
@@ -50,6 +63,7 @@ if (AURORA_ENABLE_GX)
     ../platforms/vita/gfx/vita_cpu_workers.cpp
     ../platforms/vita/gfx/vita_vertex_decode.cpp
     ../platforms/vita/gfx/vita_vertex_pipeline.cpp
+    ../platforms/vita/gfx/vita_memory_revision.cpp
     ../platforms/vita/gfx/vita_buffer_pool.cpp
     ../platforms/vita/gfx/vita_draw_adapter.cpp
     ../platforms/vita/gfx/vita_renderer.cpp
@@ -57,6 +71,7 @@ if (AURORA_ENABLE_GX)
     ../platforms/vita/gfx/vita_streaming_arena.cpp
     ../platforms/vita/gfx/vita_efb.cpp
     ../platforms/vita/gfx/vita_telemetry.cpp
+    ../platforms/vita/gxm/gxm_shader_gen.cpp
     vita_shader_depth_test.cpp
     vita_texture_decode_test.cpp
     vita_vertex_pipeline_test.cpp
@@ -67,6 +82,7 @@ if (AURORA_ENABLE_GX)
     ../include
     ../lib
     ../lib/dolphin/gx
+    ../platforms/vita
   )
 
   target_compile_definitions(gx_fifo_tests PRIVATE AURORA TARGET_PC)
@@ -80,6 +96,7 @@ if (AURORA_ENABLE_GX)
     absl::btree
     dawn::dawncpp_headers
     TracyClient
+    robin_hood
     ${AURORA_SDL3_TARGET}
   )
 
