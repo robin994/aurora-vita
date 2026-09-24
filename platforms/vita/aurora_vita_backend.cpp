@@ -10,6 +10,9 @@
 #endif
 #include "gx/aurora_vita_draw_sink.hpp"
 #include "../../lib/vita/render_size.hpp"
+#if defined(AURORA_VITA_ASYNC_GX)
+#include "../../lib/gx/fifo.hpp"
+#endif
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -284,7 +287,8 @@ bool initialize(const BackendConfig& c) noexcept {
     return false;
   }
   if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices,
-                                   c.cpu_renderer_execution_lanes)) {
+                                   c.cpu_renderer_execution_lanes,
+                                   c.cpu_worker_primary_on_cpu1)) {
     AURORA_VITA_LOG_ERROR(
         "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
@@ -334,7 +338,8 @@ bool initialize(const BackendConfig& c) noexcept {
 InitFailure last_init_failure() noexcept{return g_initFailure;}
 const char* last_init_failure_detail() noexcept{return g_initFailureDetail;}
 
-bool begin_frame() noexcept {
+namespace {
+bool begin_frame_owned() noexcept {
   if(!g_initialized) return false;
   g_discardPresent=false;
   g_start=now_us();
@@ -349,6 +354,23 @@ bool begin_frame() noexcept {
   }
   g_drawSink->begin_frame(g_frame);
   return true;
+}
+
+#if defined(AURORA_VITA_ASYNC_GX)
+void begin_frame_worker_task(void* opaque) {
+  if (opaque) *static_cast<bool*>(opaque)=begin_frame_owned();
+}
+#endif
+} // namespace
+
+bool begin_frame() noexcept {
+#if defined(AURORA_VITA_ASYNC_GX)
+  bool result=false;
+  aurora::gx::fifo::run_sync(begin_frame_worker_task,&result);
+  return result;
+#else
+  return begin_frame_owned();
+#endif
 }
 
 void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept {
@@ -374,7 +396,8 @@ void set_presentation_aspect(float aspect) noexcept {
   if(g_renderer)g_renderer->set_presentation_aspect(aspect);
 }
 
-void end_frame() noexcept {
+namespace {
+void end_frame_owned() noexcept {
   if(!g_initialized) return;
   g_drawSink->flush();
   g_renderer->end_frame();
@@ -398,8 +421,24 @@ void end_frame() noexcept {
   emit_periodic_diagnostics();
 }
 
+#if defined(AURORA_VITA_ASYNC_GX)
+void end_frame_worker_task(void*) { end_frame_owned(); }
+#endif
+} // namespace
+
+void end_frame() noexcept {
+#if defined(AURORA_VITA_ASYNC_GX)
+  aurora::gx::fifo::run_sync(end_frame_worker_task,nullptr);
+#else
+  end_frame_owned();
+#endif
+}
+
 void shutdown() noexcept {
   if(!g_initialized) return;
+#if defined(AURORA_VITA_ASYNC_GX)
+  aurora::gx::fifo::shutdown_worker();
+#endif
   if (g_coverageEnabled && g_config.coverage_log_path) g_coverage.write_report(g_config.coverage_log_path);
   if (g_traceEnabled && g_config.trace_log_path && g_trace) g_trace->write_report(g_config.trace_log_path, 2048);
   if(g_drawSink){g_drawSink->shutdown();g_drawSink.reset();}
@@ -411,6 +450,12 @@ void shutdown() noexcept {
   g_coverageEnabled=false;
   g_traceEnabled=false;
   g_initialized=false;
+}
+
+void wait_for_render_idle() noexcept {
+#if defined(AURORA_VITA_ASYNC_GX)
+  aurora::gx::fifo::wait_idle();
+#endif
 }
 
 uint64_t frame_index() noexcept{return g_frame;}

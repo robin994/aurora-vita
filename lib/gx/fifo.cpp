@@ -30,15 +30,12 @@ bool sInDisplayList = false;
 uint8_t* sDlBuffer = nullptr;
 uint32_t sDlSize = 0;
 uint32_t sDlWritePos = 0;
-uint32_t sStableSourceOffset = 0;
-uint32_t sStableSourceBytes = 0;
-const uint8_t* sStableSource = nullptr;
+std::vector<StableSourceSpan> sStableSources;
 #if defined(MKW_TARGET_VITA)
 const uint8_t* sActiveProcessData = nullptr;
 uint32_t sActiveProcessSize = 0;
-uint32_t sActiveStableSourceOffset = 0;
-uint32_t sActiveStableSourceBytes = 0;
-const uint8_t* sActiveStableSource = nullptr;
+const StableSourceSpan* sActiveStableSources = nullptr;
+size_t sActiveStableSourceCount = 0;
 #endif
 } // namespace detail
 
@@ -49,16 +46,18 @@ namespace {
 // outstanding for a large fraction of a frame.
 constexpr uint32_t VitaQueueDepth = 4;
 constexpr size_t VitaWorkerStackBytes = 1024u * 1024u;
+// Amortize semaphore traffic, FIFO copies and vector bookkeeping across many
+// GameCube draws. True readback/render-target hazards use drain_sync/run_sync
+// and therefore bypass this soft threshold.
+constexpr uint32_t VitaAsyncBatchBytes = 128u * 1024u;
 
 enum class VitaJobType : uint8_t { Fifo, Callback, Stop };
 
 struct VitaJob {
   VitaJobType type = VitaJobType::Fifo;
   std::vector<uint8_t> bytes;
+  std::vector<StableSourceSpan> stableSources;
   bool bigEndian = true;
-  uint32_t stableSourceOffset = 0;
-  uint32_t stableSourceBytes = 0;
-  const uint8_t* stableSource = nullptr;
   VitaWorkerTask task = nullptr;
   void* context = nullptr;
   uint64_t serial = 0;
@@ -119,22 +118,20 @@ int vita_worker_main(SceSize, void*) {
     if (job.type == VitaJobType::Fifo) {
       detail::sActiveProcessData = job.bytes.data();
       detail::sActiveProcessSize = static_cast<uint32_t>(job.bytes.size());
-      detail::sActiveStableSourceOffset = job.stableSourceOffset;
-      detail::sActiveStableSourceBytes = job.stableSourceBytes;
-      detail::sActiveStableSource = job.stableSource;
+      detail::sActiveStableSources = job.stableSources.data();
+      detail::sActiveStableSourceCount = job.stableSources.size();
       if (!job.bytes.empty()) process(job.bytes.data(), static_cast<uint32_t>(job.bytes.size()), job.bigEndian);
       detail::sActiveProcessData = nullptr;
       detail::sActiveProcessSize = 0;
-      detail::sActiveStableSourceOffset = detail::sActiveStableSourceBytes = 0;
-      detail::sActiveStableSource = nullptr;
+      detail::sActiveStableSources = nullptr;
+      detail::sActiveStableSourceCount = 0;
     } else if (job.type == VitaJobType::Callback && job.task != nullptr) {
       job.task(job.context);
     }
 
     job.task = nullptr;
     job.context = nullptr;
-    job.stableSource = nullptr;
-    job.stableSourceOffset = job.stableSourceBytes = 0;
+    job.stableSources.clear();
     signal_completion(serial);
     sceKernelSignalSema(sVitaWorker.space, 1);
     ++sVitaWorker.consumer;
@@ -144,8 +141,8 @@ int vita_worker_main(SceSize, void*) {
 
 uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
                      const uint8_t* bytes, uint32_t byteCount,
-                     uint32_t stableOffset, uint32_t stableBytes,
-                     const uint8_t* stableSource, bool bigEndian = true) {
+                     const StableSourceSpan* stableSources, size_t stableSourceCount,
+                     bool bigEndian = true) {
   if (!sVitaWorker.running.load(std::memory_order_acquire)) return 0;
   while (sceKernelWaitSema(sVitaWorker.space, 1, nullptr) < 0) sceKernelDelayThread(100);
 
@@ -154,11 +151,12 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
   job.bigEndian = bigEndian;
   job.task = task;
   job.context = context;
-  job.stableSourceOffset = stableOffset;
-  job.stableSourceBytes = stableBytes;
-  job.stableSource = stableSource;
   if (bytes != nullptr && byteCount != 0) job.bytes.assign(bytes, bytes + byteCount);
   else job.bytes.clear();
+  if (stableSources != nullptr && stableSourceCount != 0)
+    job.stableSources.assign(stableSources, stableSources + stableSourceCount);
+  else
+    job.stableSources.clear();
   job.serial = sVitaWorker.submitted.fetch_add(1, std::memory_order_acq_rel) + 1;
   const uint64_t serial = job.serial;
   std::atomic_thread_fence(std::memory_order_release);
@@ -178,11 +176,10 @@ uint64_t enqueue_current_fifo() {
   if (detail::sBufferSize == 0) return sVitaWorker.submitted.load(std::memory_order_acquire);
   const uint64_t serial = enqueue_job(
       VitaJobType::Fifo, nullptr, nullptr, detail::sBufferData, detail::sBufferSize,
-      detail::sStableSourceOffset, detail::sStableSourceBytes, detail::sStableSource, true);
+      detail::sStableSources.data(), detail::sStableSources.size(), true);
   if (serial != 0) {
     detail::sBufferSize = 0;
-    detail::sStableSourceOffset = detail::sStableSourceBytes = 0;
-    detail::sStableSource = nullptr;
+    detail::sStableSources.clear();
   }
   return serial;
 }
@@ -247,7 +244,7 @@ void run_sync(VitaWorkerTask task, void* context) {
     return;
   }
   enqueue_current_fifo();
-  wait_serial(enqueue_job(VitaJobType::Callback, task, context, nullptr, 0, 0, 0, nullptr));
+  wait_serial(enqueue_job(VitaJobType::Callback, task, context, nullptr, 0, nullptr, 0));
 }
 
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian) {
@@ -262,13 +259,13 @@ void process_sync(const uint8_t* data, uint32_t size, bool bigEndian) {
     return;
   }
   enqueue_current_fifo();
-  wait_serial(enqueue_job(VitaJobType::Fifo, nullptr, nullptr, data, size, 0, 0, nullptr, bigEndian));
+  wait_serial(enqueue_job(VitaJobType::Fifo, nullptr, nullptr, data, size, nullptr, 0, bigEndian));
 }
 
 void shutdown_worker() {
   if (!worker_running()) return;
   drain_sync();
-  const uint64_t serial = enqueue_job(VitaJobType::Stop, nullptr, nullptr, nullptr, 0, 0, 0, nullptr);
+  const uint64_t serial = enqueue_job(VitaJobType::Stop, nullptr, nullptr, nullptr, 0, nullptr, 0);
   wait_serial(serial);
   sceKernelWaitThreadEnd(sVitaWorker.thread, nullptr, nullptr);
   sVitaWorker.running.store(false, std::memory_order_release);
@@ -290,9 +287,13 @@ void init() {
   detail::sDlBuffer = nullptr;
   detail::sDlSize = 0;
   detail::sDlWritePos = 0;
-  detail::sStableSourceOffset = 0;
-  detail::sStableSourceBytes = 0;
-  detail::sStableSource = nullptr;
+  detail::sStableSources.clear();
+  detail::sStableSources.reserve(64);
+}
+
+void note_stable_source(uint32_t offset,const uint8_t* source,uint32_t length) {
+  if(source == nullptr || length == 0) return;
+  detail::sStableSources.push_back(StableSourceSpan{offset,length,source});
 }
 
 void write_data_grow(const void* data, uint32_t length) {
@@ -343,6 +344,10 @@ void drain() {
   if (detail::sBufferSize == 0) return;
 #if defined(MKW_TARGET_VITA)
   if (worker_running()) {
+    // Ordinary draw boundaries are not hazards. Keep appending until the batch
+    // is large enough to amortize one queue submission. drain_sync/run_sync
+    // always seal immediately when ordering or readback requires it.
+    if (detail::sBufferSize < VitaAsyncBatchBytes) return;
     enqueue_current_fifo();
     return;
   }
@@ -356,23 +361,31 @@ uint32_t get_buffer_size() { return detail::sBufferSize; }
 const uint8_t* stable_source_for(const uint8_t* data,size_t bytes) {
 #if defined(MKW_TARGET_VITA)
   if(detail::sActiveProcessData){
-    if(!data||!detail::sActiveStableSource||!detail::sActiveStableSourceBytes)return nullptr;
-    const auto* begin=detail::sActiveProcessData+detail::sActiveStableSourceOffset;
-    const auto* end=begin+detail::sActiveStableSourceBytes;
-    if(data<begin||data>end||bytes>static_cast<size_t>(end-data))return nullptr;
-    return detail::sActiveStableSource+(data-begin);
+    if(!data||!detail::sActiveStableSources||detail::sActiveStableSourceCount==0)return nullptr;
+    const size_t dataOffset=static_cast<size_t>(data-detail::sActiveProcessData);
+    for(size_t i=0;i<detail::sActiveStableSourceCount;++i){
+      const auto& span=detail::sActiveStableSources[i];
+      if(dataOffset<span.offset)continue;
+      const size_t within=dataOffset-span.offset;
+      if(within<=span.bytes && bytes<=static_cast<size_t>(span.bytes)-within)
+        return span.source+within;
+    }
+    return nullptr;
   }
 #endif
-  if(!data||!detail::sStableSource||!detail::sStableSourceBytes)return nullptr;
-  const auto* begin=detail::sBufferData+detail::sStableSourceOffset;
-  const auto* end=begin+detail::sStableSourceBytes;
-  if(data<begin||data>end||bytes>static_cast<size_t>(end-data))return nullptr;
-  return detail::sStableSource+(data-begin);
+  if(!data||detail::sStableSources.empty())return nullptr;
+  const size_t dataOffset=static_cast<size_t>(data-detail::sBufferData);
+  for(const auto& span:detail::sStableSources){
+    if(dataOffset<span.offset)continue;
+    const size_t within=dataOffset-span.offset;
+    if(within<=span.bytes && bytes<=static_cast<size_t>(span.bytes)-within)
+      return span.source+within;
+  }
+  return nullptr;
 }
 void clear_buffer() {
   detail::sBufferSize = 0;
-  detail::sStableSourceOffset = detail::sStableSourceBytes = 0;
-  detail::sStableSource = nullptr;
+  detail::sStableSources.clear();
 }
 
 } // namespace aurora::gx::fifo

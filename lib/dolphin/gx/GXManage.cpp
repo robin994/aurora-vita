@@ -270,6 +270,10 @@ GXFifoObj* GXInit(void* base, u32 size) {
   // GXPokeDstAlpha(GX_DISABLE, 0);
   // GXPokeZMode(GX_TRUE, GX_ALWAYS, GX_TRUE);
 
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_ASYNC_GX)
+  (void)aurora::gx::fifo::start_worker();
+#endif
+
   return &sFifoObj;
 }
 

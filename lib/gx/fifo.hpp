@@ -3,8 +3,15 @@
 #include "../internal.hpp"
 
 #include <cstring>
+#include <cstddef>
 
 namespace aurora::gx::fifo {
+
+struct StableSourceSpan {
+  uint32_t offset = 0;
+  uint32_t bytes = 0;
+  const uint8_t* source = nullptr;
+};
 
 namespace detail {
 extern uint8_t* sBufferData;
@@ -14,9 +21,6 @@ extern bool sInDisplayList;
 extern uint8_t* sDlBuffer;
 extern uint32_t sDlSize;
 extern uint32_t sDlWritePos;
-extern uint32_t sStableSourceOffset;
-extern uint32_t sStableSourceBytes;
-extern const uint8_t* sStableSource;
 } // namespace detail
 
 void init();
@@ -40,6 +44,7 @@ void process_sync(const uint8_t* data, uint32_t size, bool bigEndian);
 
 // Out-of-line slow path: grows internal buffer then appends data
 void write_data_grow(const void* data, uint32_t length);
+void note_stable_source(uint32_t offset, const uint8_t* source, uint32_t length);
 
 inline void write_data(const void* data, const uint32_t length) {
   if (!detail::sInDisplayList)
@@ -63,9 +68,7 @@ inline void write_data(const void* data, const uint32_t length) {
 // even though the bytes themselves are copied into the fast FIFO buffer.
 inline void write_stable_data(const void* data,const uint32_t length) {
   if(detail::sInDisplayList) { write_data(data,length); return; }
-  detail::sStableSourceOffset=detail::sBufferSize;
-  detail::sStableSourceBytes=length;
-  detail::sStableSource=static_cast<const uint8_t*>(data);
+  note_stable_source(detail::sBufferSize,static_cast<const uint8_t*>(data),length);
   write_data(data,length);
 }
 

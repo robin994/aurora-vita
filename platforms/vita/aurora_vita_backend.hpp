@@ -84,6 +84,9 @@ struct BackendConfig {
   // Zero uses every configured lane. Ports with real-time work on CPU1 can
   // create a low-priority second helper but cap renderer work to CPU0+CPU2.
   uint32_t cpu_renderer_execution_lanes=0;
+  // Async-GX ports can reserve CPU2 for the GX/GXM owner and place the lone
+  // low-priority game helper on CPU1 instead.
+  bool cpu_worker_primary_on_cpu1=false;
   // Minimum useful work per CPU lane. Smaller draws stay on the render thread;
   // larger draws progressively use one or two workers as their size warrants.
   uint32_t cpu_parallel_min_vertices=512;
@@ -149,6 +152,7 @@ bool initialize(const BackendConfig& config={}) noexcept;
 InitFailure last_init_failure() noexcept;
 const char* last_init_failure_detail() noexcept;
 bool begin_frame() noexcept;void end_frame() noexcept;void shutdown() noexcept;
+void wait_for_render_idle() noexcept;
 void set_presentation_aspect(float aspect) noexcept;
 // GameCube glDiscardFrame means that the completed EFB must not become the
 // visible XFB.  The Vita host loop owns vglSwapBuffers(), so the GX layer uses

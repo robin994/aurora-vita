@@ -61,7 +61,8 @@ void destroy_lane(CpuWorkerState::Lane &lane) noexcept {
 }
 } // namespace
 
-bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t defaultExecutionLanes) noexcept {
+bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t defaultExecutionLanes,
+                            bool primaryWorkerOnCpu1) noexcept {
   if (g_workers.initialized) shutdown_cpu_workers();
 
   g_workers.workerCount = 0;
@@ -78,8 +79,10 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t de
     // execution lanes always use CPU0+CPU2. With two helpers, lane 2 lives on
     // CPU1 at a deliberately lower priority than the title's default-priority
     // audio pthread; MusyX can therefore pre-empt opportunistic game work.
-    const int affinity=i==0?SCE_KERNEL_CPU_MASK_USER_2:SCE_KERNEL_CPU_MASK_USER_1;
-    const int priority=i==0?0x10000110:0x10000180;
+    const bool cpu1Lane = primaryWorkerOnCpu1 ? i==0 : i!=0;
+    const int affinity=cpu1Lane?SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2;
+    // CPU1 is shared with real-time audio and must always be pre-emptible by it.
+    const int priority=cpu1Lane?0x10000180:0x10000110;
     lane.thread=sceKernelCreateThread(name,cpu_worker_main,priority,
                                      WorkerStackBytes,0,affinity,nullptr);
     if(lane.thread<0 || sceKernelStartThread(lane.thread,sizeof(i),&i)<0) {
@@ -202,7 +205,7 @@ namespace {
 size_t g_minItems = 512;
 }
 
-bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t) noexcept {
+bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t, bool) noexcept {
   g_minItems = std::max<size_t>(1, minItems);
   return true;
 }
