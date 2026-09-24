@@ -26,7 +26,9 @@
 #include <cstdlib>
 
 #if defined(MKW_TARGET_VITA)
-extern "C" void melee_vita_event_marker(const char* marker);
+// Optional application-side trace hook.  Melee defines a strong implementation;
+// other Aurora Vita clients (including Strikers) intentionally pay nothing.
+extern "C" __attribute__((weak)) void melee_vita_event_marker(const char*) {}
 #endif
 
 namespace {
