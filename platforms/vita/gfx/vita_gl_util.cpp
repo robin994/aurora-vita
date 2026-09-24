@@ -1,5 +1,6 @@
 #include "vita_gl_util.hpp"
 #include "vita_program_binary_cache.hpp"
+#include "../vita_io.hpp"
 #if defined(__vita__)
 #include <cstdio>
 #include <string>
@@ -27,13 +28,12 @@ std::string program_cache_path(uint64_t sourceHash) {
 
 GLuint load_cached_program(const std::string& path,uint64_t sourceHash) noexcept {
   if(path.empty())return 0;
-  FILE* file=std::fopen(path.c_str(),"rb");
-  if(!file)return 0;
+  io::BufferedReader file(path.c_str());
+  if(!file.is_open())return 0;
   ProgramCacheHeader header{};
-  if(std::fread(&header,sizeof(header),1,file)!=1||header.length>MaxProgramCacheBytes||header.length==0){std::fclose(file);return 0;}
+  if(!file.read_exact(&header,sizeof(header))||header.length>MaxProgramCacheBytes||header.length==0)return 0;
   std::vector<uint8_t> binary(header.length);
-  const bool readOk=std::fread(binary.data(),1,binary.size(),file)==binary.size()&&std::fgetc(file)==EOF;
-  std::fclose(file);
+  const bool readOk=file.read_exact(binary.data(),binary.size())&&file.eof();
   const size_t attributeBytes=sizeof(GLuint)+16*sizeof(SceGxmVertexAttribute);
   if(!readOk||!valid_program_cache(header,binary.data(),binary.size(),sourceHash,attributeBytes))return 0;
   const GLuint program=glCreateProgram();
@@ -59,17 +59,12 @@ void save_cached_program(const std::string& path,uint64_t sourceHash,GLuint prog
   header.format=format;header.binaryHash=program_cache_hash(binary.data(),binary.size());
   if(!valid_program_cache(header,binary.data(),binary.size(),sourceHash,sizeof(GLuint)+16*sizeof(SceGxmVertexAttribute)))return;
   const std::string temporary=path+".tmp";
-  FILE* file=std::fopen(temporary.c_str(),"wb");
-  if(!file)return;
-  const bool wrote=std::fwrite(&header,sizeof(header),1,file)==1&&
-    std::fwrite(binary.data(),1,binary.size(),file)==binary.size();
-  const bool closed=std::fclose(file)==0;
-  if(wrote&&closed){
-    // This path belongs exclusively to our versioned, source-hashed cache.
-    std::remove(path.c_str());
-    if(std::rename(temporary.c_str(),path.c_str())==0)return;
-  }
-  std::remove(temporary.c_str());
+  io::BufferedWriter file(temporary.c_str(),false);
+  if(!file.is_open())return;
+  const bool wrote=file.write(&header,sizeof(header))&&file.write(binary.data(),binary.size());
+  const bool closed=file.close();
+  if(wrote&&closed&&io::replace_file(temporary.c_str(),path.c_str()))return;
+  (void)io::remove_path(temporary.c_str());
 }
 }
 

@@ -2,7 +2,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include "../vita_diag.hpp"
-#include <dirent.h>
+#include "../vita_io.hpp"
+#include <psp2/io/dirent.h>
 #include <psp2/io/stat.h>
 
 namespace aurora::vita::gxm {
@@ -66,17 +67,15 @@ bool ProgramBinaryCache::load(uint64_t sourceHash, ProgramStage stage,
                               std::vector<uint32_t>& words) noexcept {
   const auto path = cache_file(root_, sourceHash, stage);
   if (path.empty()) return false;
-  FILE* file = std::fopen(path.c_str(), "rb");
-  if (!file) { ++misses_; return false; }
+  io::BufferedReader file(path.c_str());
+  if (!file.is_open()) { ++misses_; return false; }
   GxmProgramCacheHeader header{};
-  if (std::fread(&header, sizeof(header), 1, file) != 1 || !header.length ||
+  if (!file.read_exact(&header, sizeof(header)) || !header.length ||
       header.length > gfx::MaxProgramCacheBytes) {
-    std::fclose(file); ++misses_; return false;
+    ++misses_; return false;
   }
   std::vector<uint8_t> bytes(header.length);
-  const bool readOk = std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size() &&
-      std::fgetc(file) == EOF;
-  std::fclose(file);
+  const bool readOk = file.read_exact(bytes.data(), bytes.size()) && file.eof();
   if (!readOk || !valid_gxm_program_cache(header, bytes.data(), bytes.size(), sourceHash, stage)) {
     ++misses_;
     return false;
@@ -101,16 +100,13 @@ void ProgramBinaryCache::save(uint64_t sourceHash, ProgramStage stage,
   header.binaryHash = gfx::program_cache_hash(words.data(), byteLength);
   if (!valid_gxm_program_cache(header, words.data(), byteLength, sourceHash, stage)) return;
   const std::string temporary = path + ".tmp";
-  FILE* file = std::fopen(temporary.c_str(), "wb");
-  if (!file) return;
-  const bool wrote = std::fwrite(&header, sizeof(header), 1, file) == 1 &&
-      std::fwrite(words.data(), 1, byteLength, file) == byteLength;
-  const bool closed = std::fclose(file) == 0;
-  if (wrote && closed) {
-    std::remove(path.c_str());
-    if (std::rename(temporary.c_str(), path.c_str()) == 0) return;
-  }
-  std::remove(temporary.c_str());
+  io::BufferedWriter file(temporary.c_str(), false);
+  if (!file.is_open()) return;
+  const bool wrote = file.write(&header, sizeof(header)) &&
+      file.write(words.data(), byteLength);
+  const bool closed = file.close();
+  if (wrote && closed && io::replace_file(temporary.c_str(), path.c_str())) return;
+  (void)io::remove_path(temporary.c_str());
 }
 
 size_t ProgramBinaryCache::preload(std::vector<PreloadedProgram>& programs, size_t maxPrograms) noexcept {
@@ -120,20 +116,21 @@ size_t ProgramBinaryCache::preload(std::vector<PreloadedProgram>& programs, size
   for(const auto stage:Stages) {
     for(unsigned shard=0;shard<16&&programs.size()<maxPrograms;++shard) {
       const auto dirPath=shard_path(root_,stage,shard);
-      DIR* dir=opendir(dirPath.c_str());
-      if(!dir)continue;
+      const SceUID dir=sceIoDopen(dirPath.c_str());
+      if(dir<0)continue;
       while(programs.size()<maxPrograms) {
-        const dirent* entry=readdir(dir);
-        if(!entry)break;
+        SceIoDirent entry{};
+        const int read=sceIoDread(dir,&entry);
+        if(read<=0)break;
         uint64_t hash=0;
-        if(!parse_cache_name(entry->d_name,hash)||shard_directory(hash)!=dirPath.back())continue;
+        if(!parse_cache_name(entry.d_name,hash)||shard_directory(hash)!=dirPath.back())continue;
         PreloadedProgram program{};
         program.sourceHash=hash;
         program.stage=stage;
         if(!load(hash,stage,program.words)||program.words.empty())continue;
         programs.push_back(std::move(program));
       }
-      closedir(dir);
+      sceIoDclose(dir);
     }
   }
   return programs.size();

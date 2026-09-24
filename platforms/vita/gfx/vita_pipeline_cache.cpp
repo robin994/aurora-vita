@@ -2,6 +2,7 @@
 #include "vita_gl_util.hpp"
 #include "vita_pipeline_key.hpp"
 #include "vita_shader_gen.hpp"
+#include "../vita_io.hpp"
 #include <cstring>
 #include <cstdio>
 #if defined(__vita__)
@@ -12,10 +13,7 @@ namespace aurora::vita::gfx {
 namespace {
 #if defined(__vita__)
 void write_failure_blob(const char* path,const void* data,size_t size) noexcept {
-  FILE* fp=std::fopen(path,"wb");
-  if(!fp)return;
-  if(size) (void)std::fwrite(data,1,size,fp);
-  std::fclose(fp);
+  (void)io::write_file(path,data,size);
 }
 
 void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSources& src,const std::string& diagnostics) noexcept {
@@ -30,51 +28,51 @@ void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSource
   std::snprintf(path,sizeof(path),"%s.compiler.log",base);write_failure_blob(path,diagnostics.data(),diagnostics.size());
 
   std::snprintf(path,sizeof(path),"%s.desc.txt",base);
-  FILE* fp=std::fopen(path,"wb");
-  if(!fp)return;
-  std::fprintf(fp,"pipeline_key=0x%016llx\n",(unsigned long long)key);
-  std::fprintf(fp,"sizeof_pipeline_desc=%u\n",(unsigned)sizeof(d));
-  std::fprintf(fp,"primitive=%u depth_func=%u cull=%u blend_mode=%u src_factor=%u dst_factor=%u logic_op=%u\n",
+  io::BufferedWriter out(path,false);
+  if(!out.is_open())return;
+  out.write_format("pipeline_key=0x%016llx\n",(unsigned long long)key);
+  out.write_format("sizeof_pipeline_desc=%u\n",(unsigned)sizeof(d));
+  out.write_format("primitive=%u depth_func=%u cull=%u blend_mode=%u src_factor=%u dst_factor=%u logic_op=%u\n",
                (unsigned)d.primitive,(unsigned)d.depthFunc,(unsigned)d.cull,(unsigned)d.blendMode,
                (unsigned)d.srcFactor,(unsigned)d.dstFactor,(unsigned)d.logicOp);
-  std::fprintf(fp,"depth_test=%u depth_write=%u color_write=%u alpha_write=%u reversed_z=%u polygon_offset=%u factor=%g units=%g dst_alpha=%d\n",
+  out.write_format("depth_test=%u depth_write=%u color_write=%u alpha_write=%u reversed_z=%u polygon_offset=%u factor=%g units=%g dst_alpha=%d\n",
                (unsigned)d.depthTest,(unsigned)d.depthWrite,(unsigned)d.colorWrite,(unsigned)d.alphaWrite,
                (unsigned)d.reversedZ,(unsigned)d.polygonOffset,(double)d.polygonOffsetFactor,(double)d.polygonOffsetUnits,(int)d.dstAlpha);
-  std::fprintf(fp,"fog_mode=%u fog_ortho=%u fog_range=%u clip_space=%u texgen_count=%u tev_stages=%u tev_texcoords=%u tev_raster_colors=%u indirect_stages=%u\n",
+  out.write_format("fog_mode=%u fog_ortho=%u fog_range=%u clip_space=%u texgen_count=%u tev_stages=%u tev_texcoords=%u tev_raster_colors=%u indirect_stages=%u\n",
                (unsigned)d.fogMode,(unsigned)d.fogOrthographic,(unsigned)d.fogRangeEnabled,(unsigned)d.positionIsClipSpace,
                (unsigned)d.texgenCount,(unsigned)d.tev.stageCount,(unsigned)d.tev.texCoordCount,
                (unsigned)d.tev.rasterColorCount,(unsigned)d.tev.indirectStageCount);
-  std::fprintf(fp,"layout_count=%u\n",(unsigned)d.layout.count);
+  out.write_format("layout_count=%u\n",(unsigned)d.layout.count);
   for(unsigned i=0;i<d.layout.count && i<MaxVertexAttributes;i++){
     const auto& a=d.layout.attributes[i];
-    std::fprintf(fp,"layout[%u] loc=%u comps=%u scalar=%u norm=%u stride=%u offset=%u\n",i,
+    out.write_format("layout[%u] loc=%u comps=%u scalar=%u norm=%u stride=%u offset=%u\n",i,
                  (unsigned)a.location,(unsigned)a.components,(unsigned)a.scalar,(unsigned)a.normalized,
                  (unsigned)a.stride,(unsigned)a.offset);
   }
   for(unsigned i=0;i<d.texgenCount && i<MaxTextures;i++){
     const auto& t=d.texgens[i];
-    std::fprintf(fp,"texgen[%u] type=%u source=%u matrix=%d post=%d emboss=%u normalize=%u matrix_from_vertex=%u\n",i,
+    out.write_format("texgen[%u] type=%u source=%u matrix=%d post=%d emboss=%u normalize=%u matrix_from_vertex=%u\n",i,
                  (unsigned)t.type,(unsigned)t.source,(int)t.matrix,(int)t.postMatrix,(unsigned)t.embossSource,
                  (unsigned)t.normalize,(unsigned)t.matrixFromVertex);
   }
   for(unsigned i=0;i<d.colorChannels.size();i++){
     const auto& c=d.colorChannels[i];
-    std::fprintf(fp,"color_channel[%u] material=%u ambient=%u diffuse=%u attenuation=%u lighting=%u\n",i,
+    out.write_format("color_channel[%u] material=%u ambient=%u diffuse=%u attenuation=%u lighting=%u\n",i,
                  (unsigned)c.materialSource,(unsigned)c.ambientSource,(unsigned)c.diffuse,
                  (unsigned)c.attenuation,(unsigned)c.lightingEnabled);
   }
   for(unsigned i=0;i<d.tev.swapTable.size();i++){
     const auto& s=d.tev.swapTable[i];
-    std::fprintf(fp,"swap[%u] r=%u g=%u b=%u a=%u\n",i,(unsigned)s.r,(unsigned)s.g,(unsigned)s.b,(unsigned)s.a);
+    out.write_format("swap[%u] r=%u g=%u b=%u a=%u\n",i,(unsigned)s.r,(unsigned)s.g,(unsigned)s.b,(unsigned)s.a);
   }
   for(unsigned i=0;i<d.tev.indirectStageCount && i<MaxIndStages;i++){
     const auto& s=d.tev.indirectStages[i];
-    std::fprintf(fp,"indirect[%u] texcoord=%u texture=%u scale_s_shift=%u scale_t_shift=%u\n",i,
+    out.write_format("indirect[%u] texcoord=%u texture=%u scale_s_shift=%u scale_t_shift=%u\n",i,
                  (unsigned)s.texCoord,(unsigned)s.texture,(unsigned)s.scaleSShift,(unsigned)s.scaleTShift);
   }
   for(unsigned i=0;i<d.tev.stageCount && i<MaxTevStages;i++){
     const auto& s=d.tev.stages[i];
-    std::fprintf(fp,"tev[%u] color=%u,%u,%u,%u alpha=%u,%u,%u,%u color_op=%u alpha_op=%u color_bias=%u alpha_bias=%u color_scale=%u alpha_scale=%u color_out=%u alpha_out=%u konst_color=%u konst_alpha=%u tex=%u tc=%u ras=%u ras_swap=%u tex_swap=%u clamp=%u/%u ind=%u ind_stage=%u ind_fmt=%u ind_bias=%u ind_alpha=%u ind_mtx=%u ind_wrap=%u/%u orig_lod=%u add_prev=%u\n",i,
+    out.write_format("tev[%u] color=%u,%u,%u,%u alpha=%u,%u,%u,%u color_op=%u alpha_op=%u color_bias=%u alpha_bias=%u color_scale=%u alpha_scale=%u color_out=%u alpha_out=%u konst_color=%u konst_alpha=%u tex=%u tc=%u ras=%u ras_swap=%u tex_swap=%u clamp=%u/%u ind=%u ind_stage=%u ind_fmt=%u ind_bias=%u ind_alpha=%u ind_mtx=%u ind_wrap=%u/%u orig_lod=%u add_prev=%u\n",i,
                  (unsigned)s.color.a,(unsigned)s.color.b,(unsigned)s.color.c,(unsigned)s.color.d,
                  (unsigned)s.alpha.a,(unsigned)s.alpha.b,(unsigned)s.alpha.c,(unsigned)s.alpha.d,
                  (unsigned)s.colorOp,(unsigned)s.alphaOp,(unsigned)s.colorBias,(unsigned)s.alphaBias,
@@ -85,9 +83,9 @@ void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSource
                  (unsigned)s.indirectAlpha,(unsigned)s.indirectMatrix,(unsigned)s.indirectWrapS,(unsigned)s.indirectWrapT,
                  (unsigned)s.indirectUseOrigLod,(unsigned)s.indirectAddPrev);
   }
-  std::fprintf(fp,"alpha_compare=%u,%u op=%u %u,%u\n",(unsigned)d.tev.alphaCompare.comp0,(unsigned)d.tev.alphaCompare.ref0,
+  out.write_format("alpha_compare=%u,%u op=%u %u,%u\n",(unsigned)d.tev.alphaCompare.comp0,(unsigned)d.tev.alphaCompare.ref0,
                (unsigned)d.tev.alphaCompare.op,(unsigned)d.tev.alphaCompare.comp1,(unsigned)d.tev.alphaCompare.ref1);
-  std::fclose(fp);
+  out.close();
   std::printf("[aurora-vita] shader failure artifacts: %s.*\n",base);
 }
 

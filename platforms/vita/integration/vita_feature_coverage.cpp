@@ -1,4 +1,5 @@
 #include "vita_feature_coverage.hpp"
+#include "../vita_io.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <sstream>
@@ -61,9 +62,8 @@ std::string FeatureCoverage::report() const {
 }
 bool FeatureCoverage::write_report(const char* path) const noexcept {
   if (!path || !*path) return false;
-  FILE* fp = std::fopen(path,"wb"); if (!fp) return false;
-  const auto text=report(); const bool ok=std::fwrite(text.data(),1,text.size(),fp)==text.size();
-  std::fclose(fp); return ok;
+  const auto text=report();
+  return io::write_file(path,text.data(),text.size());
 }
 
 } // namespace aurora::vita::integration

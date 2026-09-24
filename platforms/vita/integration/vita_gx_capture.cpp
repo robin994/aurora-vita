@@ -68,35 +68,33 @@ GxCaptureWriter::~GxCaptureWriter() { close(); }
 bool GxCaptureWriter::open(const char* path, const char* upstreamCommit) noexcept {
   close();
   if (!path || !*path) return false;
-  fp_ = std::fopen(path, "wb");
-  if (!fp_) return false;
+  if (!writer_.open(path, false)) return false;
   FileHeader h{};
   std::memcpy(h.magic, Magic.data(), Magic.size());
   h.version = Version;
   h.headerBytes = sizeof(h);
   if (upstreamCommit) std::snprintf(h.upstreamCommit, sizeof(h.upstreamCommit), "%s", upstreamCommit);
-  if (std::fwrite(&h, 1, sizeof(h), fp_) != sizeof(h)) { close(); return false; }
+  if (!writer_.write(&h, sizeof(h))) { close(); return false; }
   bytesWritten_ = sizeof(h);
   return true;
 }
 
 void GxCaptureWriter::close() noexcept {
-  if (fp_) std::fclose(fp_);
-  fp_ = nullptr;
+  writer_.close();
   sequence_ = 0;
   bytesWritten_ = 0;
 }
 
 bool GxCaptureWriter::record(GxCaptureRecordType type, uint64_t frame, const void* data, size_t bytes) noexcept {
-  if (!fp_ || bytes > MaxRecordBytes || (bytes != 0 && !data) || bytes > std::numeric_limits<uint32_t>::max()) return false;
+  if (!writer_.is_open() || bytes > MaxRecordBytes || (bytes != 0 && !data) || bytes > std::numeric_limits<uint32_t>::max()) return false;
   RecordHeader h{};
   h.type = static_cast<uint32_t>(type);
   h.payloadBytes = static_cast<uint32_t>(bytes);
   h.frame = frame;
   h.sequence = sequence_;
   h.crc32 = gx_capture_crc32(data, bytes);
-  if (std::fwrite(&h, 1, sizeof(h), fp_) != sizeof(h)) return false;
-  if (bytes && std::fwrite(data, 1, bytes, fp_) != bytes) return false;
+  if (!writer_.write(&h, sizeof(h))) return false;
+  if (bytes && !writer_.write(data, bytes)) return false;
   ++sequence_;
   bytesWritten_ += sizeof(h) + bytes;
   return true;
@@ -127,35 +125,35 @@ bool GxCaptureWriter::marker(uint64_t frame, const char* text) noexcept {
   return record(GxCaptureRecordType::Marker, frame, text, std::strlen(text));
 }
 
-bool GxCaptureWriter::flush() noexcept { return fp_ && std::fflush(fp_) == 0; }
+bool GxCaptureWriter::flush() noexcept { return writer_.is_open() && writer_.flush(); }
 
 bool GxCaptureReader::read(const char* path, const Visitor& visitor, GxCaptureSummary* outSummary) noexcept {
   error_.clear();
   GxCaptureSummary summary{};
   if (!path || !*path) { error_ = "empty path"; return false; }
-  FILE* fp = std::fopen(path, "rb");
-  if (!fp) { error_ = "open failed"; return false; }
+  io::BufferedReader reader(path);
+  if (!reader.is_open()) { error_ = "open failed"; return false; }
   FileHeader file{};
-  if (std::fread(&file, 1, sizeof(file), fp) != sizeof(file)) { error_ = "truncated header"; std::fclose(fp); return false; }
+  if (!reader.read_exact(&file, sizeof(file))) { error_ = "truncated header"; return false; }
   if (std::memcmp(file.magic, Magic.data(), Magic.size()) != 0 || file.version != Version || file.headerBytes != sizeof(file)) {
-    error_ = "invalid header"; std::fclose(fp); return false;
+    error_ = "invalid header"; return false;
   }
   uint64_t expectedSequence = 0;
   std::vector<uint8_t> payload;
   while (true) {
     RecordHeader h{};
-    const size_t got = std::fread(&h, 1, sizeof(h), fp);
-    if (got == 0 && std::feof(fp)) break;
-    if (got != sizeof(h)) { error_ = "truncated record header"; ++summary.malformedRecords; std::fclose(fp); if(outSummary)*outSummary=summary; return false; }
+    const size_t got = reader.read(&h, sizeof(h));
+    if (got == 0 && reader.eof()) break;
+    if (got != sizeof(h)) { error_ = "truncated record header"; ++summary.malformedRecords; if(outSummary)*outSummary=summary; return false; }
     if (!known_type(h.type) || h.payloadBytes > MaxRecordBytes || h.sequence != expectedSequence) {
-      error_ = "malformed record header"; ++summary.malformedRecords; std::fclose(fp); if(outSummary)*outSummary=summary; return false;
+      error_ = "malformed record header"; ++summary.malformedRecords; if(outSummary)*outSummary=summary; return false;
     }
     payload.resize(h.payloadBytes);
-    if (h.payloadBytes && std::fread(payload.data(), 1, h.payloadBytes, fp) != h.payloadBytes) {
-      error_ = "truncated record payload"; ++summary.malformedRecords; std::fclose(fp); if(outSummary)*outSummary=summary; return false;
+    if (h.payloadBytes && !reader.read_exact(payload.data(), h.payloadBytes)) {
+      error_ = "truncated record payload"; ++summary.malformedRecords; if(outSummary)*outSummary=summary; return false;
     }
     if (gx_capture_crc32(payload.data(), payload.size()) != h.crc32) {
-      error_ = "crc mismatch"; ++summary.crcErrors; std::fclose(fp); if(outSummary)*outSummary=summary; return false;
+      error_ = "crc mismatch"; ++summary.crcErrors; if(outSummary)*outSummary=summary; return false;
     }
     ++expectedSequence;
     ++summary.records;
@@ -169,29 +167,28 @@ bool GxCaptureReader::read(const char* path, const Visitor& visitor, GxCaptureSu
     size_t remaining = payload.size();
     switch (rec.type) {
       case GxCaptureRecordType::FrameBegin:
-        if (remaining != 0) { error_ = "invalid frame begin"; ++summary.malformedRecords; std::fclose(fp); return false; }
+        if (remaining != 0) { error_ = "invalid frame begin"; ++summary.malformedRecords; return false; }
         ++summary.frames;
         break;
       case GxCaptureRecordType::FrameEnd:
-        if (!read_scalar(p, remaining, rec.frameUs) || remaining != 0) { error_ = "invalid frame end"; ++summary.malformedRecords; std::fclose(fp); return false; }
+        if (!read_scalar(p, remaining, rec.frameUs) || remaining != 0) { error_ = "invalid frame end"; ++summary.malformedRecords; return false; }
         break;
       case GxCaptureRecordType::Fifo:
         ++summary.fifoPackets; summary.fifoBytes += rec.bytes;
         break;
       case GxCaptureRecordType::Invalidate: {
         uint32_t bytes32 = 0;
-        if (!read_scalar(p, remaining, rec.guestAddress) || !read_scalar(p, remaining, bytes32) || remaining != 0) { error_ = "invalid invalidate"; ++summary.malformedRecords; std::fclose(fp); return false; }
+        if (!read_scalar(p, remaining, rec.guestAddress) || !read_scalar(p, remaining, bytes32) || remaining != 0) { error_ = "invalid invalidate"; ++summary.malformedRecords; return false; }
         rec.bytes = bytes32; rec.data = nullptr; ++summary.invalidations; break;
       }
       case GxCaptureRecordType::GuestSnapshot:
-        if (!read_scalar(p, remaining, rec.guestAddress) || remaining == 0) { error_ = "invalid guest snapshot"; ++summary.malformedRecords; std::fclose(fp); return false; }
+        if (!read_scalar(p, remaining, rec.guestAddress) || remaining == 0) { error_ = "invalid guest snapshot"; ++summary.malformedRecords; return false; }
         rec.data = p; rec.bytes = remaining; ++summary.snapshots; summary.snapshotBytes += remaining; break;
       case GxCaptureRecordType::Marker:
         rec.text.assign(reinterpret_cast<const char*>(payload.data()), payload.size()); ++summary.markers; break;
     }
     if (visitor && !visitor(rec)) break;
   }
-  std::fclose(fp);
   if (outSummary) *outSummary = summary;
   return true;
 }

@@ -4,6 +4,7 @@
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gx/aurora_vita_draw_sink.hpp"
+#include "../vita_io.hpp"
 #include <dolphin/gx.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
@@ -372,12 +373,12 @@ int run() {
   for(size_t i=0;i<image.size();i+=4)if(image[i]>40||image[i+1]>40||image[i+2]>40)++colored;
   if(colored<10000) {std::fprintf(stderr,"[gx-contract] blank framebuffer\n");shutdown();return 7;}
   std::snprintf(path,sizeof(path),"ux0:data/aurora-vita/gx_frontend_%s.ppm",AURORA_TEST_RENDERER);
-  FILE* output=std::fopen(path,"wb");
-  if(output) {
-    std::fprintf(output,"P6\n960 544\n255\n");
+  io::BufferedWriter output(path,false);
+  if(output.is_open()) {
+    output.write("P6\n960 544\n255\n",15);
     std::vector<uint8_t> rgb(960*544*3);
     for(size_t i=0,j=0;i<image.size();i+=4,j+=3)std::memcpy(rgb.data()+j,image.data()+i,3);
-    std::fwrite(rgb.data(),1,rgb.size(),output);std::fclose(output);
+    output.write(rgb.data(),rgb.size());output.close();
   }
   shutdown();
   std::fprintf(stderr,"[gx-contract] pixels=%u clear/copy/FIFO/streaming/present PASS\n",unsigned(colored));

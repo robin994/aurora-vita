@@ -1,4 +1,5 @@
 #include "vita_frame_trace.hpp"
+#include "../vita_io.hpp"
 #include <cstdio>
 #include <sstream>
 
@@ -46,9 +47,8 @@ std::string FrameTrace::report(size_t maxRecords) const {
 
 bool FrameTrace::write_report(const char* path, size_t maxRecords) const noexcept {
   if (!path || !*path) return false;
-  FILE* fp = std::fopen(path, "wb"); if (!fp) return false;
-  const auto text = report(maxRecords); const bool ok = std::fwrite(text.data(),1,text.size(),fp)==text.size();
-  std::fclose(fp); return ok;
+  const auto text = report(maxRecords);
+  return io::write_file(path,text.data(),text.size());
 }
 
 } // namespace aurora::vita::integration

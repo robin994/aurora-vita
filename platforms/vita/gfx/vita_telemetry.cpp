@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <sstream>
+#include "../vita_io.hpp"
 #if defined(__vita__)
 #include <psp2/kernel/processmgr.h>
 #endif
@@ -306,12 +307,10 @@ std::string Telemetry::format_lifetime() const {
 
 bool Telemetry::append_frame_log(const char* path) const noexcept {
   if (!path || !*path) return false;
-  FILE* fp = std::fopen(path, "ab");
-  if (!fp) return false;
   const auto line = format_frame();
-  const bool ok = std::fwrite(line.data(), 1, line.size(), fp) == line.size() && std::fwrite("\n", 1, 1, fp) == 1;
-  std::fclose(fp);
-  return ok;
+  io::BufferedWriter writer(path, true);
+  return writer.is_open() && writer.write(line.data(), line.size()) &&
+      writer.write("\n", 1) && writer.close();
 }
 
 #if !defined(AURORA_VITA_NO_DIAGNOSTICS)

@@ -1,6 +1,7 @@
 #include "gxm/gxm_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_vertex_pipeline.hpp"
+#include "../vita_io.hpp"
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
@@ -125,11 +126,11 @@ int run() {
     if (!renderer.readback_rgba8(pixels)) return 6;
     std::vector<uint8_t> rgb(pixels.size() / 4 * 3);
     for (size_t p = 0; p < pixels.size()/4; ++p) std::memcpy(rgb.data()+p*3, pixels.data()+p*4, 3);
-    FILE* image = std::fopen("ux0:data/aurora-vita/gxm_probe.ppm", "wb");
-    if (!image) return 7;
-    const bool headerWritten = std::fprintf(image, "P6\n960 544\n255\n") > 0;
-    const bool pixelsWritten = std::fwrite(rgb.data(), 1, rgb.size(), image) == rgb.size();
-    const bool closed = std::fclose(image) == 0;
+    io::BufferedWriter image("ux0:data/aurora-vita/gxm_probe.ppm", false);
+    if (!image.is_open()) return 7;
+    const bool headerWritten = image.write("P6\n960 544\n255\n",15);
+    const bool pixelsWritten = image.write(rgb.data(), rgb.size());
+    const bool closed = image.close();
     if (!headerWritten || !pixelsWritten || !closed) return 7;
     std::fprintf(stderr, "[gxm-probe] framebuffer_capture=960x544 frame=%u\n", frames);
 

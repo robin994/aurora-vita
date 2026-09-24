@@ -5,6 +5,7 @@
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "vita_data_paths.hpp"
+#include "vita_io.hpp"
 #if !defined(AURORA_VITA_RENDERER_GXM)
 #include "gfx/vita_gl_util.hpp"
 #endif
@@ -133,10 +134,10 @@ void emit_periodic_diagnostics() noexcept {
   if (g_config.telemetry_log_path) {
     ensure_parent_dir(g_config.telemetry_log_path);
     g_telemetry.append_frame_log(g_config.telemetry_log_path);
-    FILE* fp = std::fopen(g_config.telemetry_log_path, "ab");
-    if (fp) {
-      std::fwrite(rendererLine,1,std::strlen(rendererLine),fp);std::fwrite("\n",1,1,fp);
-      std::fwrite(memLine.data(),1,memLine.size(),fp); std::fwrite("\n",1,1,fp); std::fclose(fp);
+    io::BufferedWriter writer(g_config.telemetry_log_path, true);
+    if (writer.is_open()) {
+      writer.write(rendererLine,std::strlen(rendererLine));writer.write("\n",1);
+      writer.write(memLine.data(),memLine.size());writer.write("\n",1);writer.close();
     }
   }
 }

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include "../vita_diag.hpp"
+#include "../vita_io.hpp"
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -80,8 +81,9 @@ void log_memory_state(const char* phase) {
   // Keep a lightweight persistent copy as well. The game redirects its own
   // diagnostics to runtime.log, while the native renderer writes to stderr;
   // on retail hardware that stream is not always captured by VitaCompanion.
-  if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_memory.log", "a")) {
-    std::fprintf(file,
+  {
+    io::BufferedWriter file("ux0:data/SmashMeleeVita/gxm_memory.log", true);
+    if(file.is_open()) file.write_format(
         "phase=%s cdram=%llu peak=%llu allocs=%u pool=%llu pool_used=%llu pool_peak=%llu "
         "user=%llu peak=%llu allocs=%u phycont=%llu peak=%llu allocs=%u "
         "cdialog=%llu peak=%llu allocs=%u fallbacks=%u free_cdram=%d free_user=%d "
@@ -103,7 +105,6 @@ void log_memory_state(const char* phase) {
         freeResult >= 0 ? freeMemory.size_user : -1,
         freeResult >= 0 ? freeMemory.size_phycont : -1,
         unsigned(freeResult));
-    std::fclose(file);
   }
 #endif
 }
@@ -131,10 +132,8 @@ void shader_log(const char* message, shark_log_level level, int line) {
   (void)line;
 #else
   AURORA_VITA_DIAGF( "[aurora-gxm][shader] level=%d line=%d %s\n", int(level), line, message ? message : "");
-  if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader.log", "a")) {
-    std::fprintf(file, "level=%d line=%d %s\n", int(level), line, message ? message : "");
-    std::fclose(file);
-  }
+  io::BufferedWriter file("ux0:data/SmashMeleeVita/gxm_shader.log", true);
+  if(file.is_open()) file.write_format("level=%d line=%d %s\n", int(level), line, message ? message : "");
 #endif
 }
 SceGxmAttributeFormat attribute_format(VertexScalar s, bool normalized) {
@@ -548,20 +547,17 @@ struct Renderer::Impl {
           "[aurora-gxm] stage_compile_fail stage=%c hash=%016llx source_bytes=%u\n",
           stageChar, static_cast<unsigned long long>(sourceHash),
           static_cast<unsigned>(source.size()));
-      if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader_failures.log", "a")) {
-        std::fprintf(file, "stage=%c hash=%016llx source_bytes=%u\n",
+      {
+        io::BufferedWriter file("ux0:data/SmashMeleeVita/gxm_shader_failures.log", true);
+        if(file.is_open()) file.write_format("stage=%c hash=%016llx source_bytes=%u\n",
             stageChar, static_cast<unsigned long long>(sourceHash),
             static_cast<unsigned>(source.size()));
-        std::fclose(file);
       }
       char path[128];
       std::snprintf(path, sizeof(path),
           "ux0:data/SmashMeleeVita/shader_fail-%c-%016llx.cg", stageChar,
           static_cast<unsigned long long>(sourceHash));
-      if (FILE* file = std::fopen(path, "wb")) {
-        std::fwrite(source.data(), 1, source.size(), file);
-        std::fclose(file);
-      }
+      (void)io::write_file(path, source.data(), source.size());
       shark_clear_output();
       fail("Cg compilation failed; see shader diagnostics");
       return {};

@@ -1,9 +1,9 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <functional>
 #include <string>
+#include "../vita_io.hpp"
 
 namespace aurora::vita::integration {
 
@@ -48,7 +48,7 @@ public:
   ~GxCaptureWriter();
   bool open(const char* path, const char* upstreamCommit = nullptr) noexcept;
   void close() noexcept;
-  bool is_open() const noexcept { return fp_ != nullptr; }
+  bool is_open() const noexcept { return writer_.is_open(); }
   bool frame_begin(uint64_t frame) noexcept;
   bool frame_end(uint64_t frame, uint64_t frameUs) noexcept;
   bool fifo(uint64_t frame, const void* data, size_t bytes) noexcept;
@@ -60,7 +60,7 @@ public:
   uint64_t bytes_written() const noexcept { return bytesWritten_; }
 private:
   bool record(GxCaptureRecordType type, uint64_t frame, const void* data, size_t bytes) noexcept;
-  FILE* fp_ = nullptr;
+  io::BufferedWriter writer_{};
   uint64_t sequence_ = 0;
   uint64_t bytesWritten_ = 0;
 };

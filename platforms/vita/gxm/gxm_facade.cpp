@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include "../vita_diag.hpp"
+#include "../vita_io.hpp"
 #include <cstring>
 #include <limits>
 #include <type_traits>
@@ -169,20 +170,19 @@ void PipelineCache::configure_hot_manifest(const char* path,size_t prewarmLimit,
   hotManifestPath_=path&&*path?path:"";prewarmLimit_=prewarmLimit;hot_.clear();
   newHotEntriesSinceSave_=0;hotDirty_=false;hotTrackingEnabled_=trackUsage;
   if(hotManifestPath_.empty())return;
-  FILE* file=std::fopen(hotManifestPath_.c_str(),"rb");
-  if(!file)return;
+  io::BufferedReader file(hotManifestPath_.c_str());
+  if(!file.is_open())return;
   PipelineHotHeader header{};
-  if(std::fread(&header,sizeof(header),1,file)!=1||header.magic!=PipelineHotMagic||
+  if(!file.read_exact(&header,sizeof(header))||header.magic!=PipelineHotMagic||
       header.version!=PipelineHotVersion||header.descSize!=sizeof(PipelineDesc)||header.count>2048u){
-    std::fclose(file);return;
+    return;
   }
   for(uint32_t i=0;i<header.count;++i){
     PipelineHotDiskRecord disk{};
-    if(std::fread(&disk,sizeof(disk),1,file)!=1)break;
+    if(!file.read_exact(&disk,sizeof(disk)))break;
     if(!disk.key||pipeline_key(disk.desc)!=disk.key)continue;
     hot_[disk.key]=HotRecord{disk.desc,disk.hits};
   }
-  std::fclose(file);
   if(!hot_.empty())AURORA_VITA_DIAGF("[aurora-gxm] pipeline_manifest loaded=%u prewarm_limit=%u\n",
       static_cast<unsigned>(hot_.size()),static_cast<unsigned>(prewarmLimit_));
 }
@@ -212,16 +212,16 @@ void PipelineCache::save_hot_manifest() noexcept {
   std::sort(ordered.begin(),ordered.end(),[](const auto&a,const auto&b){return a.second->hits>b.second->hits;});
   if(ordered.size()>512u)ordered.resize(512u);
   const std::string temporary=hotManifestPath_+".tmp";
-  FILE* file=std::fopen(temporary.c_str(),"wb");if(!file)return;
+  io::BufferedWriter file(temporary.c_str(),false);if(!file.is_open())return;
   PipelineHotHeader header{};header.count=static_cast<uint32_t>(ordered.size());
-  bool ok=std::fwrite(&header,sizeof(header),1,file)==1;
+  bool ok=file.write(&header,sizeof(header));
   for(const auto& [key,record]:ordered){
     PipelineHotDiskRecord disk{};disk.key=key;disk.hits=record->hits;disk.desc=record->desc;
-    ok=ok&&std::fwrite(&disk,sizeof(disk),1,file)==1;
+    ok=ok&&file.write(&disk,sizeof(disk));
   }
-  ok=ok&&std::fclose(file)==0;
-  if(ok){std::remove(hotManifestPath_.c_str());ok=std::rename(temporary.c_str(),hotManifestPath_.c_str())==0;}
-  if(!ok){std::remove(temporary.c_str());return;}
+  ok=ok&&file.close();
+  if(ok)ok=io::replace_file(temporary.c_str(),hotManifestPath_.c_str());
+  if(!ok){(void)io::remove_path(temporary.c_str());return;}
   newHotEntriesSinceSave_=0;
   hotDirty_=false;
   AURORA_VITA_DIAGF("[aurora-gxm] pipeline_manifest saved=%u\n",header.count);

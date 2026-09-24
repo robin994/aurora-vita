@@ -1,4 +1,5 @@
 #include "vita_gx_backend.hpp"
+#include "../vita_io.hpp"
 #include <cstdio>
 #include <string>
 
@@ -109,10 +110,9 @@ bool VitaGxBackend::end_frame(uint64_t frame) noexcept {
     if (coverageReportPath_) coverage_.write_report(coverageReportPath_);
     if (traceReportPath_) trace_.write_report(traceReportPath_, traceReportRecords_);
     if (memoryLogPath_) {
-      if (FILE* fp = std::fopen(memoryLogPath_, "ab")) {
-        const std::string line = memory_budget().format();
-        std::fwrite(line.data(), 1, line.size(), fp); std::fwrite("\n", 1, 1, fp); std::fclose(fp);
-      }
+      const std::string line = memory_budget().format();
+      io::BufferedWriter writer(memoryLogPath_, true);
+      if(writer.is_open()){writer.write(line.data(),line.size());writer.write("\n",1);writer.close();}
     }
   }
   return !strict_failed();

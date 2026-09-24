@@ -4,6 +4,7 @@
 #include "../gfx/vita_renderer.hpp"
 #include "../gfx/vita_pipeline_key.hpp"
 #include "../gfx/vita_streaming_arena.hpp"
+#include "../vita_io.hpp"
 #if defined(__vita__)
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
@@ -131,10 +132,10 @@ const char* pname(unsigned p){static const char* n[]={"M0 clear","M1 raw vitaGL 
 constexpr const char* ProbeStatusPath="ux0:data/aurora-vita/probe_status.log";
 void probe_status(bool truncate,const char* fmt,...) noexcept {
   sceIoMkdir("ux0:data/aurora-vita",0777);
-  FILE* fp=std::fopen(ProbeStatusPath,truncate?"wb":"ab");
-  if(!fp)return;
-  va_list ap;va_start(ap,fmt);std::vfprintf(fp,fmt,ap);va_end(ap);
-  std::fclose(fp);
+  aurora::vita::io::BufferedWriter writer(ProbeStatusPath,!truncate);
+  if(!writer.is_open())return;
+  va_list ap;va_start(ap,fmt);writer.write_vformat(fmt,ap);va_end(ap);
+  writer.close();
 }
 void log_phase_perf(unsigned phase,const PhasePerf& p) noexcept {
   if(!p.frames)return;
