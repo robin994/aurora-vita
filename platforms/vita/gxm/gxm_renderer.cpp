@@ -291,7 +291,8 @@ struct Renderer::Impl {
     const SceGxmProgramParameter *fogColor=nullptr,*fogParams=nullptr,*fogRange=nullptr,*viewportWidth=nullptr;
     const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr,*textureTransform=nullptr,*textureWrap=nullptr,*textureForceOpaque=nullptr,*textureCopyMode=nullptr;
     const SceGxmProgramParameter *gxPosition=nullptr,*gxNormal=nullptr,*gxMaterial=nullptr,*gxAmbient=nullptr,*gxLight=nullptr;
-    const SceGxmProgramParameter *gxPositionPalette=nullptr,*gxNormalPalette=nullptr;
+    const SceGxmProgramParameter *gxPositionPalette=nullptr,*gxNormalPalette=nullptr,*gxTexturePalette=nullptr;
+    const SceGxmProgramParameter *gxPrimitiveExpand=nullptr;
     std::array<const SceGxmProgramParameter*,MaxTextures> gxTexture{};
     std::array<const SceGxmProgramParameter*,MaxTextures> gxPost{};
     uint8_t textureMask = 0;
@@ -705,6 +706,14 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   for(unsigned i=0;i<MaxTextures;++i)if(p.textureMask&(1u<<i))p.usedTextureCount=static_cast<uint8_t>(i+1u);
   for(const auto& channel:nativeDesc.colorChannels)if(channel.lightingEnabled)
     for(unsigned i=0;i<MaxLights;++i)if(channel.lightMask&(1u<<i))p.lightTop=static_cast<uint8_t>(std::max<unsigned>(p.lightTop,i+1u));
+  {
+    const uint8_t generated=pipeline_texgen_compute_mask(nativeDesc);
+    for(unsigned i=0;i<nativeDesc.texgenCount&&i<MaxTextures;++i)if(generated&(1u<<i)){
+      const auto type=nativeDesc.texgens[i].type;
+      if(texgen_type_is_bump(type))p.lightTop=static_cast<uint8_t>(std::max<unsigned>(
+          p.lightTop,static_cast<unsigned>(type)-static_cast<unsigned>(TexGenType::Bump0)+1u));
+    }
+  }
   p.vertexCode = d.compile_stage(source.vertex, SHARK_VERTEX_SHADER, ProgramStage::Vertex);
   if (!p.vertexCode) return 0;
   p.fragmentCode = d.compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
@@ -721,10 +730,10 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
     if (!a.location) std::snprintf(name, sizeof(name), "a_position");
     else if (a.location < 3) std::snprintf(name, sizeof(name), "a_color%u", unsigned(a.location - 1));
     else if (a.location <= 10) std::snprintf(name, sizeof(name), "a_tex%u", unsigned(a.location - 3));
-    else if (a.location == 11) std::snprintf(name, sizeof(name), "a_normal");
+    else if (a.location == 11) std::snprintf(name, sizeof(name), "%s",nativeDesc.fixedLineSprite?"a_line_other":"a_normal");
     else if (a.location == 12) std::snprintf(name, sizeof(name), "a_binormal");
     else if (a.location == 13) std::snprintf(name, sizeof(name), "a_tangent");
-    else std::snprintf(name, sizeof(name), "a_pn_mtx");
+    else std::snprintf(name, sizeof(name), "%s",nativeDesc.fixedVertexTexMtxMask?"a_matrix_sel":"a_pn_mtx");
     const auto* parameter = sceGxmProgramFindParameterByName(vp, name);
     if (!parameter) continue; // Optimized out, no hardware stream binding needed.
     if (sceGxmProgramParameterGetCategory(parameter) != SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE) {
@@ -763,6 +772,8 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.gxNormal=sceGxmProgramFindParameterByName(vp,"u_gx_normal");
   p.gxPositionPalette=sceGxmProgramFindParameterByName(vp,"u_gx_position_palette");
   p.gxNormalPalette=sceGxmProgramFindParameterByName(vp,"u_gx_normal_palette");
+  p.gxTexturePalette=sceGxmProgramFindParameterByName(vp,"u_gx_texture_palette");
+  p.gxPrimitiveExpand=sceGxmProgramFindParameterByName(vp,"u_gx_primitive_expand");
   p.gxMaterial=sceGxmProgramFindParameterByName(vp,"u_gx_material");
   p.gxAmbient=sceGxmProgramFindParameterByName(vp,"u_gx_ambient");
   p.gxLight=sceGxmProgramFindParameterByName(vp,"u_gx_light");
@@ -997,6 +1008,13 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
          !uploadVertex(p.gxNormalPalette,120,fixedVertex->normalPalette[0].data())) return false;
     } else if(!uploadVertex(p.gxPosition,12,fixedVertex->position.data()) ||
               !uploadVertex(p.gxNormal,12,fixedVertex->normal.data())) return false;
+    if(pipeline.fixedVertexTexMtxMask) {
+      if(!pipeline.fixedVertexIndexedPn&&
+         !uploadVertex(p.gxPositionPalette,120,fixedVertex->positionPalette[0].data())) return false;
+      if(!uploadVertex(p.gxTexturePalette,120,fixedVertex->texturePalette[0].data())) return false;
+    }
+    if((pipeline.fixedPointSprite||pipeline.fixedLineSprite)&&
+       !uploadVertex(p.gxPrimitiveExpand,4,fixedVertex->primitiveExpand.data())) return false;
     if(!uploadVertex(p.gxMaterial,16,fixedVertex->material[0].data()) ||
        !uploadVertex(p.gxAmbient,16,fixedVertex->ambient[0].data())) return false;
     if(p.lightTop&&!uploadVertex(p.gxLight,p.lightTop*20u,fixedVertex->light[0].data())) return false;

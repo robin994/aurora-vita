@@ -472,7 +472,7 @@ void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUni
     copy_matrix(state.postexMatrices[i],g.pnMtx[i].pos);
     if(requirements.needNormal)copy_matrix(state.normalMatrices[i],g.pnMtx[i].nrm);
   };
-  if(pipeline.fixedVertexIndexedPn) {
+  if(pipeline.fixedVertexIndexedPn||pipeline.fixedVertexTexMtxMask) {
     for(unsigned i=0;i<aurora::gx::MaxPnMtx;++i)copyPn(i);
   } else if(state.currentPnMatrix<aurora::gx::MaxPnMtx) {
     copyPn(state.currentPnMatrix);
@@ -483,6 +483,8 @@ void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUni
   }
 
   const uint8_t texgenMask=gfx::pipeline_texgen_compute_mask(pipeline);
+  if(pipeline.fixedVertexTexMtxMask)
+    for(unsigned i=0;i<aurora::gx::MaxTexMtx;++i)copy_matrix(state.postexMatrices[10u+i],g.texMtxs[i]);
   for(unsigned i=0;i<pipeline.texgenCount&&i<gfx::MaxTextures;++i)if(texgenMask&(1u<<i)) {
     const auto& t=pipeline.texgens[i];
     if(t.matrix>=0&&static_cast<unsigned>(t.matrix)<aurora::gx::MaxTexMtx)

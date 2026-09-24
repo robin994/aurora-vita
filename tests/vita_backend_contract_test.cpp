@@ -276,6 +276,71 @@ void projection_contract() {
   REQUIRE(source.vertex.find("u_gx_ambient[4]") != std::string::npos);
   REQUIRE(source.vertex.find("u_gx_light[2]") != std::string::npos);
   REQUIRE(source.vertex.find("u_gx_light[7]") != std::string::npos);
+
+  auto dynamicTex=basic();
+  dynamicTex.fixedVertexOnGpu=true;
+  dynamicTex.fixedVertexTexMtxMask=1;
+  dynamicTex.texgenCount=1;
+  dynamicTex.texgens[0].type=TexGenType::Matrix2x4;
+  dynamicTex.texgens[0].source=TexGenSource::Tex0;
+  dynamicTex.texgens[0].matrix=0;
+  dynamicTex.texgens[0].matrixFromVertex=true;
+  dynamicTex.tev.stages[0].texture=0;
+  dynamicTex.tev.stages[0].texCoord=0;
+  dynamicTex.tev.stages[0].color.d=TevColorArg::TexColor;
+  dynamicTex.layout=fixed_vertex_gpu_layout(dynamicTex);
+  source=gxm::build_tev_cg(dynamicTex);
+  REQUIRE(source.ok());
+  REQUIRE(source.vertex.find("a_matrix_sel : TEXCOORD11") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_position_palette[30]") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_texture_palette[30]") != std::string::npos);
+  REQUIRE(source.vertex.find("float gx_tm0=") != std::string::npos);
+  REQUIRE(source.vertex.find("gx_tmi") != std::string::npos);
+
+  auto bump=basic();
+  bump.fixedVertexOnGpu=true;
+  bump.texgenCount=2;
+  bump.texgens[0].type=TexGenType::Matrix2x4;
+  bump.texgens[0].source=TexGenSource::Tex0;
+  bump.texgens[0].matrix=-1;
+  bump.texgens[1].type=TexGenType::Bump0;
+  bump.texgens[1].embossSource=0;
+  bump.tev.stages[0].texture=0;
+  bump.tev.stages[0].texCoord=1;
+  bump.tev.stages[0].color.d=TevColorArg::TexColor;
+  bump.layout=fixed_vertex_gpu_layout(bump);
+  source=gxm::build_tev_cg(bump);
+  REQUIRE(source.ok());
+  REQUIRE(source.vertex.find("a_binormal : TEXCOORD9") != std::string::npos);
+  REQUIRE(source.vertex.find("a_tangent : TEXCOORD10") != std::string::npos);
+  REQUIRE(source.vertex.find("u_gx_light[40]") != std::string::npos);
+  REQUIRE(source.vertex.find("gx_tc1=float3(gx_tc0.xy") != std::string::npos);
+
+  auto point=basic();
+  point.fixedVertexOnGpu=true;
+  point.fixedPointSprite=true;
+  point.fixedPrimitiveTexcoordMask=1;
+  point.texgenCount=1;
+  point.texgens[0].type=TexGenType::Matrix2x4;
+  point.texgens[0].source=TexGenSource::Tex0;
+  point.texgens[0].matrix=-1;
+  point.tev.stages[0].texture=0;
+  point.tev.stages[0].texCoord=0;
+  point.tev.stages[0].color.d=TevColorArg::TexColor;
+  point.layout=fixed_vertex_gpu_layout(point);
+  source=gxm::build_tev_cg(point);
+  REQUIRE(source.ok());
+  REQUIRE(source.vertex.find("u_gx_primitive_expand") != std::string::npos);
+  REQUIRE(source.vertex.find("float gx_corner=") != std::string::npos);
+
+  auto line=basic();
+  line.fixedVertexOnGpu=true;
+  line.fixedLineSprite=true;
+  line.layout=fixed_vertex_gpu_layout(line);
+  source=gxm::build_tev_cg(line);
+  REQUIRE(source.ok());
+  REQUIRE(source.vertex.find("a_line_other : TEXCOORD8") != std::string::npos);
+  REQUIRE(source.vertex.find("gx_perp") != std::string::npos);
   // Check the shared projection's depth contract independently of GPU execution.
   for (const bool reversed : {false, true}) {
     for (const float fraction : {0.f, .25f, .5f, 1.f}) {

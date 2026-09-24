@@ -50,6 +50,9 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   verboseGeometryDiagnostics_ = config.verboseGeometryDiagnostics;
   strictUnsupported_ = config.strictUnsupported;
   allowLitFixedVertexGpu_ = config.allowLitFixedVertexGpu;
+  allowDynamicTexMatrixGpu_ = config.allowDynamicTexMatrixGpu;
+  allowBumpFixedVertexGpu_ = config.allowBumpFixedVertexGpu;
+  allowPrimitiveExpansionGpu_ = config.allowPrimitiveExpansionGpu;
   staticGeometryMinVertices_ = std::max<uint32_t>(3u,config.staticGeometryMinVertices);
   diagnosticDrawLimit_ = config.diagnosticDrawLimit;
   frameDrawIndex_ = 0;
@@ -520,13 +523,38 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (translatedLit_) coverage_->observe(integration::FeatureClass::Lighting, translatedPipelineKey, "GX lighting");
   }
   const auto source = translate_source_primitive(primitive);
+  const auto expansion = translate_primitive_expansion(translate_line_mode(primitive));
+  const bool pointPrimitive=source==gfx::SourcePrimitive::Points;
+  const bool linePrimitive=source==gfx::SourcePrimitive::Lines||source==gfx::SourcePrimitive::LineStrip;
+  const auto requirements=gfx::vertex_pipeline_requirements(pipeline);
+  const uint8_t generatedTexgens=gfx::pipeline_texgen_compute_mask(pipeline);
+  uint8_t dynamicTexMtxMask=0;
+  for(unsigned i=0;i<pipeline.texgenCount&&i<gfx::MaxTextures;++i)
+    if((generatedTexgens&(1u<<i))&&pipeline.texgens[i].matrixFromVertex)
+      dynamicTexMtxMask|=static_cast<uint8_t>(1u<<i);
+  if(staticGeometry_){
+    translatedGpuPipeline_.fixedVertexTexMtxMask=
+        allowDynamicTexMatrixGpu_?dynamicTexMtxMask:0;
+    translatedGpuPipeline_.fixedPointSprite=allowPrimitiveExpansionGpu_&&pointPrimitive;
+    translatedGpuPipeline_.fixedLineSprite=allowPrimitiveExpansionGpu_&&linePrimitive;
+    translatedGpuPipeline_.fixedPrimitiveTexcoordMask=pointPrimitive?
+        expansion.pointTexcoordMask:(linePrimitive?expansion.lineTexcoordMask:0);
+    if(translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite)
+      translatedGpuPipeline_.primitive=gfx::Primitive::Triangles;
+    translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
+  }
   translatedVertexState_.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(
       aurora::gx::g_gxState.currentPnMtx,translatedVertexState_.postexMatrices.size()-1));
   const uint32_t fixedMinVertices=stableSource?staticGeometryMinVertices_:48u;
+  const bool explicitIndicesOk=(rawIndices==nullptr&&indexCount==0)||
+      (rawIndices!=nullptr&&indexCount!=0&&source==gfx::SourcePrimitive::Triangles);
+  const bool extendedFeaturesOk=(!requirements.needBumpBasis||allowBumpFixedVertexGpu_)&&
+      (!dynamicTexMtxMask||allowDynamicTexMatrixGpu_)&&
+      (!(pointPrimitive||linePrimitive)||allowPrimitiveExpansionGpu_);
   const bool fixedCandidate=staticGeometry_&&(!translatedLit_||allowLitFixedVertexGpu_)&&
-      vertexCount>=fixedMinVertices&&rawIndices==nullptr&&indexCount==0&&
-      source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&source!=gfx::SourcePrimitive::Points&&
-      gfx::supports_fixed_vertex_gpu(pipeline,layout,translatedVertexState_);
+      vertexCount>=fixedMinVertices&&explicitIndicesOk&&extendedFeaturesOk&&
+      (!(pointPrimitive||linePrimitive)||stableSource!=nullptr)&&
+      gfx::supports_fixed_vertex_gpu(translatedGpuPipeline_,layout,translatedVertexState_);
   // The GPU vertex path copies only the state its generated shader can consume.
   // Indexed-PN and lit draws include their position/normal palettes and lights;
   // unsupported bump/dynamic-tex-matrix cases remain on the CPU path.
@@ -544,7 +572,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
   const auto& vertexState=translatedVertexState_;
   auto& uniforms=translatedUniforms_;
-  const gfx::StaticGeometryCache::Entry* gpuGeometry=nullptr;
+  gfx::StaticGeometryCache::Entry* gpuGeometry=nullptr;
   uint64_t fixedPipelineKey=0;
   if(fixedCandidate){
 #if defined(__vita__)
@@ -552,28 +580,39 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     const bool debugGpu=telemetry_&&telemetry_->split_vertex_phases()&&debugGpuDraws++<4;
     if(debugGpu)AURORA_VITA_LOG_DEBUG("[aurora-vita] gpu_vertex_probe begin count=%u primitive=%u key=%llx\n",vertexCount,primitive,static_cast<unsigned long long>(translatedPipelineKey));
 #endif
-    const uint64_t gpuPipelineDescKey=gfx::pipeline_key(translatedGpuPipeline_);
-    auto key=fixedPipelineKeys_.find(gpuPipelineDescKey);
-    if(key!=fixedPipelineKeys_.end()&&renderer_->pipelines().find(key->second))fixedPipelineKey=key->second;
-    else{
-      gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::PipelineResolve);
-      fixedPipelineKey=renderer_->create_pipeline(translatedGpuPipeline_);
-      if(fixedPipelineKey)fixedPipelineKeys_[gpuPipelineDescKey]=fixedPipelineKey;
-    }
-#if defined(__vita__)
-    if(debugGpu)AURORA_VITA_LOG_DEBUG("[aurora-vita] gpu_vertex_probe pipeline=%llx\n",static_cast<unsigned long long>(fixedPipelineKey));
-#endif
-    if(fixedPipelineKey){
-      // A warm geometry hit still queues a reference to this program. Protect
-      // it from cache eviction until the current command batch is executed.
-      renderer_->pipelines().pin(fixedPipelineKey);
+    {
       gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::GeometryCache);
       const auto before=staticGeometry_->hits();
-      gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,translatedGpuPipeline_,vertexState,telemetry_,stableSource);
+      gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,
+          translatedGpuPipeline_,vertexState,telemetry_,stableSource,rawIndices,indexCount);
 #if defined(__vita__)
       if(debugGpu)AURORA_VITA_LOG_DEBUG("[aurora-vita] gpu_vertex_probe geometry=%p entries=%u\n",static_cast<const void*>(gpuGeometry),static_cast<unsigned>(staticGeometry_->size()));
 #endif
       if(gpuGeometry&&telemetry_)telemetry_->gpu_geometry(staticGeometry_->hits()!=before,gpuGeometry->vertexCount);
+    }
+    if(gpuGeometry){
+      const uint64_t gpuPipelineDescKey=gfx::pipeline_key(translatedGpuPipeline_);
+      if(gpuGeometry->pipelineDescKey==gpuPipelineDescKey&&gpuGeometry->pipelineKey&&
+         renderer_->pipelines().find(gpuGeometry->pipelineKey)) {
+        fixedPipelineKey=gpuGeometry->pipelineKey;
+      } else {
+        auto key=fixedPipelineKeys_.find(gpuPipelineDescKey);
+        if(key!=fixedPipelineKeys_.end()&&renderer_->pipelines().find(key->second))fixedPipelineKey=key->second;
+        else{
+          gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::PipelineResolve);
+          fixedPipelineKey=renderer_->create_pipeline(translatedGpuPipeline_);
+          if(fixedPipelineKey)fixedPipelineKeys_[gpuPipelineDescKey]=fixedPipelineKey;
+        }
+        if(fixedPipelineKey){
+          gpuGeometry->pipelineDescKey=gpuPipelineDescKey;
+          gpuGeometry->pipelineKey=fixedPipelineKey;
+        }
+      }
+#if defined(__vita__)
+      if(debugGpu)AURORA_VITA_LOG_DEBUG("[aurora-vita] gpu_vertex_probe pipeline=%llx\n",static_cast<unsigned long long>(fixedPipelineKey));
+#endif
+      if(fixedPipelineKey)renderer_->pipelines().pin(fixedPipelineKey);
+      else gpuGeometry=nullptr;
     }
   }
   if(!gpuGeometry&&translatedVertexStateLightweight_) {
@@ -583,7 +622,6 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
     translatedVertexStateLightweight_=false;
   }
-  const auto expansion = translate_primitive_expansion(translate_line_mode(primitive));
   const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
   const auto footprint = gfx::estimate_draw_footprint(source,vertexCount,indexCount,gpuStride);
@@ -798,11 +836,19 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if(gpuGeometry){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
     fixedVertexUniforms_.push_back(gfx::fixed_vertex_uniforms(translatedGpuPipeline_,vertexState));
+    auto& fixed=fixedVertexUniforms_.back();
+    if(translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite){
+      fixed.primitiveExpand={{
+        std::max(expansion.viewportWidth,1.f),std::max(expansion.viewportHeight,1.f),
+        translatedGpuPipeline_.fixedPointSprite?expansion.pointSizePixels:expansion.lineWidthPixels,
+        translatedGpuPipeline_.fixedPointSprite?expansion.pointTexOffset:expansion.lineTexOffset
+      }};
+    }
     gfx::DrawPacket& packet=stream_.emplace_draw();
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
     packet.textures=bindings;packet.uniforms=uniforms;packet.viewport=translate_viewport();packet.scissor=translate_scissor();
-    packet.fixedVertexUniforms=&fixedVertexUniforms_.back();
+    packet.fixedVertexUniforms=&fixed;
     enqueued=true;
     queuedPipelineValid_=false;
   }else if(useStreamed) {

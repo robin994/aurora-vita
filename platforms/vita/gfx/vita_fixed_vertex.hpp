@@ -19,22 +19,29 @@ inline bool supports_fixed_vertex_gpu(const PipelineDesc& pipeline,
                                       const VertexTransformState& state) noexcept {
   if (pipeline.positionIsClipSpace || state.currentPnMatrix >= state.postexMatrices.size()) return false;
   const auto requirements = vertex_pipeline_requirements(pipeline);
-  if (requirements.needBumpBasis) return false;
   if (layout.count > layout.attributes.size() || !layout.streamStride) return false;
+  // A lit/bump draw with both position/normal and texture palettes can exceed
+  // the native vertex-uniform budget on Vita. Keep that combination on the
+  // established CPU path until palettes are moved to a different storage class.
+  if(pipeline.fixedVertexTexMtxMask&&requirements.needNormal)return false;
 #if !defined(AURORA_VITA_RENDERER_GXM)
   // The expanded palette/lighting shader is native-GXM only for now. Keep the
   // vitaGL backend on its proven fixed-current-PN, unlit fast path.
-  if(requirements.needNormal||vertex_layout_has_semantic(layout,VertexSemantic::PnMatrixIndex))return false;
+  if(requirements.needNormal||requirements.needBumpBasis||
+     vertex_layout_has_semantic(layout,VertexSemantic::PnMatrixIndex)||
+     pipeline.fixedVertexTexMtxMask||pipeline.fixedPointSprite||pipeline.fixedLineSprite)return false;
 #endif
-  for (unsigned i=0; i<layout.count; ++i) {
-    const auto& a=layout.attributes[i];
-    if (a.source==VertexSource::None) continue;
-    if (a.semantic>=VertexSemantic::TexMatrixIndex0 && a.semantic<=VertexSemantic::TexMatrixIndex7) return false;
-  }
+  // Line expansion reuses the normal attribute slot for the companion endpoint,
+  // so keep the first implementation to unlit/current-PN geometry. The generic
+  // CPU path remains the fallback for skinned/lit line primitives.
+  if(pipeline.fixedLineSprite&&
+     (requirements.needNormal||pipeline.fixedVertexIndexedPn||pipeline.fixedVertexTexMtxMask))
+    return false;
   const uint8_t generated=pipeline_texgen_compute_mask(pipeline);
   for (unsigned i=0; i<pipeline.texgenCount && i<MaxTextures; ++i) if (generated&(1u<<i)) {
     const auto& t=pipeline.texgens[i];
-    if (texgen_type_is_bump(t.type) || t.matrixFromVertex) return false;
+    if(texgen_type_is_bump(t.type)&&t.embossSource>=i)return false;
+    if (t.matrixFromVertex && (pipeline.fixedVertexTexMtxMask&(1u<<i))==0) return false;
     if (t.type==TexGenType::SRTG && t.source!=TexGenSource::Color0 && t.source!=TexGenSource::Color1) return false;
     if (t.matrix>=0 && 10u+static_cast<unsigned>(t.matrix)>=state.postexMatrices.size()) return false;
     if (t.postMatrix>=static_cast<int>(state.postMatrices.size())) return false;
@@ -46,6 +53,8 @@ inline VertexSemanticMask fixed_vertex_gpu_inputs(const PipelineDesc& pipeline) 
   VertexSemanticMask mask=vertex_semantic_bit(VertexSemantic::Position);
   const auto requirements=vertex_pipeline_requirements(pipeline);
   if(requirements.needNormal)mask|=vertex_semantic_bit(VertexSemantic::Normal);
+  if(requirements.needBumpBasis)
+    mask|=vertex_semantic_bit(VertexSemantic::Binormal)|vertex_semantic_bit(VertexSemantic::Tangent);
   if(pipeline.fixedVertexIndexedPn)mask|=vertex_semantic_bit(VertexSemantic::PnMatrixIndex);
   const uint8_t colors=vertex_pipeline_requirements(pipeline).colorMask;
   for (unsigned i=0;i<2;++i) if (colors&(1u<<i)) {
@@ -55,12 +64,21 @@ inline VertexSemanticMask fixed_vertex_gpu_inputs(const PipelineDesc& pipeline) 
         (pipeline.colorChannels[i+2].lightingEnabled&&pipeline.colorChannels[i+2].ambientSource==ColorSource::Vertex))
       mask|=vertex_semantic_bit(i?VertexSemantic::Color1:VertexSemantic::Color0);
   }
+  const uint8_t generated=pipeline_texgen_compute_mask(pipeline);
   const uint8_t outputs=pipeline_texcoord_mask(pipeline);
-  for (unsigned i=0;i<MaxTextures;++i) if(outputs&(1u<<i)) {
+  for (unsigned i=0;i<MaxTextures;++i) if((generated|outputs)&(1u<<i)) {
     if(i>=pipeline.texgenCount) {
       mask|=vertex_semantic_bit(static_cast<VertexSemantic>(static_cast<unsigned>(VertexSemantic::Tex0)+i));
       continue;
     }
+    if((generated&(1u<<i))==0) {
+      mask|=vertex_semantic_bit(static_cast<VertexSemantic>(static_cast<unsigned>(VertexSemantic::Tex0)+i));
+      continue;
+    }
+    if(pipeline.fixedVertexTexMtxMask&(1u<<i))
+      mask|=vertex_semantic_bit(static_cast<VertexSemantic>(
+          static_cast<unsigned>(VertexSemantic::TexMatrixIndex0)+i));
+    if(texgen_type_is_bump(pipeline.texgens[i].type))continue;
     const auto source=pipeline.texgens[i].source;
     VertexSemantic semantic=VertexSemantic::Position;
     switch(source) {
@@ -96,10 +114,11 @@ inline VertexLayout fixed_vertex_gpu_layout(const PipelineDesc& pipeline) noexce
   for(unsigned i=0;i<MaxTextures;++i)
     if(mask&vertex_semantic_bit(static_cast<VertexSemantic>(static_cast<unsigned>(VertexSemantic::Tex0)+i)))
       add(static_cast<uint8_t>(3+i),3,VertexScalar::F32,false);
-  if(mask&vertex_semantic_bit(VertexSemantic::Normal))add(11,3,VertexScalar::F32,false);
+  if(pipeline.fixedLineSprite||mask&vertex_semantic_bit(VertexSemantic::Normal))add(11,3,VertexScalar::F32,false);
   if(mask&vertex_semantic_bit(VertexSemantic::Binormal))add(12,3,VertexScalar::F32,false);
   if(mask&vertex_semantic_bit(VertexSemantic::Tangent))add(13,3,VertexScalar::F32,false);
-  if(mask&vertex_semantic_bit(VertexSemantic::PnMatrixIndex))add(14,1,VertexScalar::U8,false);
+  if(pipeline.fixedVertexTexMtxMask)add(14,3,VertexScalar::F32,false);
+  else if(mask&vertex_semantic_bit(VertexSemantic::PnMatrixIndex))add(14,1,VertexScalar::U8,false);
   stride=static_cast<uint16_t>((stride+3u)&~3u);
   for(unsigned i=0;i<result.count;++i)result.attributes[i].stride=stride;
   return result;
@@ -115,15 +134,24 @@ inline FixedVertexUniforms fixed_vertex_uniforms(const PipelineDesc& pipeline,
   FixedVertexUniforms result{};
   if(state.currentPnMatrix<state.postexMatrices.size())result.position=state.postexMatrices[state.currentPnMatrix].v;
   if(!state.normalMatrices.empty())result.normal=state.normalMatrices[std::min<unsigned>(state.currentPnMatrix,state.normalMatrices.size()-1)].v;
-  if(pipeline.fixedVertexIndexedPn)for(unsigned i=0;i<10;++i){
+  if(pipeline.fixedVertexIndexedPn||pipeline.fixedVertexTexMtxMask)for(unsigned i=0;i<10;++i){
     result.positionPalette[i]=state.postexMatrices[i].v;
-    result.normalPalette[i]=state.normalMatrices[i].v;
+    if(i<state.normalMatrices.size())result.normalPalette[i]=state.normalMatrices[i].v;
+  }
+  if(pipeline.fixedVertexTexMtxMask)for(unsigned i=0;i<10;++i){
+    result.texturePalette[i]=state.postexMatrices[10u+i].v;
   }
   result.material=state.channelMaterial;
   result.ambient=state.channelAmbient;
   uint8_t lightMask=0;
   for(unsigned ch=0;ch<4;++ch)if(pipeline.colorChannels[ch].lightingEnabled)
     lightMask|=pipeline.colorChannels[ch].lightMask;
+  const uint8_t generated=pipeline_texgen_compute_mask(pipeline);
+  for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;++i)if(generated&(1u<<i)) {
+    const auto type=pipeline.texgens[i].type;
+    if(texgen_type_is_bump(type))
+      lightMask|=static_cast<uint8_t>(1u<<(static_cast<unsigned>(type)-static_cast<unsigned>(TexGenType::Bump0)));
+  }
   for(unsigned i=0;i<MaxLights;++i)if(lightMask&(1u<<i)){
     const auto& src=state.lights[i];
     result.light[i*5+0]=src.position;

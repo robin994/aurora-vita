@@ -108,6 +108,12 @@ struct BackendConfig {
   bool gxm_lit_fixed_vertex_gpu=false;
   size_t static_geometry_budget=0;
 #endif
+  // Extended native-GXM fixed-vertex features. These stay opt-in at the engine
+  // level so ports can hardware-A/B them independently while retaining the
+  // established CPU fallback for every unsupported draw.
+  bool gxm_dynamic_tex_matrix_gpu=false;
+  bool gxm_bump_fixed_vertex_gpu=false;
+  bool gxm_primitive_expand_gpu=false;
   // Minimum vertices for immutable display-list geometry to use the native
   // fixed-vertex GPU cache. Dynamic/untracked sources retain the conservative
   // 48-vertex floor in DrawSink regardless of this value.

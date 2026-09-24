@@ -213,6 +213,16 @@ struct PipelineDesc {
   uint8_t nativeTextureWrapMask = 0; // Swizzled samplers perform wrapping/filtering at seams.
   bool fixedVertexOnGpu = false; // Raw object-space inputs; GX vertex processing runs in the shader.
   bool fixedVertexIndexedPn = false; // Per-vertex GX PNMTXIDX selects the 10-entry position/normal palette.
+  // Per-vertex GX texture-matrix selectors consumed by the native fixed-vertex
+  // shader. Selectors are packed into one float3 vertex attribute so the GXM
+  // path stays within its 15-location attribute budget.
+  uint8_t fixedVertexTexMtxMask = 0;
+  // GX points/lines are expanded to cached triangles. Corner metadata remains
+  // object-space and the native vertex shader performs the viewport-sized
+  // expansion after applying the GX transforms.
+  bool fixedPointSprite = false;
+  bool fixedLineSprite = false;
+  uint8_t fixedPrimitiveTexcoordMask = 0;
   VertexLayout layout{};
   std::array<TexGenDesc, MaxTextures> texgens{};
   uint8_t texgenCount = 0;
@@ -419,6 +429,7 @@ struct FixedVertexUniforms {
   std::array<float,12> normal{{1,0,0,0, 0,1,0,0, 0,0,1,0}};
   std::array<std::array<float,12>,10> positionPalette{};
   std::array<std::array<float,12>,10> normalPalette{};
+  std::array<std::array<float,12>,10> texturePalette{};
   std::array<std::array<float,12>,MaxTextures> texture{};
   std::array<std::array<float,12>,MaxTextures> post{};
   std::array<std::array<float,4>,4> material{};
@@ -426,6 +437,8 @@ struct FixedVertexUniforms {
   // Five vec4s per GX light: position, direction, color, cosine attenuation,
   // distance attenuation. Channel light masks are baked into PipelineDesc.
   std::array<std::array<float,4>,MaxLights*5> light{};
+  // viewport width, viewport height, point/line size in pixels, texcoord offset.
+  std::array<float,4> primitiveExpand{{960.f,544.f,1.f,0.f}};
 };
 struct DrawUniforms {
   std::array<float, 16> mvp{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};

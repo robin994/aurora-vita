@@ -38,7 +38,22 @@ inline void pack_gpu_vertex_inline(uint8_t* dst, const CanonicalVertex& src,
     else if (a.location == 11) detail::copy_vertex_words<3>(dst+a.offset, src.normal);
     else if (a.location == 12) detail::copy_vertex_words<3>(dst+a.offset, src.binormal);
     else if (a.location == 13) detail::copy_vertex_words<3>(dst+a.offset, src.tangent);
-    else if (a.location == 14) dst[a.offset]=src.pnMatrixIndex;
+    else if (a.location == 14) {
+      if(a.scalar==VertexScalar::F32&&a.components==3) {
+        // Three exact 24-bit integers carry PN plus eight raw GX texture-matrix
+        // selectors without consuming eight additional GXM attributes.
+        const uint8_t pn=src.pnMatrixIndex;
+        const auto pack3=[](uint8_t a,uint8_t b,uint8_t c) noexcept {
+          return static_cast<float>(uint32_t(a)|(uint32_t(b)<<8)|(uint32_t(c)<<16));
+        };
+        const float packed[3]{
+          pack3(pn,src.texMatrixIndex[0],src.texMatrixIndex[1]),
+          pack3(src.texMatrixIndex[2],src.texMatrixIndex[3],src.texMatrixIndex[4]),
+          pack3(src.texMatrixIndex[5],src.texMatrixIndex[6],src.texMatrixIndex[7])
+        };
+        detail::copy_vertex_words<3>(dst+a.offset,packed);
+      } else dst[a.offset]=src.pnMatrixIndex;
+    }
   }
 }
 }

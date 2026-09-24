@@ -311,6 +311,9 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.staticGeometryBudget=c.static_geometry_budget;
   dc.staticGeometryMinVertices=c.static_geometry_min_vertices;
   dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
+  dc.allowDynamicTexMatrixGpu=c.gxm_dynamic_tex_matrix_gpu;
+  dc.allowBumpFixedVertexGpu=c.gxm_bump_fixed_vertex_gpu;
+  dc.allowPrimitiveExpansionGpu=c.gxm_primitive_expand_gpu;
   dc.diagnosticDrawLimit=c.diagnostic_draw_limit;
   g_drawSink=std::make_unique<gxbridge::DrawSink>();
   if(!g_drawSink->initialize(*g_renderer,dc)){

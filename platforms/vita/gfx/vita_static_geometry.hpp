@@ -5,6 +5,7 @@
 #include "vita_hash_map.hpp"
 #include "vita_memory_revision.hpp"
 #include <cstdio>
+#include <limits>
 #include <memory>
 
 namespace aurora::vita::gfx {
@@ -25,9 +26,11 @@ public:
   struct Entry {
     BufferSlice vertices{},indices{};
     uint32_t vertexCount=0,indexCount=0;
+    uint64_t pipelineDescKey=0,pipelineKey=0;
     VertexDecodeLayout sourceLayout{};
     VertexLayout gpuLayout{};
     std::vector<uint8_t> raw{};
+    std::vector<uint16_t> sourceIndices{};
     std::vector<Snapshot> snapshots{};
     const uint8_t* stableSource=nullptr;
     size_t stableSourceBytes=0;
@@ -46,19 +49,23 @@ public:
   uint64_t misses() const noexcept { return misses_; }
   uint64_t lookup_fallbacks() const noexcept { return lookupFallbacks_; }
 
-  const Entry* get(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
-                   const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
-                   const VertexTransformState& state,Telemetry* telemetry,
-                   const uint8_t* stableSource=nullptr) noexcept {
+  Entry* get(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
+             const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
+             const VertexTransformState& state,Telemetry* telemetry,
+             const uint8_t* stableSource=nullptr,
+             const uint16_t* sourceIndices=nullptr,uint32_t sourceIndexCount=0) noexcept {
     if(!raw||!count||!layout.streamStride||layout.count>layout.attributes.size()||
        count>bytes/layout.streamStride||!pipeline.fixedVertexOnGpu)return nullptr;
+    if(sourceIndexCount&&(!sourceIndices||primitive!=SourcePrimitive::Triangles||
+                         pipeline.fixedPointSprite||pipeline.fixedLineSprite))return nullptr;
     bytes=static_cast<size_t>(count)*layout.streamStride;
     const VertexLayout gpuLayout=fixed_vertex_gpu_layout(pipeline);
+    const VertexSemanticMask used=fixed_vertex_gpu_inputs(pipeline);
     uint64_t key=0;
     auto* detailed=telemetry&&telemetry->split_vertex_phases()?telemetry:nullptr;
     { ScopedTelemetryPhase phase(detailed,TelemetryPhase::GeometryKey);
-      key=stableSource?make_stable_key(stableSource,count,primitive,layout,gpuLayout):
-                       make_key(raw,bytes,count,primitive,layout,gpuLayout);
+      key=stableSource?make_stable_key(stableSource,count,primitive,layout,gpuLayout,used,sourceIndices,sourceIndexCount):
+                       make_key(raw,bytes,count,primitive,layout,gpuLayout,used,sourceIndices,sourceIndexCount);
     }
     auto it=entries_.find(key);
     if(it!=entries_.end()) {
@@ -68,6 +75,9 @@ public:
       // Hashes select a candidate only. Every byte that could influence a
       // decoded attribute is checked before an immutable GPU buffer is reused.
       if(!same_layout(layout,e.sourceLayout)||!same_gpu_layout(gpuLayout,e.gpuLayout))return nullptr;
+      if(e.sourceIndices.size()!=sourceIndexCount||
+         (sourceIndexCount&&!byte_spans_equal(sourceIndices,e.sourceIndices.data(),
+                                              size_t(sourceIndexCount)*sizeof(uint16_t))))return nullptr;
       if(stableSource) {
         if(e.stableSource!=stableSource||e.stableSourceBytes!=bytes||
            memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
@@ -93,11 +103,66 @@ public:
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
     entry->stableSource=stableSource;entry->stableSourceBytes=stableSource?bytes:0;
     entry->stableSourceRevision=stableSource?memory_range_revision(stableSource,bytes):0;
-    if(!snapshot_sources(raw,bytes,count,layout,fixed_vertex_gpu_inputs(pipeline),entry->snapshots,stableSource!=nullptr))return nullptr;
+    if(!snapshot_sources(raw,bytes,count,layout,used,entry->snapshots,stableSource!=nullptr))return nullptr;
     size_t storedBytes=stableSource?0:bytes;
     for(const auto& s:entry->snapshots)storedBytes+=s.revisionTracked?0:s.bytes.size();
+    if(sourceIndexCount){
+      entry->sourceIndices.assign(sourceIndices,sourceIndices+sourceIndexCount);
+      storedBytes+=size_t(sourceIndexCount)*sizeof(uint16_t);
+    }
     if(storedBytes>budget_-bytes_)return nullptr;
-    if(!prepare_draw_into(scratch_,raw,bytes,count,primitive,layout,pipeline,state,nullptr,{},telemetry,true))return nullptr;
+    if(pipeline.fixedPointSprite||pipeline.fixedLineSprite) {
+      scratch_.error=PrepareDrawError::None;
+      scratch_.vertices.clear();scratch_.indices.clear();scratch_.scratch.clear();
+      scratch_.scratch.resize(count);
+      for(uint32_t i=0;i<count;++i)
+        if(!decode_vertex_into(raw,bytes,i,layout,scratch_.scratch[i],used))return nullptr;
+      if(pipeline.fixedPointSprite) {
+        if(count>std::numeric_limits<uint16_t>::max()/4u)return nullptr;
+        scratch_.vertices.reserve(size_t(count)*4u);
+        scratch_.indices.reserve(size_t(count)*6u);
+        for(uint32_t i=0;i<count;++i){
+          const uint32_t base=static_cast<uint32_t>(scratch_.vertices.size());
+          for(uint32_t corner=0;corner<4;++corner){
+            auto v=scratch_.scratch[i];v.position[3]=static_cast<float>(corner);
+            scratch_.vertices.push_back(v);
+          }
+          const uint16_t b=static_cast<uint16_t>(base);
+          scratch_.indices.insert(scratch_.indices.end(),{b,uint16_t(b+1),uint16_t(b+3),
+                                                          uint16_t(b+3),uint16_t(b+2),b});
+        }
+      } else {
+        const uint32_t segments=primitive==SourcePrimitive::Lines?count/2u:(count>1u?count-1u:0u);
+        if((primitive==SourcePrimitive::Lines&&(count&1u))||
+           segments>std::numeric_limits<uint16_t>::max()/4u)return nullptr;
+        scratch_.vertices.reserve(size_t(segments)*4u);
+        scratch_.indices.reserve(size_t(segments)*6u);
+        for(uint32_t s=0;s<segments;++s){
+          const uint32_t ai=primitive==SourcePrimitive::Lines?s*2u:s;
+          const uint32_t bi=ai+1u;
+          const auto a=scratch_.scratch[ai],b=scratch_.scratch[bi];
+          const uint32_t base=static_cast<uint32_t>(scratch_.vertices.size());
+          for(uint32_t corner=0;corner<4;++corner){
+            const bool useB=corner>=2u;
+            auto v=useB?b:a;const auto& other=useB?a:b;
+            v.normal[0]=other.position[0];v.normal[1]=other.position[1];v.normal[2]=other.position[2];
+            v.position[3]=static_cast<float>(corner);
+            scratch_.vertices.push_back(v);
+          }
+          const uint16_t bs=static_cast<uint16_t>(base);
+          scratch_.indices.insert(scratch_.indices.end(),{bs,uint16_t(bs+1),uint16_t(bs+3),
+                                                          uint16_t(bs+3),uint16_t(bs+2),bs});
+        }
+      }
+      scratch_.primitive=Primitive::Triangles;scratch_.positionIsClipSpace=false;
+    } else {
+      if(!prepare_draw_into(scratch_,raw,bytes,count,primitive,layout,pipeline,state,nullptr,{},telemetry,
+                            sourceIndexCount==0))return nullptr;
+      if(sourceIndexCount){
+        for(uint32_t i=0;i<sourceIndexCount;++i)if(sourceIndices[i]>=scratch_.vertices.size())return nullptr;
+        scratch_.indices.assign(sourceIndices,sourceIndices+sourceIndexCount);
+      }
+    }
     if(scratch_.vertices.empty()||scratch_.indices.empty())return nullptr;
     const size_t stride=gpuLayout.attributes[0].stride;
     const size_t vertexBytes=scratch_.vertices.size()*stride;
@@ -206,10 +271,11 @@ private:
     return byte_span_hash(data,size);
   }
   static uint64_t make_key(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
-                           const VertexDecodeLayout& layout,const VertexLayout& gpu) noexcept {
+                           const VertexDecodeLayout& layout,const VertexLayout& gpu,
+                           VertexSemanticMask used,const uint16_t* indices,uint32_t indexCount) noexcept {
     uint32_t h=2166136261u;
     const auto add=[&](uint64_t x){h=(h^static_cast<uint32_t>(x))*16777619u;h=(h^static_cast<uint32_t>(x>>32))*16777619u;};
-    add(count);add(static_cast<uint8_t>(primitive));add(layout.count);add(layout.streamStride);add(layout.streamLittleEndian);
+    add(count);add(static_cast<uint8_t>(primitive));add(used);add(layout.count);add(layout.streamStride);add(layout.streamLittleEndian);
     for(unsigned i=0;i<layout.count;++i) {
       const auto& a=layout.attributes[i];
       add(static_cast<uint8_t>(a.semantic));add(static_cast<uint8_t>(a.source));add(static_cast<uint8_t>(a.component));
@@ -218,15 +284,17 @@ private:
     }
     add(gpu.count);
     for(unsigned i=0;i<gpu.count;++i) {const auto& a=gpu.attributes[i];add(a.location);add(a.components);add(static_cast<uint8_t>(a.scalar));add(a.normalized);add(a.offset);add(a.stride);}
-    const uint64_t content=hash_bytes(raw,bytes);
+    uint64_t content=hash_bytes(raw,bytes);
+    if(indices&&indexCount)content=XXH3_64bits_withSeed(indices,size_t(indexCount)*sizeof(uint16_t),content);
     const uint64_t metadata=(static_cast<uint64_t>(h)<<32)|h;
     return content ^ metadata;
   }
   static uint64_t make_stable_key(const uint8_t* stable,uint32_t count,SourcePrimitive primitive,
-                                  const VertexDecodeLayout& layout,const VertexLayout& gpu) noexcept {
+                                  const VertexDecodeLayout& layout,const VertexLayout& gpu,
+                                  VertexSemanticMask used,const uint16_t* indices,uint32_t indexCount) noexcept {
     uint32_t h=2166136261u;
     const auto add=[&](uint64_t x){h=(h^static_cast<uint32_t>(x))*16777619u;h=(h^static_cast<uint32_t>(x>>32))*16777619u;};
-    add(reinterpret_cast<uintptr_t>(stable));add(count);add(static_cast<uint8_t>(primitive));
+    add(reinterpret_cast<uintptr_t>(stable));add(count);add(static_cast<uint8_t>(primitive));add(used);
     add(layout.count);add(layout.streamStride);add(layout.streamLittleEndian);
     for(unsigned i=0;i<layout.count;++i) {
       const auto& a=layout.attributes[i];
@@ -238,7 +306,9 @@ private:
     for(unsigned i=0;i<gpu.count;++i) {const auto& a=gpu.attributes[i];add(a.location);add(a.components);add(static_cast<uint8_t>(a.scalar));add(a.normalized);add(a.offset);add(a.stride);}
     const uint64_t metadata=(static_cast<uint64_t>(h)<<32)|h;
     const uintptr_t address=reinterpret_cast<uintptr_t>(stable);
-    return XXH3_64bits_withSeed(&address,sizeof(address),metadata);
+    uint64_t key=XXH3_64bits_withSeed(&address,sizeof(address),metadata);
+    if(indices&&indexCount)key=XXH3_64bits_withSeed(indices,size_t(indexCount)*sizeof(uint16_t),key);
+    return key;
   }
   Renderer& renderer_;
   size_t budget_=0,bytes_=0;

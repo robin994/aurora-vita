@@ -53,6 +53,9 @@ struct DrawSinkConfig {
   size_t staticGeometryBudget = 0; // Zero keeps the established CPU vertex path.
   uint32_t staticGeometryMinVertices = 48;
   bool allowLitFixedVertexGpu = false;
+  bool allowDynamicTexMatrixGpu = false;
+  bool allowBumpFixedVertexGpu = false;
+  bool allowPrimitiveExpansionGpu = false;
   uint32_t diagnosticDrawLimit = 0;
 };
 
@@ -145,6 +148,9 @@ private:
   bool strictUnsupported_ = false;
   bool strictFailed_ = false;
   bool allowLitFixedVertexGpu_ = false;
+  bool allowDynamicTexMatrixGpu_ = false;
+  bool allowBumpFixedVertexGpu_ = false;
+  bool allowPrimitiveExpansionGpu_ = false;
   uint32_t staticGeometryMinVertices_ = 48;
   uint32_t diagnosticDrawLimit_ = 0;
   uint32_t frameDrawIndex_ = 0;

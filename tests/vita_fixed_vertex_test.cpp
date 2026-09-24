@@ -158,6 +158,51 @@ TEST(VitaFixedVertex, CacheReusesRawGeometryAcrossCameraChanges) {
   ASSERT_NE(second,nullptr);EXPECT_EQ(second->vertices.buffer,buffer);EXPECT_EQ(cache.hits(),1u);
 }
 
+TEST(VitaFixedVertex, PersistentCacheAcceptsExplicitTriangleIndices) {
+  IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache cache(renderer,1024*1024);
+  const std::array<uint16_t,3> indices{{2,1,0}};
+  auto* first=cache.get(f.raw.data(),3,3,SourcePrimitive::Triangles,f.layout,f.pipeline,
+                        f.state,nullptr,nullptr,indices.data(),indices.size());
+  ASSERT_NE(first,nullptr);
+  EXPECT_EQ(first->vertexCount,3u);
+  EXPECT_EQ(first->indexCount,3u);
+  const auto vb=first->vertices.buffer;
+  auto* second=cache.get(f.raw.data(),3,3,SourcePrimitive::Triangles,f.layout,f.pipeline,
+                         f.state,nullptr,nullptr,indices.data(),indices.size());
+  ASSERT_NE(second,nullptr);
+  EXPECT_EQ(second->vertices.buffer,vb);
+  EXPECT_EQ(cache.hits(),1u);
+}
+
+TEST(VitaFixedVertex, PersistentCacheExpandsStablePointsAndLinesOnce) {
+  IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache cache(renderer,1024*1024);
+  f.pipeline.fixedPointSprite=true;
+  auto* point=cache.get(f.raw.data(),3,3,SourcePrimitive::Points,f.layout,f.pipeline,f.state,nullptr);
+  ASSERT_NE(point,nullptr);
+  EXPECT_EQ(point->vertexCount,12u);
+  EXPECT_EQ(point->indexCount,18u);
+
+  f.pipeline.fixedPointSprite=false;
+  f.pipeline.fixedLineSprite=true;
+  auto* line=cache.get(f.raw.data(),2,2,SourcePrimitive::Lines,f.layout,f.pipeline,f.state,nullptr);
+  ASSERT_NE(line,nullptr);
+  EXPECT_EQ(line->vertexCount,4u);
+  EXPECT_EQ(line->indexCount,6u);
+}
+
+TEST(VitaFixedVertex, PackedMatrixSelectorLayoutUsesOneFloat3Slot) {
+  IndexedFixture f;
+  f.pipeline.fixedVertexTexMtxMask=0x81;
+  const auto layout=fixed_vertex_gpu_layout(f.pipeline);
+  ASSERT_GT(layout.count,1u);
+  const auto& selector=layout.attributes[layout.count-1];
+  EXPECT_EQ(selector.location,14u);
+  EXPECT_EQ(selector.components,3u);
+  EXPECT_EQ(selector.scalar,VertexScalar::F32);
+}
+
 TEST(VitaFixedVertex, ChangedArrayDataCannotReuseAnInFlightImmutableBuffer) {
   IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
   StaticGeometryCache cache(renderer,1024*1024);

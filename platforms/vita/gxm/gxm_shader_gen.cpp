@@ -238,7 +238,13 @@ std::string validate_pipeline(const gfx::PipelineDesc& d) {
     if (a.location == 0 && (a.components != 4 || a.scalar != VertexScalar::F32)) return "position must be float4";
     if (a.location >= 3 && a.location <= 10 && a.components != 3) return "prepared texture coordinates must have three components";
     if (a.location >= 11 && a.location <= 13 && a.components != 3) return "fixed GX basis inputs must have three components";
-    if (a.location == 14 && (a.components != 1 || a.scalar != VertexScalar::U8)) return "GX PN matrix selector must be u8";
+    if (a.location == 14) {
+      if(d.fixedVertexTexMtxMask) {
+        if(a.components!=3||a.scalar!=VertexScalar::F32)return "packed GX matrix selectors must be float3";
+      } else if(a.components != 1 || a.scalar != VertexScalar::U8) {
+        return "GX PN matrix selector must be u8";
+      }
+    }
     if ((a.location == 1 || a.location == 2) && a.components != 4) return "prepared colors must have four components";
     supplied |= 1u << a.location;
   }
@@ -270,6 +276,9 @@ std::string fixed_vertex_source_cg(TexGenSource source) {
 
 bool fixed_vertex_lighting(const PipelineDesc& d) noexcept {
   for(const auto& c:d.colorChannels)if(c.lightingEnabled)return true;
+  const uint8_t generated=pipeline_texgen_compute_mask(d);
+  for(unsigned i=0;i<d.texgenCount&&i<MaxTextures;++i)
+    if((generated&(1u<<i))&&texgen_type_is_bump(d.texgens[i].type))return true;
   return false;
 }
 
@@ -330,6 +339,9 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   if (!out.error.empty()) return out;
   out.textureMask = pipeline_sampled_texture_mask(d);
   out.texcoordMask = pipeline_texcoord_mask(d);
+  const uint8_t fixedTexgenMask=d.fixedVertexOnGpu?pipeline_texgen_compute_mask(d):0;
+  const uint8_t fixedTexcoordWorkMask=d.fixedVertexOnGpu?
+      static_cast<uint8_t>(fixedTexgenMask|out.texcoordMask):0;
   out.colorMask = d.fixedVertexOnGpu ? vertex_pipeline_requirements(d).colorMask : pipeline_raster_color_mask(d);
   std::ostringstream vs, fs;
   std::vector<std::string> vp{"float4 a_position : POSITION", "out float4 v_position : POSITION"};
@@ -359,14 +371,21 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))vp.push_back("float3 a_normal : TEXCOORD8");
     if(fixedInputs&vertex_semantic_bit(VertexSemantic::Binormal))vp.push_back("float3 a_binormal : TEXCOORD9");
     if(fixedInputs&vertex_semantic_bit(VertexSemantic::Tangent))vp.push_back("float3 a_tangent : TEXCOORD10");
+    if(d.fixedLineSprite)vp.push_back("float3 a_line_other : TEXCOORD8");
+    if(d.fixedVertexTexMtxMask)vp.push_back("float3 a_matrix_sel : TEXCOORD11");
+    else if(d.fixedVertexIndexedPn)vp.push_back("float a_pn_mtx : TEXCOORD11");
     if(d.fixedVertexIndexedPn) {
-      vp.push_back("float a_pn_mtx : TEXCOORD11");
       vp.push_back("uniform float4 u_gx_position_palette[30]");
       if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))vp.push_back("uniform float4 u_gx_normal_palette[30]");
     } else {
       vp.push_back("uniform float4 u_gx_position[3]");
       if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))vp.push_back("uniform float4 u_gx_normal[3]");
     }
+    if(d.fixedVertexTexMtxMask) {
+      if(!d.fixedVertexIndexedPn)vp.push_back("uniform float4 u_gx_position_palette[30]");
+      vp.push_back("uniform float4 u_gx_texture_palette[30]");
+    }
+    if(d.fixedPointSprite||d.fixedLineSprite)vp.push_back("uniform float4 u_gx_primitive_expand");
     vp.push_back("uniform float4 u_gx_material[4]");
     if(fixed_vertex_lighting(d)) {
       vp.push_back("uniform float4 u_gx_ambient[4]");
@@ -382,30 +401,64 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     if (out.texcoordMask & (1u << i)) {
       vp.push_back("out float3 v_tex" + n + " : TEXCOORD" + n);
       fp.push_back("float3 v_tex" + n + " : TEXCOORD" + n);
-      if(d.fixedVertexOnGpu && i<d.texgenCount) {
-        const auto& t=d.texgens[i];
-        if(t.matrix>=0&&t.type!=TexGenType::SRTG)vp.push_back("uniform float4 u_gx_texture"+n+"[3]");
-        if(t.postMatrix>=0)vp.push_back("uniform float4 u_gx_post"+n+"[3]");
-      }
+    }
+    if(d.fixedVertexOnGpu&&(fixedTexgenMask&(1u<<i))&&i<d.texgenCount) {
+      const auto& t=d.texgens[i];
+      if(t.matrix>=0&&t.type!=TexGenType::SRTG)vp.push_back("uniform float4 u_gx_texture"+n+"[3]");
+      if(t.postMatrix>=0)vp.push_back("uniform float4 u_gx_post"+n+"[3]");
     }
     if (out.textureMask & (1u << i)) fp.push_back("uniform sampler2D u_tex" + n + " : TEXUNIT" + n);
   }
   vs << "void main(\n"; signature(vs, vp); vs << "){\n";
   if(d.fixedVertexOnGpu) {
     vs << "float4 object_pos=float4(a_position.xyz,1.0);\n";
+    if(d.fixedVertexTexMtxMask) {
+      vs << "float gx_ms0=floor(a_matrix_sel.x+0.5),gx_ms1=floor(a_matrix_sel.y+0.5),gx_ms2=floor(a_matrix_sel.z+0.5);\n"
+            "float gx_pn=fmod(gx_ms0,256.0);"
+            "float gx_tm0=fmod(floor(gx_ms0/256.0),256.0);float gx_tm1=fmod(floor(gx_ms0/65536.0),256.0);"
+            "float gx_tm2=fmod(gx_ms1,256.0);float gx_tm3=fmod(floor(gx_ms1/256.0),256.0);float gx_tm4=fmod(floor(gx_ms1/65536.0),256.0);"
+            "float gx_tm5=fmod(gx_ms2,256.0);float gx_tm6=fmod(floor(gx_ms2/256.0),256.0);float gx_tm7=fmod(floor(gx_ms2/65536.0),256.0);\n";
+    }
     if(d.fixedVertexIndexedPn) {
-      vs << "int gxmi=(int)clamp(floor(a_pn_mtx+0.5),0.0,9.0)*3;\n"
+      vs << "int gxmi=(int)clamp(floor("<<(d.fixedVertexTexMtxMask?"gx_pn":"a_pn_mtx")<<"+0.5),0.0,9.0)*3;\n"
             "float3 mv=float3(dot(u_gx_position_palette[gxmi],object_pos),dot(u_gx_position_palette[gxmi+1],object_pos),dot(u_gx_position_palette[gxmi+2],object_pos));\n";
       if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))
         vs << "float3 gx_nrm=float3(dot(u_gx_normal_palette[gxmi].xyz,a_normal),dot(u_gx_normal_palette[gxmi+1].xyz,a_normal),dot(u_gx_normal_palette[gxmi+2].xyz,a_normal));"
               "float gx_nl2=dot(gx_nrm,gx_nrm);gx_nrm=gx_nl2>0.00000000000000000001?gx_nrm/sqrt(gx_nl2):float3(0.0);\n";
+      if(fixedInputs&vertex_semantic_bit(VertexSemantic::Binormal))
+        vs << "float3 gx_bin=float3(dot(u_gx_normal_palette[gxmi].xyz,a_binormal),dot(u_gx_normal_palette[gxmi+1].xyz,a_binormal),dot(u_gx_normal_palette[gxmi+2].xyz,a_binormal));"
+              "float gx_bl2=dot(gx_bin,gx_bin);gx_bin=gx_bl2>0.00000000000000000001?gx_bin/sqrt(gx_bl2):float3(0.0);\n";
+      if(fixedInputs&vertex_semantic_bit(VertexSemantic::Tangent))
+        vs << "float3 gx_tan=float3(dot(u_gx_normal_palette[gxmi].xyz,a_tangent),dot(u_gx_normal_palette[gxmi+1].xyz,a_tangent),dot(u_gx_normal_palette[gxmi+2].xyz,a_tangent));"
+              "float gx_tl2=dot(gx_tan,gx_tan);gx_tan=gx_tl2>0.00000000000000000001?gx_tan/sqrt(gx_tl2):float3(0.0);\n";
     } else {
       vs << "float3 mv=float3(dot(u_gx_position[0],object_pos),dot(u_gx_position[1],object_pos),dot(u_gx_position[2],object_pos));\n";
       if(fixedInputs&vertex_semantic_bit(VertexSemantic::Normal))
         vs << "float3 gx_nrm=float3(dot(u_gx_normal[0].xyz,a_normal),dot(u_gx_normal[1].xyz,a_normal),dot(u_gx_normal[2].xyz,a_normal));"
               "float gx_nl2=dot(gx_nrm,gx_nrm);gx_nrm=gx_nl2>0.00000000000000000001?gx_nrm/sqrt(gx_nl2):float3(0.0);\n";
+      if(fixedInputs&vertex_semantic_bit(VertexSemantic::Binormal))
+        vs << "float3 gx_bin=float3(dot(u_gx_normal[0].xyz,a_binormal),dot(u_gx_normal[1].xyz,a_binormal),dot(u_gx_normal[2].xyz,a_binormal));"
+              "float gx_bl2=dot(gx_bin,gx_bin);gx_bin=gx_bl2>0.00000000000000000001?gx_bin/sqrt(gx_bl2):float3(0.0);\n";
+      if(fixedInputs&vertex_semantic_bit(VertexSemantic::Tangent))
+        vs << "float3 gx_tan=float3(dot(u_gx_normal[0].xyz,a_tangent),dot(u_gx_normal[1].xyz,a_tangent),dot(u_gx_normal[2].xyz,a_tangent));"
+              "float gx_tl2=dot(gx_tan,gx_tan);gx_tan=gx_tl2>0.00000000000000000001?gx_tan/sqrt(gx_tl2):float3(0.0);\n";
     }
-    vs << "float4 p=u_mvp[0]*mv.x+u_mvp[1]*mv.y+u_mvp[2]*mv.z+u_mvp[3]*a_position.w;\n";
+    vs << "float4 p=u_mvp[0]*mv.x+u_mvp[1]*mv.y+u_mvp[2]*mv.z+u_mvp[3]*"
+       <<((d.fixedPointSprite||d.fixedLineSprite)?"1.0":"a_position.w")<<";\n";
+    if(d.fixedPointSprite) {
+      vs << "float gx_corner=floor(a_position.w+0.5);float gx_sx=fmod(gx_corner,2.0)>0.5?1.0:-1.0;"
+            "float gx_sy=gx_corner>=2.0?1.0:-1.0;"
+            "p.x+=gx_sx*(u_gx_primitive_expand.z/u_gx_primitive_expand.x)*p.w;"
+            "p.y+=gx_sy*(u_gx_primitive_expand.z/u_gx_primitive_expand.y)*p.w;\n";
+    } else if(d.fixedLineSprite) {
+      vs << "float4 gx_other=float4(a_line_other,1.0);"
+            "float3 gx_omv=float3(dot(u_gx_position[0],gx_other),dot(u_gx_position[1],gx_other),dot(u_gx_position[2],gx_other));"
+            "float4 gx_op=u_mvp[0]*gx_omv.x+u_mvp[1]*gx_omv.y+u_mvp[2]*gx_omv.z+u_mvp[3];"
+            "float2 gx_d=(gx_op.xy/gx_op.w-p.xy/p.w)*0.5*u_gx_primitive_expand.xy;"
+            "float gx_dl=sqrt(dot(gx_d,gx_d));float2 gx_perp=gx_dl>0.0000000001?float2(-gx_d.y,gx_d.x)/gx_dl:float2(0.0,1.0);"
+            "float gx_side=fmod(floor(a_position.w+0.5),2.0)>0.5?1.0:-1.0;"
+            "p.xy+=gx_perp*gx_side*(u_gx_primitive_expand.z/u_gx_primitive_expand.xy)*p.w;\n";
+    }
   } else {
     vs << "float4 p=";
     if (d.positionIsClipSpace) vs << "a_position;\n";
@@ -421,20 +474,57 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
       emit_fixed_channel_cg(vs,d,i,i,false);
       emit_fixed_channel_cg(vs,d,i+2,i,true);
     }
-    for(unsigned i=0;i<MaxTextures;++i)if(out.texcoordMask&(1u<<i)) {
+    for(unsigned i=0;i<MaxTextures;++i)if(fixedTexcoordWorkMask&(1u<<i)) {
       const auto n=std::to_string(i);
-      if(i>=d.texgenCount){vs<<"v_tex"<<n<<"=a_tex"<<n<<";\n";continue;}
+      vs<<"float3 gx_tc"<<n<<";\n";
+      if(i>=d.texgenCount||(fixedTexgenMask&(1u<<i))==0){
+        vs<<"gx_tc"<<n<<"=a_tex"<<n<<";";
+        if(d.fixedPointSprite&&(d.fixedPrimitiveTexcoordMask&(1u<<i)))
+          vs<<"if(fmod(floor(a_position.w+0.5),2.0)>0.5)gx_tc"<<n<<".x+=u_gx_primitive_expand.w;"
+               "if(floor(a_position.w+0.5)>=2.0)gx_tc"<<n<<".y+=u_gx_primitive_expand.w;";
+        else if(d.fixedLineSprite&&(d.fixedPrimitiveTexcoordMask&(1u<<i)))
+          vs<<"if(fmod(floor(a_position.w+0.5),2.0)>0.5)gx_tc"<<n<<".y+=u_gx_primitive_expand.w;";
+        vs<<"\n";
+        continue;
+      }
       const auto& t=d.texgens[i];
+      if(texgen_type_is_bump(t.type)) {
+        const unsigned src=t.embossSource;
+        const unsigned light=static_cast<unsigned>(t.type)-static_cast<unsigned>(TexGenType::Bump0);
+        vs<<"{float3 gx_ld=u_gx_light["<<light*5u<<"].xyz-mv;float gx_ll=sqrt(max(dot(gx_ld,gx_ld),0.00000000000000000001));gx_ld/=gx_ll;"
+             "gx_tc"<<n<<"=float3(gx_tc"<<src<<".xy+float2(dot(gx_ld,gx_tan),dot(gx_ld,gx_bin)),1.0);";
+        if(d.fixedPointSprite&&(d.fixedPrimitiveTexcoordMask&(1u<<i)))
+          vs<<"if(fmod(floor(a_position.w+0.5),2.0)>0.5)gx_tc"<<n<<".x+=u_gx_primitive_expand.w;"
+               "if(floor(a_position.w+0.5)>=2.0)gx_tc"<<n<<".y+=u_gx_primitive_expand.w;";
+        else if(d.fixedLineSprite&&(d.fixedPrimitiveTexcoordMask&(1u<<i)))
+          vs<<"if(fmod(floor(a_position.w+0.5),2.0)>0.5)gx_tc"<<n<<".y+=u_gx_primitive_expand.w;";
+        vs<<"}\n";
+        continue;
+      }
       vs<<"{float4 src="<<fixed_vertex_source_cg(t.source)<<";float3 tc;\n";
       if(t.type==TexGenType::SRTG)vs<<"tc=float3(src.xy,1.0);\n";
-      else if(t.matrix<0)vs<<"tc=src.xyz;\n";
+      else if(t.matrixFromVertex&&(d.fixedVertexTexMtxMask&(1u<<i))) {
+        vs<<"float gx_sel=gx_tm"<<i<<";if(gx_sel<254.5){int gx_tmi=(int)clamp(floor(gx_sel/3.0),0.0,19.0);"
+             "if(gx_tmi<10){int gx_tb=gx_tmi*3;tc=float3(dot(u_gx_position_palette[gx_tb],src),dot(u_gx_position_palette[gx_tb+1],src),dot(u_gx_position_palette[gx_tb+2],src));}"
+             "else{int gx_tb=(gx_tmi-10)*3;tc=float3(dot(u_gx_texture_palette[gx_tb],src),dot(u_gx_texture_palette[gx_tb+1],src),dot(u_gx_texture_palette[gx_tb+2],src));}}";
+        if(t.matrix<0)vs<<"else tc=src.xyz;\n";
+        else vs<<"else tc=float3(dot(u_gx_texture"<<n<<"[0],src),dot(u_gx_texture"<<n<<"[1],src),dot(u_gx_texture"<<n<<"[2],src));\n";
+      } else if(t.matrix<0)vs<<"tc=src.xyz;\n";
       else vs<<"tc=float3(dot(u_gx_texture"<<n<<"[0],src),dot(u_gx_texture"<<n<<"[1],src),dot(u_gx_texture"<<n<<"[2],src));\n";
       if(t.type==TexGenType::Matrix2x4)vs<<"tc.z=1.0;\n";
       if(t.normalize)vs<<"float l=sqrt(dot(tc,tc));tc=l>0.0000000001?tc/l:float3(0.0);\n";
       if(t.postMatrix>=0)vs<<"float4 pt=float4(tc,1.0);tc=float3(dot(u_gx_post"<<n<<"[0],pt),dot(u_gx_post"<<n<<"[1],pt),dot(u_gx_post"<<n<<"[2],pt));\n";
       if(t.type!=TexGenType::Matrix3x4)vs<<"tc.z=1.0;\n";
-      vs<<"v_tex"<<n<<"=tc;}\n";
+      vs<<"gx_tc"<<n<<"=tc;";
+      if(d.fixedPointSprite&&(d.fixedPrimitiveTexcoordMask&(1u<<i)))
+        vs<<"if(fmod(floor(a_position.w+0.5),2.0)>0.5)gx_tc"<<n<<".x+=u_gx_primitive_expand.w;"
+             "if(floor(a_position.w+0.5)>=2.0)gx_tc"<<n<<".y+=u_gx_primitive_expand.w;";
+      else if(d.fixedLineSprite&&(d.fixedPrimitiveTexcoordMask&(1u<<i)))
+        vs<<"if(fmod(floor(a_position.w+0.5),2.0)>0.5)gx_tc"<<n<<".y+=u_gx_primitive_expand.w;";
+      vs<<"}\n";
     }
+    for(unsigned i=0;i<MaxTextures;++i)if(out.texcoordMask&(1u<<i))
+      vs<<"v_tex"<<i<<"=gx_tc"<<i<<";\n";
   } else {
     for (unsigned i = 0; i < 2; ++i) if (out.colorMask & (1u << i)) vs << "v_color" << i << "=a_color" << i << ";\n";
     for (unsigned i = 0; i < MaxTextures; ++i) if (out.texcoordMask & (1u << i)) vs << "v_tex" << i << "=a_tex" << i << ";\n";
