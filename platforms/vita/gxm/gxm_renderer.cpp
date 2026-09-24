@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include "../vita_diag.hpp"
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -26,6 +27,15 @@
 namespace aurora::vita::gxm {
 namespace {
 using namespace gfx;
+
+inline uint64_t diagnostic_time_us() noexcept {
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+  return 0;
+#else
+  return sceKernelGetProcessTimeWide();
+#endif
+}
+
 struct DisplayRequest {
   void* address;
   uint32_t width, height, stride;
@@ -34,11 +44,15 @@ struct DisplayRequest {
 };
 
 void log_memory_state(const char* phase) {
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+  (void)phase;
+  return;
+#else
   const auto stats = memory_stats();
   SceKernelFreeMemorySizeInfo freeMemory{};
   freeMemory.size = sizeof(freeMemory);
   const int freeResult = sceKernelGetFreeMemorySize(&freeMemory);
-  std::fprintf(stderr,
+  AURORA_VITA_DIAGF(
       "[aurora-gxm] memory phase=%s "
       "cdram=%llu peak=%llu allocs=%u pool=%llu pool_used=%llu pool_peak=%llu "
       "user=%llu peak=%llu allocs=%u "
@@ -91,6 +105,7 @@ void log_memory_state(const char* phase) {
         unsigned(freeResult));
     std::fclose(file);
   }
+#endif
 }
 
 void display_callback(const void* opaque) {
@@ -110,11 +125,17 @@ void display_callback(const void* opaque) {
 void* patch_alloc(void*, SceSize bytes) { return std::malloc(bytes); }
 void patch_free(void*, void* p) { std::free(p); }
 void shader_log(const char* message, shark_log_level level, int line) {
-  std::fprintf(stderr, "[aurora-gxm][shader] level=%d line=%d %s\n", int(level), line, message ? message : "");
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+  (void)message;
+  (void)level;
+  (void)line;
+#else
+  AURORA_VITA_DIAGF( "[aurora-gxm][shader] level=%d line=%d %s\n", int(level), line, message ? message : "");
   if (FILE* file = std::fopen("ux0:data/SmashMeleeVita/gxm_shader.log", "a")) {
     std::fprintf(file, "level=%d line=%d %s\n", int(level), line, message ? message : "");
     std::fclose(file);
   }
+#endif
 }
 SceGxmAttributeFormat attribute_format(VertexScalar s, bool normalized) {
   switch (s) {
@@ -258,7 +279,7 @@ NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
 struct Renderer::Impl {
   enum class SceneEndReason : uint8_t { EndFrame, TargetSwitch, Transfer, DisplayCopy, Finish };
   struct Surface { MemoryBlock memory; SceGxmColorSurface color{}; SceGxmSyncObject* sync = nullptr; };
-  struct Buffer { MemoryBlock memory; size_t bytes = 0; bool inFlight = false; };
+  struct Buffer { MemoryBlock memory; size_t bytes = 0; uint64_t flightGeneration = 0; };
   struct Texture {
     MemoryBlock memory, depth;
     SceGxmTexture descriptor{};
@@ -271,7 +292,8 @@ struct Renderer::Impl {
     bool swizzled = false;
     SamplerDesc descriptorSampler{};
     bool descriptorSamplerValid = false;
-    bool inFlight = false, depthValid = false;
+    uint64_t flightGeneration = 0;
+    bool depthValid = false;
     ~Texture() {
       if (sync) sceGxmSyncObjectDestroy(sync);
       if (target) sceGxmDestroyRenderTarget(target);
@@ -299,7 +321,7 @@ struct Renderer::Impl {
     uint8_t lightTop = 0;
     bool fragmentEnabled = true;
     bool usesDiscard = false;
-    bool inFlight = false;
+    uint64_t flightGeneration = 0;
   };
   struct FragmentUniformState {
     GpuDrawUniforms uniforms{};
@@ -307,6 +329,8 @@ struct Renderer::Impl {
     std::array<uint16_t,MaxTextures> textureFlags{};
     std::array<std::array<float,4>,MaxTextures> textureTransform{};
     uint64_t pipelineKey = 0;
+    uint32_t uniformGeneration = 0;
+    uint32_t textureGeneration = 0;
     uint8_t usedTextureCount = 0;
     bool valid = false;
   };
@@ -314,6 +338,7 @@ struct Renderer::Impl {
     std::array<float,16> mvp{};
     FixedVertexUniforms fixed{};
     uint64_t pipelineKey = 0;
+    uint32_t uniformGeneration = 0;
     bool fixedValid = false;
     bool valid = false;
   };
@@ -338,12 +363,14 @@ struct Renderer::Impl {
   size_t resourceBytes = 0;
   Handle nextHandle = 1;
   Handle clearVertices = 0, clearIndices = 0;
-  Handle boundTarget = 0, blitVertices = 0, displaySource = 0, copyVertices = 0;
+  Handle boundTarget = 0, reducedEfb = 0, blitVertices = 0, displaySource = 0, copyVertices = 0;
   uint64_t clearPipeline = 0, frameStarted = 0;
+  uint64_t flightGeneration = 1, completedGeneration = 0;
   uint64_t boundPipelineKey = 0;
   uint32_t stride = 0, front = 0, back = 1;
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
   bool frameActive = false, depthValid = false;
+  bool displayCopyScene = false, sceneReducedDefault = false;
   bool sceneHasDepth = false, sceneDepthWritten = false;
   uint8_t sceneHsrPass = 0xff;
   bool pipelineStateValid = false, viewportValid = false, scissorValid = false;
@@ -368,6 +395,12 @@ struct Renderer::Impl {
   bool efbCopyFlipX = false, efbCopyFlipY = false, efbCopyGeometryValid = false;
   ProgramBinaryCache programCache;
   uint32_t stageMemoryHits = 0, stageCompiles = 0;
+  bool in_flight(uint64_t generation) const noexcept {
+    return generation > completedGeneration;
+  }
+  void mark_in_flight(uint64_t& generation) noexcept {
+    generation=flightGeneration;
+  }
   uint64_t sceneWindowSum = 0;
   uint32_t sceneWindowFrames = 0;
   uint64_t displayQueueWindowSum = 0;
@@ -376,8 +409,16 @@ struct Renderer::Impl {
   uint32_t displayQueueBlockedFrames = 0;
   uint32_t displayQueueWindowFrames = 0;
 
-  uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
-  uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
+  uint32_t width() const {
+    if (boundTarget) return textures.at(boundTarget)->width;
+    return displayCopyScene ? config.width : config.renderWidth;
+  }
+  uint32_t height() const {
+    if (boundTarget) return textures.at(boundTarget)->height;
+    return displayCopyScene ? config.height : config.renderHeight;
+  }
+  uint32_t raster_width() const { return width(); }
+  uint32_t raster_height() const { return height(); }
   bool end_scene(SceneEndReason reason) {
     if (!inScene) return true;
     const int result = sceGxmEndScene(context, nullptr, nullptr);
@@ -397,7 +438,9 @@ struct Renderer::Impl {
     // Store/load policy is specified before BeginScene. The next frame may
     // continue an offscreen target; EndFrame alone does not retire its depth.
     if (boundTarget) textures.at(boundTarget)->depthValid = result>=0;
+    else if (sceneReducedDefault && reducedEfb) textures.at(reducedEfb)->depthValid = result>=0;
     else depthValid = result>=0;
+    sceneReducedDefault=false;
     return check(result, "end native scene");
   }
   bool ensure_scene() {
@@ -408,12 +451,25 @@ struct Renderer::Impl {
     auto* rt = target;
     auto* sync = surfaces[back].sync;
     bool loadDepth = depthValid;
+    sceneReducedDefault=false;
     if (boundTarget) {
       auto& t = *textures.at(boundTarget);
       ds = t.depth.data() ? &t.depthSurface : nullptr;
       cs = &t.color; rt = t.target; sync = t.sync;
       loadDepth = t.depthValid;
-      t.inFlight = true;
+      mark_in_flight(t.flightGeneration);
+    } else if (reducedEfb && !displayCopyScene) {
+      auto& t = *textures.at(reducedEfb);
+      ds = t.depth.data() ? &t.depthSurface : nullptr;
+      cs = &t.color; rt = t.target; sync = t.sync;
+      loadDepth = t.depthValid;
+      mark_in_flight(t.flightGeneration);
+      sceneReducedDefault=true;
+    } else if (displayCopyScene) {
+      // The scanout copy has no depth semantics; avoid loading/storing the
+      // full-resolution depth surface for this fullscreen blit.
+      ds=nullptr;
+      loadDepth=false;
     }
     if (ds) {
       // GXCopyTex and target switches can split one logical EFB frame across
@@ -424,9 +480,9 @@ struct Renderer::Impl {
       sceGxmDepthStencilSurfaceSetForceStoreMode(ds, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
       if(loadDepth) ++stats.nativeDepthLoadScenes;
     }
-    // Scenes submitted through the same GXM context are already ordered. Do
-    // not turn render-target switches into sync-object dependencies: Strikers'
-    // offscreen EFB targets can make sceGxmBeginScene reject those pointers.
+    // Same-context target switches retain submission ordering. Keep explicit
+    // scene flags only for transfer-engine synchronization; sync-object
+    // dependencies on display surfaces are rejected by GXM on this hardware.
     unsigned flags = pendingFragmentTransferSync ? SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC : 0u;
     SceGxmSyncObject* vertexDependency = nullptr;
     if (!check(sceGxmBeginScene(context, flags, rt, nullptr, vertexDependency, sync, cs, ds), "begin native scene")) return false;
@@ -446,7 +502,7 @@ struct Renderer::Impl {
     char text[384];
     std::snprintf(text, sizeof(text), "%s (0x%08x)", operation, unsigned(code));
     error = text;
-    std::fprintf(stderr, "[aurora-gxm] %s\n", text);
+    AURORA_VITA_DIAGF( "[aurora-gxm] %s\n", text);
     return false;
   }
   bool check(int code, const char* operation) { return code >= 0 || fail(operation, code); }
@@ -483,12 +539,12 @@ struct Renderer::Impl {
       compiled->code.clear();
     }
     if (source.size() > UINT32_MAX) { fail("shader source too large"); return {}; }
-    const uint64_t started = sceKernelGetProcessTimeWide();
+    const uint64_t started = diagnostic_time_us();
     uint32_t size = uint32_t(source.size());
     const SceGxmProgram* program = shark_compile_shader(source.c_str(), &size, type);
     if (!program || !size) {
       const char stageChar = stage == ProgramStage::Vertex ? 'v' : 'f';
-      std::fprintf(stderr,
+      AURORA_VITA_DIAGF(
           "[aurora-gxm] stage_compile_fail stage=%c hash=%016llx source_bytes=%u\n",
           stageChar, static_cast<unsigned long long>(sourceHash),
           static_cast<unsigned>(source.size()));
@@ -519,9 +575,9 @@ struct Renderer::Impl {
     programCache.save(sourceHash, stage, compiled->code, size);
     stageCache.emplace(sourceHash, compiled);
     ++stageCompiles;
-    const uint64_t elapsed = sceKernelGetProcessTimeWide() - started;
+    const uint64_t elapsed = diagnostic_time_us() - started;
     if (stageCompiles <= 8 || (stageCompiles & (stageCompiles - 1)) == 0)
-      std::fprintf(stderr,
+      AURORA_VITA_DIAGF(
           "[aurora-gxm] stage_compile stage=%c hash=%016llx us=%llu compiled=%u mem_hits=%u disk_hits=%u disk_misses=%u\n",
           stage == ProgramStage::Vertex ? 'v' : 'f', static_cast<unsigned long long>(sourceHash),
           static_cast<unsigned long long>(elapsed), stageCompiles, stageMemoryHits,
@@ -539,6 +595,8 @@ bool Renderer::initialize(const Config& config) {
   auto& d = *impl_;
   if (d.initialized) return true;
   if (!config.width || config.width > 960 || !config.height || config.height > 544 ||
+      !config.renderWidth || config.renderWidth > config.width ||
+      !config.renderHeight || config.renderHeight > config.height ||
       config.displayBuffers < 2 || config.displayBuffers > 3 || !config.maxPipelines ||
       config.parameterBufferBytes < 0x40000 || config.parameterBufferBytes > UINT32_MAX)
     return d.fail("invalid GXM config");
@@ -582,7 +640,7 @@ bool Renderer::initialize(const Config& config) {
   }
   const int poolResult = initialize_cdram_pool(config.cdramPoolBytes, config.cdramReserveBytes);
   if (poolResult < 0)
-    std::fprintf(stderr,
+    AURORA_VITA_DIAGF(
         "[aurora-gxm] cdram_pool unavailable requested=%zu reserve=%zu error=0x%08x; using mapped fallbacks\n",
         config.cdramPoolBytes, config.cdramReserveBytes, unsigned(poolResult));
   const uint32_t tw = (config.width + 31u) & ~31u, th = (config.height + 31u) & ~31u;
@@ -609,7 +667,7 @@ bool Renderer::initialize(const Config& config) {
   shark_set_warnings_level(SHARK_WARN_HIGH);
   d.programCache.configure(config.programCachePath);
   {
-    const uint64_t preloadStarted=sceKernelGetProcessTimeWide();
+    const uint64_t preloadStarted=diagnostic_time_us();
     std::vector<PreloadedProgram> preloaded;
     const size_t count=d.programCache.preload(preloaded);
     for(auto& cached:preloaded) {
@@ -618,11 +676,18 @@ bool Renderer::initialize(const Config& config) {
       d.stageCache.emplace(cached.sourceHash,std::move(compiled));
     }
     if(count)
-      std::fprintf(stderr,"[aurora-gxm] stage_preload programs=%u us=%llu\n",
+      AURORA_VITA_DIAGF("[aurora-gxm] stage_preload programs=%u us=%llu\n",
           static_cast<unsigned>(count),
-          static_cast<unsigned long long>(sceKernelGetProcessTimeWide()-preloadStarted));
+          static_cast<unsigned long long>(diagnostic_time_us()-preloadStarted));
   }
   d.initialized = true;
+  if (config.renderWidth != config.width || config.renderHeight != config.height) {
+    d.reducedEfb=create_target(config.renderWidth,config.renderHeight,true);
+    if(!d.reducedEfb) return abort();
+    AURORA_VITA_DIAGF(
+        "[aurora-gxm] dedicated_efb internal=%ux%u scanout=%ux%u handle=%u\n",
+        config.renderWidth,config.renderHeight,config.width,config.height,d.reducedEfb);
+  }
   PipelineDesc clear{};
   clear.reversedZ = false; clear.cull = CullMode::None; clear.depthFunc = Compare::Always;
   clear.layout.count = 1; clear.layout.attributes[0] = {0,4,VertexScalar::F32,false,16,0};
@@ -636,7 +701,7 @@ bool Renderer::initialize(const Config& config) {
   d.clearVertices = create_buffer(vertices, sizeof(vertices));
   d.clearIndices = create_buffer(indices, sizeof(indices));
   if (!d.clearPipeline || !d.clearVertices || !d.clearIndices) return abort();
-  std::fprintf(stderr, "[aurora-gxm] initialized %ux%u buffers=%u renderer=SceGxm native_cg=1 depth=%s\n",
+  AURORA_VITA_DIAGF( "[aurora-gxm] initialized %ux%u buffers=%u renderer=SceGxm native_cg=1 depth=%s\n",
       config.width, config.height, config.displayBuffers,config.d16Depth?"D16":"DF32");
   log_memory_state("after-init");
   return true;
@@ -649,7 +714,12 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   // Region clipping is tile-granular. Keep the requested fragment scissor for
   // exact GX edges; it may only be omitted by full-target internal passes.
   const uint64_t key = pipeline_key(nativeDesc);
-  if (d.pipelines.find(key) != d.pipelines.end()) { ++d.stats.pipelineHits; return key; }
+  if (d.pipelines.find(key) != d.pipelines.end()) {
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+    ++d.stats.pipelineHits;
+#endif
+    return key;
+  }
   if (d.pipelines.size() >= d.config.maxPipelines) { d.fail("native pipeline budget exhausted"); return 0; }
   const auto source = build_tev_cg(nativeDesc);
   if (!source.ok()) { d.fail(source.error.c_str()); return 0; }
@@ -745,7 +815,9 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
     if(p.gxTexture[i]||p.gxPost[i])p.fixedTextureUniformMask|=static_cast<uint8_t>(1u<<i);
   }
   d.pipelines.emplace(key, std::move(pipeline));
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   ++d.stats.pipelineMisses;
+#endif
   return key;
 }
 
@@ -776,7 +848,12 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
   const uint64_t key = texture_key(desc);
   if (desc.cacheable) {
     const auto it = d.textureCache.find(key);
-    if (it != d.textureCache.end()) { ++d.stats.textureHits; return it->second; }
+    if (it != d.textureCache.end()) {
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+      ++d.stats.textureHits;
+#endif
+      return it->second;
+    }
   }
   auto native=prepare_native_texture(desc);
   if(native.valid&&!native.pixels.empty()&&d.has_budget(native.pixels.size())) {
@@ -796,10 +873,12 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
         const Handle handle=d.nextHandle++;
         d.textures.emplace(handle,std::move(owned));
         if(desc.cacheable)d.textureCache.emplace(key,handle);
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
         ++d.stats.textureMisses;++d.stats.textureUploads;
+#endif
         return handle;
       }
-      std::fprintf(stderr,
+      AURORA_VITA_DIAGF(
           "[aurora-gxm] native GX texture format unsupported fmt=%u gxm=0x%08x; falling back to RGBA8\n",
           static_cast<unsigned>(desc.format),unsigned(nativeResult));
     }
@@ -831,7 +910,9 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
   const Handle handle = d.nextHandle++;
   d.textures.emplace(handle, std::move(owned));
   if (desc.cacheable) d.textureCache.emplace(key, handle);
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   ++d.stats.textureMisses; ++d.stats.textureUploads;
+#endif
   return handle;
 }
 
@@ -841,9 +922,18 @@ bool Renderer::begin_frame() {
     return d.fail("invalid begin_frame");
   const int displayError = d.displayError.load(std::memory_order_relaxed);
   if (displayError < 0) return d.fail("display callback failed", displayError);
-  d.stats = {}; d.frameStarted = sceKernelGetProcessTimeWide();
+  d.displayCopyScene=false;
+  d.pendingVertexDependency=nullptr;
+  d.stats = {};
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+  d.frameStarted = 0;
+  d.profileDraws = false;
+  d.stats.nativeTimingsSampled = false;
+#else
+  d.frameStarted = diagnostic_time_us();
   d.profileDraws = (++d.profileFrame % 120u) == 60u;
   d.stats.nativeTimingsSampled=d.profileDraws;
+#endif
   d.frameActive = true; d.boundTarget = 0;
   return true;
 }
@@ -863,6 +953,12 @@ bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool
       if(target.depth.data() && target.depthValid) {
         // This clear covers the complete target, so loading the previous Z
         // contents into the new scene would only consume memory bandwidth.
+        target.depthValid=false;
+        ++d.stats.nativeDepthClearSkippedLoads;
+      }
+    } else if(d.reducedEfb && !d.displayCopyScene) {
+      auto& target=*d.textures.at(d.reducedEfb);
+      if(target.depth.data() && target.depthValid) {
         target.depthValid=false;
         ++d.stats.nativeDepthClearSkippedLoads;
       }
@@ -901,7 +997,7 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
   if(!d.ensure_scene()) return false;
   if((d.textureBindingValidMask&(1u<<unit))&&d.boundTextureHandles[unit]==handle&&
      same_sampler(d.boundTextureSamplers[unit],s)) {
-    it->second->inFlight=true;
+    d.mark_in_flight(it->second->flightGeneration);
     return true;
   }
   auto& textureObject=*it->second;
@@ -929,13 +1025,14 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
   if(!d.check(sceGxmSetFragmentTexture(d.context,unit,&texture),"bind fragment texture")) return false;
   d.textureBindingValidMask|=static_cast<uint8_t>(1u<<unit);
   d.boundTextureHandles[unit]=handle;d.boundTextureSamplers[unit]=s;
-  it->second->inFlight=true;
+  d.mark_in_flight(it->second->flightGeneration);
   return true;
 }
 
 bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor& scissor,
                              const FixedVertexUniforms* fixedVertex,
-                             const std::array<TextureBinding,MaxTextures>* textures) {
+                             const std::array<TextureBinding,MaxTextures>* textures,
+                             uint32_t uniformGeneration,uint32_t textureGeneration) {
   auto& d=*impl_;
   Impl::Pipeline* resolved=nullptr;
   if(d.resolvedPipelineHint&&d.resolvedPipelineHintKey==key) resolved=d.resolvedPipelineHint;
@@ -966,8 +1063,12 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   void* vertex=nullptr;
   const bool needsVertexUniforms=p.mvp || (pipeline.fixedVertexOnGpu && fixedVertex);
   const auto& cachedVertex=d.vertexUniformState;
-  const bool sameMvp=!p.mvp||std::memcmp(cachedVertex.mvp.data(),u.mvp.data(),sizeof(u.mvp))==0;
-  const bool sameFixed=!pipeline.fixedVertexOnGpu||
+  const bool vertexGenerationReuse=uniformGeneration&&cachedVertex.valid&&cachedVertex.pipelineKey==key&&
+      cachedVertex.uniformGeneration==uniformGeneration&&
+      (!pipeline.fixedVertexOnGpu||(fixedVertex&&cachedVertex.fixedValid));
+  const bool sameMvp=vertexGenerationReuse||!p.mvp||
+      std::memcmp(cachedVertex.mvp.data(),u.mvp.data(),sizeof(u.mvp))==0;
+  const bool sameFixed=vertexGenerationReuse||!pipeline.fixedVertexOnGpu||
       (fixedVertex&&cachedVertex.fixedValid&&std::memcmp(&cachedVertex.fixed,fixedVertex,sizeof(*fixedVertex))==0);
   const bool reuseVertex=needsVertexUniforms&&cachedVertex.valid&&cachedVertex.pipelineKey==key&&sameMvp&&sameFixed;
   if(needsVertexUniforms&&!reuseVertex &&
@@ -994,16 +1095,35 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     }
   }
   if(needsVertexUniforms) {
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
     if(reuseVertex) ++d.stats.nativeVertexUniformReuses;
-    else {
+    else
+#endif
+    if(!reuseVertex) {
       auto& next=d.vertexUniformState;
-      next.mvp=u.mvp;next.pipelineKey=key;next.fixedValid=fixedVertex!=nullptr;
+      next.mvp=u.mvp;next.pipelineKey=key;next.uniformGeneration=uniformGeneration;
+      next.fixedValid=fixedVertex!=nullptr;
       if(fixedVertex)next.fixed=*fixedVertex;
       next.valid=true;
     }
   }
   if(!p.fragmentEnabled) {
-    p.inFlight=true;
+    d.mark_in_flight(p.flightGeneration);
+    return true;
+  }
+  const auto& cached=d.fragmentUniformState;
+  const bool sameScissor=!p.clip||(cached.scissor.x==scissor.x&&cached.scissor.y==scissor.y&&
+      cached.scissor.width==scissor.width&&cached.scissor.height==scissor.height);
+  const bool textureGenerationReuse=!usedTextureCount||
+      (textureGeneration&&cached.textureGeneration==textureGeneration);
+  const bool fragmentGenerationReuse=uniformGeneration&&cached.valid&&cached.pipelineKey==key&&
+      cached.usedTextureCount==usedTextureCount&&sameScissor&&
+      cached.uniformGeneration==uniformGeneration&&textureGenerationReuse;
+  if(fragmentGenerationReuse) {
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+    ++d.stats.nativeFragmentUniformReuses;
+#endif
+    d.mark_in_flight(p.flightGeneration);
     return true;
   }
   std::array<uint16_t,MaxTextures> textureFlags{};
@@ -1023,12 +1143,9 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     if(binding.flipY){by+=sy;sy=-sy;}
     textureTransform[i]={sx,sy,bx,by};
   }
-  const auto& cached=d.fragmentUniformState;
   const auto sameBytes=[](const void* a,const void* b,size_t bytes) noexcept {
     return !bytes||std::memcmp(a,b,bytes)==0;
   };
-  const bool sameScissor=!p.clip||(cached.scissor.x==scissor.x&&cached.scissor.y==scissor.y&&
-      cached.scissor.width==scissor.width&&cached.scissor.height==scissor.height);
   const bool reuseFragment=cached.valid&&cached.pipelineKey==key&&
       cached.usedTextureCount==usedTextureCount&&sameScissor&&
       sameBytes(cached.uniforms.kcolor.data(),u.kcolor.data(),sizeof(u.kcolor))&&
@@ -1081,9 +1198,13 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     }
     auto& next=d.fragmentUniformState;
     next.uniforms=u;next.scissor=scissor;next.textureFlags=textureFlags;next.textureTransform=textureTransform;
-    next.pipelineKey=key;next.usedTextureCount=static_cast<uint8_t>(usedTextureCount);next.valid=true;
-  } else ++d.stats.nativeFragmentUniformReuses;
-  p.inFlight=true;
+    next.pipelineKey=key;next.uniformGeneration=uniformGeneration;next.textureGeneration=textureGeneration;
+    next.usedTextureCount=static_cast<uint8_t>(usedTextureCount);next.valid=true;
+  }
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+  else ++d.stats.nativeFragmentUniformReuses;
+#endif
+  d.mark_in_flight(p.flightGeneration);
   return true;
 }
 
@@ -1120,12 +1241,13 @@ bool Renderer::draw(const DrawPacket& packet) {
 #endif
   if (pipeline.cull == CullMode::All || packet.scissor.width <= 0 || packet.scissor.height <= 0) return true;
   if(!pipeline.fragmentScissor&&(packet.scissor.x>0||packet.scissor.y>0||
-      int64_t(packet.scissor.x)+packet.scissor.width<d.width()||
-      int64_t(packet.scissor.y)+packet.scissor.height<d.height()))
+      int64_t(packet.scissor.x)+packet.scissor.width<d.raster_width()||
+      int64_t(packet.scissor.y)+packet.scissor.height<d.raster_height()))
     return d.fail("full-target pipeline requires a full-target scissor");
-  // Track the SGX ISP pass categories described by the HSR guide.  This does
-  // not reorder GX draws; it tells hardware validation whether state translation
-  // is causing avoidable Opaque/Discard/Translucent transitions.
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+  // Track the SGX ISP pass categories described by the HSR guide. This block is
+  // intentionally compiled out of release builds: it walks TEV stages only to
+  // classify profiling data and has no rendering side effect.
   uint8_t hsrPass=0;
   if(p.usesDiscard) {
     hsrPass=1;++d.stats.nativeHsrDiscardDraws;
@@ -1141,16 +1263,44 @@ bool Renderer::draw(const DrawPacket& packet) {
     ++d.stats.nativeDirectTextureDraws;
     for(uint8_t bits=directMask;bits;bits>>=1)d.stats.nativeDirectTextureSlots+=bits&1u;
   }
-  uint64_t profileTick = d.profileDraws ? sceKernelGetProcessTimeWide() : 0;
+  const unsigned tevStages=std::min<unsigned>(pipeline.tev.stageCount,MaxTevStages);
+  unsigned fragmentTextureOps=0;
+  bool fragmentIndirect=false;
+  for(unsigned i=0;i<tevStages;++i) {
+    const auto& stage=pipeline.tev.stages[i];
+    if(tev_stage_uses_texture(stage))++fragmentTextureOps;
+    if(stage.indirectEnabled) {
+      ++fragmentTextureOps;
+      fragmentIndirect=true;
+    }
+  }
+  d.stats.nativeFragmentTevOps+=tevStages;
+  d.stats.nativeFragmentTextureOps+=fragmentTextureOps;
+  d.stats.nativeFragmentMaxTevStages=std::max<uint32_t>(d.stats.nativeFragmentMaxTevStages,tevStages);
+  if(fragmentIndirect)++d.stats.nativeFragmentIndirectDraws;
+  // This is deliberately only a workload classifier, not a shader rewrite.
+  // It tells hardware profiling which fragment pipelines are worth simplifying
+  // next without perturbing current GX semantics.
+  if(tevStages>=4u || fragmentTextureOps>=3u || fragmentIndirect || pipeline.fogMode!=FogMode::None)
+    ++d.stats.nativeFragmentComplexDraws;
+  uint64_t profileTick = d.profileDraws ? diagnostic_time_us() : 0;
+#endif
+  const auto& packetUniforms=packet.gpu_uniforms();
+  const auto& packetTextures=packet.texture_bindings();
   d.resolvedPipelineHint=pi->second.get();d.resolvedPipelineHintKey=packet.pipelineKey;
-  const bool pipelineBound=bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures);
+  const bool pipelineBound=bind_pipeline(packet.pipelineKey,packetUniforms,packet.scissor,
+      packet.fixedVertexUniforms,&packetTextures,packet.uniformGeneration,packet.textureGeneration);
   d.resolvedPipelineHint=nullptr;d.resolvedPipelineHintKey=0;
   if(!pipelineBound) return false;
-  if(d.profileDraws) { const auto now=sceKernelGetProcessTimeWide(); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+  if(d.profileDraws) { const auto now=diagnostic_time_us(); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }
+#endif
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
-    if(!bind_texture(packet.textures[i].texture,i,packet.textures[i].sampler,
+    if(!bind_texture(packetTextures[i].texture,i,packetTextures[i].sampler,
                      (pipeline.nativeTextureWrapMask&(1u<<i))!=0)) return false;
-  if(d.profileDraws) { const auto now=sceKernelGetProcessTimeWide(); d.stats.nativeTextureUs+=now-profileTick; profileTick=now; }
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+  if(d.profileDraws) { const auto now=diagnostic_time_us(); d.stats.nativeTextureUs+=now-profileTick; profileTick=now; }
+#endif
   if(!d.viewportValid||!same_viewport(d.cachedViewport,vp)) {
     const float low = std::min(vp.znear, vp.zfar), high = std::max(vp.znear, vp.zfar);
     sceGxmSetViewport(d.context, vp.x + vp.width * .5f, vp.width * .5f,
@@ -1183,27 +1333,50 @@ bool Renderer::draw(const DrawPacket& packet) {
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
   if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;
   if(d.sceneHasDepth && pipeline.depthTest && pipeline.depthWrite) d.sceneDepthWritten=true;
-  if(d.profileDraws) d.stats.nativeDrawUs+=sceKernelGetProcessTimeWide()-profileTick;
-  pi->second->inFlight = true;
-  vi->second.inFlight = true; ii->second.inFlight = true;
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+  if(d.profileDraws) d.stats.nativeDrawUs+=diagnostic_time_us()-profileTick;
+#endif
+  d.mark_in_flight(pi->second->flightGeneration);
+  d.mark_in_flight(vi->second.flightGeneration);
+  d.mark_in_flight(ii->second.flightGeneration);
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   ++d.stats.drawCalls;
   d.stats.triangles += pipeline.primitive == Primitive::Triangles ? packet.indexCount / 3 : packet.indexCount - 2;
+#endif
   return true;
 }
 
 bool Renderer::end_frame(bool present) {
   auto& d = *impl_;
   if (!d.frameActive) return d.fail("end_frame outside a frame");
-  const uint64_t timingStart=sceKernelGetProcessTimeWide();
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
   if (!d.end_scene(Impl::SceneEndReason::EndFrame)) return false;
-  const uint64_t afterEnd=sceKernelGetProcessTimeWide();
+  d.frameActive = false;
+  auto& surface = d.surfaces[d.back];
+  if (present) {
+    const DisplayRequest request{surface.memory.data(), d.config.width, d.config.height,
+        d.stride, d.config.waitVblank, &d.displayError};
+    if (!d.check(sceGxmDisplayQueueAddEntry(d.surfaces[d.front].sync, surface.sync, &request),
+                 "queue present"))
+      return false;
+    d.displayed = true;
+    d.front = d.back;
+    d.back = (d.back + 1) % d.config.displayBuffers;
+  } else if (!finish()) {
+    return false;
+  }
+  return true;
+#else
+  const uint64_t timingStart=diagnostic_time_us();
+  if (!d.end_scene(Impl::SceneEndReason::EndFrame)) return false;
+  const uint64_t afterEnd=diagnostic_time_us();
   d.frameActive = false;
   auto& surface = d.surfaces[d.back];
   if (present) {
     const DisplayRequest request{surface.memory.data(), d.config.width, d.config.height, d.stride, d.config.waitVblank, &d.displayError};
-    const uint64_t queueStarted=sceKernelGetProcessTimeWide();
+    const uint64_t queueStarted=diagnostic_time_us();
     if (!d.check(sceGxmDisplayQueueAddEntry(d.surfaces[d.front].sync, surface.sync, &request), "queue present")) return false;
-    const uint64_t queueFinished=sceKernelGetProcessTimeWide();
+    const uint64_t queueFinished=diagnostic_time_us();
     d.stats.nativeDisplayQueueAddUs=queueFinished-queueStarted;
     d.displayed = true; d.front = d.back; d.back = (d.back + 1) % d.config.displayBuffers;
   } else {
@@ -1211,16 +1384,16 @@ bool Renderer::end_frame(bool present) {
     // same offscreen surface can become the next scene's target.
     if(!finish()) return false;
   }
-  const uint64_t afterQueue=sceKernelGetProcessTimeWide();
+  const uint64_t afterQueue=diagnostic_time_us();
   static uint64_t presentCount=0;
   const uint64_t count=++presentCount;
   if(present && (count<=8 || (count&(count-1))==0))
-    std::fprintf(stderr,"[aurora-gxm] present_timing n=%llu end_us=%llu queue_us=%llu total_us=%llu\n",
+    AURORA_VITA_DIAGF("[aurora-gxm] present_timing n=%llu end_us=%llu queue_us=%llu total_us=%llu\n",
       static_cast<unsigned long long>(count),
       static_cast<unsigned long long>(afterEnd-timingStart),
       static_cast<unsigned long long>(afterQueue-afterEnd),
       static_cast<unsigned long long>(afterQueue-timingStart));
-  d.stats.cpuFrameUs = sceKernelGetProcessTimeWide() - d.frameStarted;
+  d.stats.cpuFrameUs = diagnostic_time_us() - d.frameStarted;
   if(present) {
     constexpr uint64_t kBackpressureThresholdUs=500;
     d.displayQueueWindowSum+=d.stats.nativeDisplayQueueAddUs;
@@ -1232,7 +1405,7 @@ bool Renderer::end_frame(bool present) {
       const double avgQueue=double(d.displayQueueWindowSum)/double(d.displayQueueWindowFrames);
       const double avgCpu=double(d.cpuFrameWindowSum)/double(d.displayQueueWindowFrames);
       const double blockedPct=100.0*double(d.displayQueueBlockedFrames)/double(d.displayQueueWindowFrames);
-      std::fprintf(stderr,
+      AURORA_VITA_DIAGF(
           "[aurora-gxm] display_queue_profile avg_us=%.1f max_us=%llu blocked_pct=%.1f cpu_frame_avg_us=%.1f classification=%s\n",
           avgQueue,static_cast<unsigned long long>(d.displayQueueWindowMax),blockedPct,avgCpu,
           blockedPct>=10.0?"gpu_backpressure":"cpu_or_frontend_bound");
@@ -1243,17 +1416,18 @@ bool Renderer::end_frame(bool present) {
   d.sceneWindowSum += d.stats.nativeSceneCount;
   ++d.sceneWindowFrames;
   if(d.stats.nativeSceneCount>d.config.scenesPerFrame)
-    std::fprintf(stderr,"[aurora-gxm] scene_budget_exceeded scenes=%u budget=%u\n",
+    AURORA_VITA_DIAGF("[aurora-gxm] scene_budget_exceeded scenes=%u budget=%u\n",
         d.stats.nativeSceneCount,d.config.scenesPerFrame);
   if(d.sceneWindowFrames>=120u) {
     const double avg=double(d.sceneWindowSum)/double(d.sceneWindowFrames);
     if(avg>double(d.config.scenesPerFrame))
-      std::fprintf(stderr,"[aurora-gxm] scene_budget_average avg=%.2f budget=%u\n",
+      AURORA_VITA_DIAGF("[aurora-gxm] scene_budget_average avg=%.2f budget=%u\n",
           avg,d.config.scenesPerFrame);
     d.sceneWindowSum=0;d.sceneWindowFrames=0;
   }
   if (d.profileDraws) log_memory_state("profile-frame");
   return true;
+#endif
 }
 
 bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) {
@@ -1278,9 +1452,16 @@ bool Renderer::finish() {
   }
   sceGxmFinish(d.context);
   d.pendingVertexDependency=nullptr;
-  for(auto& [_,b]:d.buffers) b.inFlight=false;
-  for(auto& [_,t]:d.textures) t->inFlight=false;
-  for(auto& [_,p]:d.pipelines) p->inFlight=false;
+  d.completedGeneration=d.flightGeneration;
+  if(++d.flightGeneration==0) {
+    // Defensive wrap handling; practically unreachable, but keep zero reserved
+    // for resources that have never been submitted.
+    d.flightGeneration=1;
+    d.completedGeneration=0;
+    for(auto& [_,b]:d.buffers)b.flightGeneration=0;
+    for(auto& [_,t]:d.textures)t->flightGeneration=0;
+    for(auto& [_,p]:d.pipelines)p->flightGeneration=0;
+  }
   return true;
 }
 
@@ -1290,12 +1471,12 @@ bool Renderer::update_buffer(Handle handle,const void* data,size_t bytes,size_t 
   if(it==d.buffers.end() || offset>it->second.bytes || bytes>it->second.bytes-offset || (!data&&bytes))
     return d.fail("invalid buffer update");
   if(!bytes) return true;
-  if(it->second.inFlight && !storageRetired && !finish()) return false;
+  if(d.in_flight(it->second.flightGeneration) && !storageRetired && !finish()) return false;
   // StreamingArena only sets storageRetired after its frames-in-flight interval.
   // At that point the corresponding display work has already rotated through
   // GXM's bounded queue, so a second global finish here would serialize every
   // third frame and defeat the ring buffer.
-  if(storageRetired) it->second.inFlight=false;
+  if(storageRetired) it->second.flightGeneration=d.completedGeneration;
   std::memcpy(static_cast<uint8_t*>(it->second.memory.data())+offset,data,bytes);
   return true;
 }
@@ -1304,7 +1485,7 @@ void Renderer::destroy_buffer(Handle handle) {
   auto& d=*impl_;
   auto it=d.buffers.find(handle);
   if(it==d.buffers.end()) return;
-  if(it->second.inFlight && !finish()) return;
+  if(d.in_flight(it->second.flightGeneration) && !finish()) return;
   d.resourceBytes-=it->second.memory.size();
   d.buffers.erase(it);
 }
@@ -1313,7 +1494,7 @@ void Renderer::destroy_pipeline(uint64_t key) {
   auto& d=*impl_;
   auto it=d.pipelines.find(key);
   if(it==d.pipelines.end() || key==d.clearPipeline) return;
-  if(it->second->inFlight && !finish()) return;
+  if(d.in_flight(it->second->flightGeneration) && !finish()) return;
   d.destroy_pipeline(*it->second);
   d.pipelines.erase(it);
 }
@@ -1328,7 +1509,7 @@ void Renderer::destroy_texture(Handle handle) {
   auto& d=*impl_;
   auto it=d.textures.find(handle);
   if(it==d.textures.end()) return;
-  if((it->second->inFlight || handle==d.boundTarget) && !finish()) return;
+  if((d.in_flight(it->second->flightGeneration) || handle==d.boundTarget) && !finish()) return;
   if(handle==d.boundTarget) d.boundTarget=0;
   d.resourceBytes-=it->second->memory.size()+it->second->depth.size();
   for(auto c=d.textureCache.begin();c!=d.textureCache.end();)
@@ -1407,6 +1588,7 @@ bool Renderer::read_current(std::vector<uint8_t>& pixels,uint32_t& width,uint32_
   if(!d.initialized || !d.frameActive) return d.fail("read current requires an active frame");
   width=d.width();height=d.height();
   if(d.boundTarget) return read_target(d.boundTarget,pixels);
+  if(d.reducedEfb && !d.displayCopyScene) return read_target(d.reducedEfb,pixels);
   if(!finish()) return false;
   pixels.resize(size_t(width)*height*4);
   const auto* source=static_cast<const uint8_t*>(d.surfaces[d.back].memory.data());
@@ -1421,7 +1603,7 @@ bool Renderer::upload_target(Handle handle,const void* rgba,uint32_t width,uint3
   if(!rgba || it==d.textures.end() || it->second->width!=width || it->second->height!=height)
     return d.fail("invalid EFB upload");
   auto& t=*it->second;
-  if((t.inFlight || handle==d.boundTarget) && !finish()) return false;
+  if((d.in_flight(t.flightGeneration) || handle==d.boundTarget) && !finish()) return false;
   for(uint32_t y=0;y<height;++y)
     std::memcpy(static_cast<uint8_t*>(t.memory.data())+size_t(y)*t.stride*4,
       static_cast<const uint8_t*>(rgba)+size_t(y)*width*4,size_t(width)*4);
@@ -1442,10 +1624,11 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
       uint32_t(source.height)==destination.height;
   const bool halfScale=uint32_t(source.width)==destination.width*2u &&
       uint32_t(source.height)==destination.height*2u;
+  const bool reducedDefaultScale=!d.boundTarget && d.reducedEfb && !sameSize && !halfScale;
   if(uint64_t(source.x)+uint64_t(source.width)>sourceWidth ||
      uint64_t(source.y)+uint64_t(source.height)>sourceHeight ||
      (format!=EfbCopyFormat::Passthrough && format!=EfbCopyFormat::RGB565) ||
-     (!sameSize && !halfScale))
+     (!sameSize && !halfScale && !reducedDefaultScale))
     return d.fail("unsupported native EFB GPU copy");
 
   const Handle originalTarget=d.boundTarget;
@@ -1458,6 +1641,11 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     sourceData=sourceIt->second->memory.data();
     sourceStride=sourceIt->second->stride;
     sourceSync=sourceIt->second->sync;
+  } else if(d.reducedEfb && !d.displayCopyScene) {
+    const auto& source=*d.textures.at(d.reducedEfb);
+    sourceData=source.memory.data();
+    sourceStride=source.stride;
+    sourceSync=source.sync;
   } else {
     sourceData=d.surfaces[d.back].memory.data();
     sourceStride=d.stride;
@@ -1481,9 +1669,9 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
       format==EfbCopyFormat::Passthrough && !flipX && !flipY && handle!=originalTarget;
   if(tryHalfScaleTransfer) {
     ++d.stats.nativeEfbDownscaleAttempts;
-    const uint64_t transferStarted=sceKernelGetProcessTimeWide();
+    const uint64_t transferStarted=diagnostic_time_us();
     if(!d.end_scene(Impl::SceneEndReason::Transfer))return false;
-    const uint64_t afterSourceEnd=sceKernelGetProcessTimeWide();
+    const uint64_t afterSourceEnd=diagnostic_time_us();
     void* destinationData=destination.memory.data();
     int destinationStride=static_cast<int>(destination.stride*4u);
     if(flipY) {
@@ -1497,19 +1685,19 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
         transferSourceWidth,static_cast<unsigned>(source.height),
         static_cast<int>(sourceStride*4u),SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,
         destinationData,0,0,destinationStride,sourceSync,SCE_GXM_TRANSFER_FRAGMENT_SYNC,nullptr);
-    const uint64_t afterTransfer=sceKernelGetProcessTimeWide();
+    const uint64_t afterTransfer=diagnostic_time_us();
     if(transferResult>=0) {
       ++d.stats.nativeEfbDownscaleSuccesses;
       ++d.stats.nativeEfbCopies;
       d.stats.nativeEfbEndSceneUs+=afterSourceEnd-transferStarted;
       d.stats.nativeEfbTransferSubmitUs+=afterTransfer-afterSourceEnd;
       d.pendingFragmentTransferSync=true;
-      destination.inFlight=true;
+      d.mark_in_flight(destination.flightGeneration);
       d.boundTarget=originalTarget;
       static uint64_t downscaleSuccessCount=0;
       const uint64_t n=++downscaleSuccessCount;
       if(n<=8 || (n&(n-1u))==0)
-        std::fprintf(stderr,
+        AURORA_VITA_DIAGF(
             "[aurora-gxm] efb_downscale_transfer n=%llu padded=%u flip_y=%u source_end_us=%llu submit_us=%llu total_us=%llu\n",
             static_cast<unsigned long long>(n),paddedStrikersCopy?1u:0u,flipY?1u:0u,
             static_cast<unsigned long long>(afterSourceEnd-transferStarted),
@@ -1523,7 +1711,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     static uint64_t downscaleFallbackCount=0;
     const uint64_t n=++downscaleFallbackCount;
     if(n<=8 || (n&(n-1u))==0)
-      std::fprintf(stderr,
+      AURORA_VITA_DIAGF(
           "[aurora-gxm] efb_downscale_fallback n=%llu result=0x%08x padded=%u flip_y=%u source_end_us=%llu submit_us=%llu\n",
           static_cast<unsigned long long>(n),static_cast<unsigned>(transferResult),paddedStrikersCopy?1u:0u,flipY?1u:0u,
           static_cast<unsigned long long>(fallbackEndSceneUs),
@@ -1533,12 +1721,12 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
   // Unsupported transfer variants stay on the render-to-texture fixup path.
   // A failed experimental downscale reaches the same path without poisoning
   // the renderer state, so hardware can report the exact GXM error safely.
-  const bool gpuFixup=halfScale||flipX||flipY||format==EfbCopyFormat::RGB565;
+  const bool gpuFixup=halfScale||reducedDefaultScale||flipX||flipY||format==EfbCopyFormat::RGB565;
   if(gpuFixup && handle==originalTarget)
     return d.fail("native EFB feedback copy requires cached CPU fallback");
 
   if(gpuFixup) {
-    Handle sourceTexture=originalTarget;
+    Handle sourceTexture=originalTarget?originalTarget:d.reducedEfb;
     if(!sourceTexture) {
       Impl::Texture* alias=nullptr;
       if(!d.displaySource) {
@@ -1555,11 +1743,11 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
       sourceTexture=d.displaySource;
     }
 
-    const uint64_t copyStarted=sceKernelGetProcessTimeWide();
+    const uint64_t copyStarted=diagnostic_time_us();
     // bind_target ends the source scene and threads its fragment sync object
     // into the destination scene. No CPU wait is required.
     if(!bind_target(handle))return false;
-    const uint64_t afterSourceEnd=sceKernelGetProcessTimeWide();
+    const uint64_t afterSourceEnd=diagnostic_time_us();
 
     PipelineDesc p{};
     p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
@@ -1587,7 +1775,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     auto& binding=packet.textures[0];
     binding.texture=sourceTexture;binding.source=TextureSource::Efb;
     binding.sampler.wrapS=binding.sampler.wrapT=WrapMode::Clamp;
-    binding.sampler.minFilter=binding.sampler.magFilter=halfScale?Filter::Linear:Filter::Nearest;
+    binding.sampler.minFilter=binding.sampler.magFilter=!sameSize?Filter::Linear:Filter::Nearest;
     binding.flipX=flipX;binding.flipY=flipY;
     binding.forceOpaque=format==EfbCopyFormat::RGB565;
     binding.uvScaleX=float(source.width)/float(sourceWidth);
@@ -1595,7 +1783,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     binding.uvBiasX=float(source.x)/float(sourceWidth);
     binding.uvBiasY=float(source.y)/float(sourceHeight);
     if(!draw(packet))return false;
-    const uint64_t afterDraw=sceKernelGetProcessTimeWide();
+    const uint64_t afterDraw=diagnostic_time_us();
     if(!bind_target(originalTarget))return false;
     ++d.stats.nativeEfbCopies;
     d.stats.nativeEfbEndSceneUs+=fallbackEndSceneUs+(afterSourceEnd-copyStarted);
@@ -1603,7 +1791,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     static uint64_t gpuCopyCount=0;
     const uint64_t n=++gpuCopyCount;
     if(n<=8||(n&(n-1u))==0)
-      std::fprintf(stderr,
+      AURORA_VITA_DIAGF(
           "[aurora-gxm] efb_gpu_fixup n=%llu flip=%u%u opaque=%u source_end_us=%llu draw_us=%llu total_us=%llu\n",
           static_cast<unsigned long long>(n),flipX?1u:0u,flipY?1u:0u,
           format==EfbCopyFormat::RGB565?1u:0u,
@@ -1615,9 +1803,9 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
 
   // Unmodified copies stay on the transfer engine. All mirror/opaque fixups use
   // the draw path above, so this transfer never needs a CPU-side pixel pass.
-  const uint64_t copyStarted=sceKernelGetProcessTimeWide();
+  const uint64_t copyStarted=diagnostic_time_us();
   if(!d.end_scene(Impl::SceneEndReason::Transfer))return false;
-  const uint64_t afterSourceFinish=sceKernelGetProcessTimeWide();
+  const uint64_t afterSourceFinish=diagnostic_time_us();
   const int transferResult=sameSize?
       sceGxmTransferCopy(destination.width,destination.height,0,0,SCE_GXM_TRANSFER_COLORKEY_NONE,
           SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,SCE_GXM_TRANSFER_LINEAR,sourceData,
@@ -1632,16 +1820,16 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
           destination.memory.data(),0,0,static_cast<int>(destination.stride*4u),
           sourceSync,SCE_GXM_TRANSFER_FRAGMENT_SYNC,nullptr);
   if(!d.check(transferResult,sameSize?"native EFB copy transfer":"native EFB downscale transfer"))return false;
-  const uint64_t afterTransferSubmit=sceKernelGetProcessTimeWide();
+  const uint64_t afterTransferSubmit=diagnostic_time_us();
   ++d.stats.nativeEfbCopies;
   d.stats.nativeEfbEndSceneUs+=afterSourceFinish-copyStarted;
   d.stats.nativeEfbTransferSubmitUs+=afterTransferSubmit-afterSourceFinish;
   d.pendingFragmentTransferSync=true;
-  destination.inFlight=true;
+  d.mark_in_flight(destination.flightGeneration);
   static uint64_t copyTimingCount=0;
   const uint64_t copyN=++copyTimingCount;
   if(copyN<=8 || (copyN&(copyN-1u))==0)
-    std::fprintf(stderr,
+    AURORA_VITA_DIAGF(
       "[aurora-gxm] efb_transfer_timing n=%llu source_finish_us=%llu transfer_submit_us=%llu total_us=%llu\n",
       static_cast<unsigned long long>(copyN),
       static_cast<unsigned long long>(afterSourceFinish-copyStarted),
@@ -1676,8 +1864,8 @@ bool Renderer::blit_to_default(Handle handle) {
   packet.pipelineKey=key;
   packet.vertices={d.blitVertices,0,84};packet.indices={d.clearIndices,0,6};
   packet.vertexCount=packet.indexCount=3;
-  packet.viewport.width=float(d.config.width);packet.viewport.height=float(d.config.height);
-  packet.scissor.width=d.config.width;packet.scissor.height=d.config.height;
+  packet.viewport.width=float(d.width());packet.viewport.height=float(d.height());
+  packet.scissor.width=d.width();packet.scissor.height=d.height();
   packet.textures[0].texture=handle;
   packet.textures[0].sampler.wrapS=packet.textures[0].sampler.wrapT=WrapMode::Clamp;
   return draw(packet);
@@ -1685,57 +1873,53 @@ bool Renderer::blit_to_default(Handle handle) {
 
 bool Renderer::copy_display_region(const Scissor& source) {
   auto& d=*impl_;
-  const uint64_t timingStart=sceKernelGetProcessTimeWide();
-  if(!d.initialized || !d.frameActive || d.boundTarget || source.x<0 || source.y<0 ||
-     source.width<=0 || source.height<=0 || uint64_t(source.x)+uint64_t(source.width)>d.config.width ||
-     uint64_t(source.y)+uint64_t(source.height)>d.config.height)
+  const uint64_t timingStart=diagnostic_time_us();
+  const uint32_t sourceWidth=d.width(),sourceHeight=d.height();
+  if(!d.initialized || !d.frameActive || d.boundTarget || d.displayCopyScene || source.x<0 || source.y<0 ||
+     source.width<=0 || source.height<=0 || uint64_t(source.x)+uint64_t(source.width)>sourceWidth ||
+     uint64_t(source.y)+uint64_t(source.height)>sourceHeight)
     return d.fail("invalid native display-copy region");
-  if(d.config.displayBuffers<3) return d.fail("native display copy requires three display buffers");
+  if(d.config.displayBuffers<2) return d.fail("native display copy requires two display buffers");
 
   // The Vita frontend already maps the logical GX EFB into the native render
   // target. When GXCopyDisp selects that complete image, the EFB is already the
   // exact XFB we need to scan out; a second textured scene would only resample
   // the same pixels and force an unnecessary scene dependency.
-  if(source.x==0 && source.y==0 && uint32_t(source.width)==d.config.width &&
+  if(!d.reducedEfb && source.x==0 && source.y==0 && uint32_t(source.width)==d.config.width &&
      uint32_t(source.height)==d.config.height) {
     static uint64_t passthroughCount=0;
     const uint64_t count=++passthroughCount;
     if(count<=4 || (count&(count-1))==0)
-      std::fprintf(stderr,"[aurora-gxm] display_copy passthrough n=%llu source=%d,%d %dx%d\n",
+      AURORA_VITA_DIAGF("[aurora-gxm] display_copy passthrough n=%llu source=%d,%d %dx%d\n",
                    static_cast<unsigned long long>(count),source.x,source.y,source.width,source.height);
     return true;
   }
 
-  // GXCopyDisp needs arbitrary crop/scale. Keep it on the GPU: complete the EFB
-  // scene, sample that display surface as a texture, and render into the third
-  // display buffer. This replaces the old full-frame GPU->CPU->GPU round-trip.
-  const uint32_t sourceBuffer=d.back;
-  // Submit the EFB scene without stalling the CPU. The following display-copy
-  // scene waits on its fragment dependency in the GPU command stream.
+  // GXCopyDisp needs arbitrary crop/scale. In reduced-raster mode the logical
+  // EFB is a dedicated offscreen target that never enters the display queue.
+  // Complete that scene, then sample it into the current scanout backbuffer.
   if(!d.end_scene(Impl::SceneEndReason::DisplayCopy)) return false;
-  const uint64_t afterEnd=sceKernelGetProcessTimeWide();
-  uint32_t destination=UINT32_MAX;
-  for(uint32_t i=0;i<d.config.displayBuffers;++i)
-    if(i!=sourceBuffer && i!=d.front) {destination=i;break;}
-  if(destination==UINT32_MAX) return d.fail("no free display-copy destination");
+  const uint64_t afterEnd=diagnostic_time_us();
+  Handle sourceTexture=d.reducedEfb;
+  if(!sourceTexture) {
+    // Legacy full-resolution cropped copies still alias the current display
+    // surface. Reduced-raster mode never uses this path.
+    Impl::Texture* alias=nullptr;
+    if(!d.displaySource) {
+      auto texture=std::make_unique<Impl::Texture>();
+      texture->width=d.config.width;texture->height=d.config.height;texture->stride=d.stride;
+      d.displaySource=d.nextHandle++;
+      alias=texture.get();
+      d.textures.emplace(d.displaySource,std::move(texture));
+    } else alias=d.textures.at(d.displaySource).get();
+    const uint32_t expectedStride=(d.config.width+7u)&~7u;
+    if(d.stride!=expectedStride) return d.fail("display surface stride cannot be sampled linearly");
+    if(!d.check(sceGxmTextureInitLinear(&alias->descriptor,d.surfaces[d.back].memory.data(),
+        SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,d.config.width,d.config.height,0),"initialize display source texture")) return false;
+    alias->descriptorSamplerValid=false;
+    sourceTexture=d.displaySource;
+  }
 
-  Impl::Texture* alias=nullptr;
-  if(!d.displaySource) {
-    auto texture=std::make_unique<Impl::Texture>();
-    texture->width=d.config.width;texture->height=d.config.height;texture->stride=d.stride;
-    d.displaySource=d.nextHandle++;
-    alias=texture.get();
-    d.textures.emplace(d.displaySource,std::move(texture));
-  } else alias=d.textures.at(d.displaySource).get();
-  const uint32_t expectedStride=(d.config.width+7u)&~7u;
-  if(d.stride!=expectedStride) return d.fail("display surface stride cannot be sampled linearly");
-  if(!d.check(sceGxmTextureInitLinear(&alias->descriptor,d.surfaces[sourceBuffer].memory.data(),
-      SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,d.config.width,d.config.height,0),"initialize display source texture")) return false;
-  alias->descriptorSamplerValid=false;
-
-  d.back=destination;
-  // The display-copy scene follows the source scene in the same context, so an
-  // explicit vertex dependency is unnecessary and can be rejected by GXM.
   d.pendingVertexDependency=nullptr;
   PipelineDesc p{};
   p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
@@ -1746,10 +1930,10 @@ bool Renderer::copy_display_region(const Scissor& source) {
   p.tev.stages[0].color.d=TevColorArg::TexColor;p.tev.stages[0].alpha.d=TevAlphaArg::TexAlpha;
   const auto key=create_pipeline(p);
   if(!key) return false;
-  const float u0=float(source.x)/float(d.config.width);
-  const float u1=(float(source.x)+float(source.width))/float(d.config.width);
-  const float v0=float(source.y)/float(d.config.height);
-  const float v1=(float(source.y)+float(source.height))/float(d.config.height);
+  const float u0=float(source.x)/float(sourceWidth);
+  const float u1=(float(source.x)+float(source.width))/float(sourceWidth);
+  const float v0=float(source.y)/float(sourceHeight);
+  const float v1=(float(source.y)+float(source.height))/float(sourceHeight);
   const float du=u1-u0,dv=v1-v0;
   // GXM's viewport uses negative Y scale, so bottom clip vertices take the
   // source rectangle's bottom V. This preserves the top-left GX image origin.
@@ -1768,16 +1952,25 @@ bool Renderer::copy_display_region(const Scissor& source) {
   packet.vertexCount=packet.indexCount=3;
   packet.viewport.width=float(d.config.width);packet.viewport.height=float(d.config.height);
   packet.scissor.width=d.config.width;packet.scissor.height=d.config.height;
-  packet.textures[0].texture=d.displaySource;
+  packet.textures[0].texture=sourceTexture;
   packet.textures[0].sampler.wrapS=packet.textures[0].sampler.wrapT=WrapMode::Clamp;
   packet.textures[0].sampler.minFilter=packet.textures[0].sampler.magFilter=Filter::Linear;
-  const uint64_t beforeDraw=sceKernelGetProcessTimeWide();
-  const bool ok=draw(packet);
-  const uint64_t afterDraw=sceKernelGetProcessTimeWide();
+  const uint64_t beforeDraw=diagnostic_time_us();
+  d.displayCopyScene=true;
+  const bool drew=draw(packet);
+  const bool closed=drew?d.end_scene(Impl::SceneEndReason::DisplayCopy):false;
+  // GXCopyDisp copies the EFB into the XFB but does not change the current EFB.
+  // Close the scanout scene immediately so later draws/copies in the same GX
+  // frame resume on the dedicated 640x448 EFB instead of being rejected or
+  // accidentally targeting the 960x544 display surface.
+  d.displayCopyScene=false;
+  d.pendingVertexDependency=nullptr;
+  const bool ok=drew&&closed;
+  const uint64_t afterDraw=diagnostic_time_us();
   static uint64_t displayCopyCount=0;
   const uint64_t count=++displayCopyCount;
   if(count<=8 || (count&(count-1))==0) {
-    std::fprintf(stderr,
+    AURORA_VITA_DIAGF(
       "[aurora-gxm] display_copy n=%llu source=%d,%d %dx%d total_us=%llu end_us=%llu prep_us=%llu draw_us=%llu\n",
       static_cast<unsigned long long>(count),
       source.x,source.y,source.width,source.height,
@@ -1809,7 +2002,8 @@ void Renderer::shutdown() noexcept {
   std::free(d.hostMemory); d.hostMemory = nullptr;
   if (d.ownsGxm) { sceGxmTerminate(); d.ownsGxm = false; }
   d.initialized = false; d.displayed = false; d.resourceBytes = 0;
-  d.frameActive=false;d.depthValid=false;d.boundTarget=0;d.blitVertices=0;d.displaySource=0;d.copyVertices=0;
+  d.frameActive=false;d.depthValid=false;d.boundTarget=0;d.reducedEfb=0;d.blitVertices=0;d.displaySource=0;d.copyVertices=0;
+  d.displayCopyScene=false;d.sceneReducedDefault=false;
   d.pendingVertexDependency=nullptr;d.displayCopySourceValid=false;d.efbCopyGeometryValid=false;
   d.stageMemoryHits=0;d.stageCompiles=0;
   d.clearVertices = d.clearIndices = 0; d.clearPipeline = 0;

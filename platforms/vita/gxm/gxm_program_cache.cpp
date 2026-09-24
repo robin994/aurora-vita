@@ -1,6 +1,7 @@
 #include "gxm_program_cache.hpp"
 #include <cstdlib>
 #include <cstdio>
+#include "../vita_diag.hpp"
 #include <dirent.h>
 #include <psp2/io/stat.h>
 
@@ -58,7 +59,7 @@ void ProgramBinaryCache::configure(const char* path) noexcept {
       sceIoMkdir(dir.c_str(),0777);
     }
   }
-  std::fprintf(stderr,"[aurora-gxm] program_cache abi=gxm-cg-gxp-v1 shards=32 root=%s\n",root_.c_str());
+  AURORA_VITA_DIAGF("[aurora-gxm] program_cache abi=gxm-cg-gxp-v1 shards=32 root=%s\n",root_.c_str());
 }
 
 bool ProgramBinaryCache::load(uint64_t sourceHash, ProgramStage stage,
@@ -84,7 +85,7 @@ bool ProgramBinaryCache::load(uint64_t sourceHash, ProgramStage stage,
   std::memcpy(words.data(), bytes.data(), bytes.size());
   ++hits_;
   if (hits_ <= 4 || (hits_ & (hits_ - 1)) == 0)
-    std::fprintf(stderr, "[aurora-gxm] program_cache hits=%u misses=%u\n", hits_, misses_);
+    AURORA_VITA_DIAGF( "[aurora-gxm] program_cache hits=%u misses=%u\n", hits_, misses_);
   return true;
 }
 

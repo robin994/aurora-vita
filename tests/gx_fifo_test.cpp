@@ -170,6 +170,47 @@ static std::vector<u8> xf_cmd(u16 addr, std::initializer_list<u32> values) {
   return bytes;
 }
 
+TEST_F(GXFifoTest, VitaPipelineFingerprintRestoresWhenBpStateReturns) {
+  const u32 stateA = 1u | (static_cast<u32>(GX_LESS) << 1) | (1u << 4);
+  const u32 stateB = 1u | (static_cast<u32>(GX_ALWAYS) << 1);
+
+  decode_fifo(bp_cmd(0x40, stateA));
+  const u64 aLo = gxState().vitaPipelineFingerprintLo;
+  const u64 aHi = gxState().vitaPipelineFingerprintHi;
+
+  decode_fifo(bp_cmd(0x40, stateB));
+  EXPECT_TRUE(gxState().vitaPipelineFingerprintLo != aLo ||
+              gxState().vitaPipelineFingerprintHi != aHi);
+
+  decode_fifo(bp_cmd(0x40, stateA));
+  EXPECT_EQ(gxState().vitaPipelineFingerprintLo, aLo);
+  EXPECT_EQ(gxState().vitaPipelineFingerprintHi, aHi);
+}
+
+TEST_F(GXFifoTest, VitaPipelineFingerprintSharesCpAndXfTextureMatrixState) {
+  const u32 matrixState =
+      3u | (30u << 6) | (33u << 12) | (36u << 18) | (39u << 24);
+
+  decode_fifo(cp_cmd(0x30, matrixState));
+  const u64 cpLo = gxState().vitaPipelineFingerprintLo;
+  const u64 cpHi = gxState().vitaPipelineFingerprintHi;
+
+  reset_gx_state();
+  decode_fifo(xf_cmd(0x1018, {matrixState}));
+  EXPECT_EQ(gxState().vitaPipelineFingerprintLo, cpLo);
+  EXPECT_EQ(gxState().vitaPipelineFingerprintHi, cpHi);
+}
+
+TEST_F(GXFifoTest, VitaPipelineFingerprintIgnoresUniformOnlyZTextureBias) {
+  decode_fifo(bp_cmd(0x40, 1u | (static_cast<u32>(GX_LESS) << 1)));
+  const u64 beforeLo = gxState().vitaPipelineFingerprintLo;
+  const u64 beforeHi = gxState().vitaPipelineFingerprintHi;
+
+  decode_fifo(bp_cmd(0xF4, 0x123456u));
+  EXPECT_EQ(gxState().vitaPipelineFingerprintLo, beforeLo);
+  EXPECT_EQ(gxState().vitaPipelineFingerprintHi, beforeHi);
+}
+
 static u32 read_be32_at(const std::vector<u8>& bytes, size_t offset) {
   return (static_cast<u32>(bytes[offset]) << 24) | (static_cast<u32>(bytes[offset + 1]) << 16) |
          (static_cast<u32>(bytes[offset + 2]) << 8) | static_cast<u32>(bytes[offset + 3]);

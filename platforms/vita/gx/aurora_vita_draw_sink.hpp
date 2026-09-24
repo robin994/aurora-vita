@@ -32,6 +32,17 @@ inline bool has_warning(SubmitWarning set, SubmitWarning bit) noexcept {
   return (static_cast<uint8_t>(set) & static_cast<uint8_t>(bit)) != 0;
 }
 
+inline bool scissor_covers_full_target(const gfx::Scissor& scissor,
+                                       bool defaultTarget,
+                                       uint32_t targetWidth, uint32_t targetHeight,
+                                       uint32_t renderWidth, uint32_t renderHeight) noexcept {
+  const uint32_t width = defaultTarget ? renderWidth : targetWidth;
+  const uint32_t height = defaultTarget ? renderHeight : targetHeight;
+  return scissor.x <= 0 && scissor.y <= 0 &&
+      int64_t(scissor.x) + scissor.width >= width &&
+      int64_t(scissor.y) + scissor.height >= height;
+}
+
 struct SubmitResult {
   bool ok = false;
   gfx::PrepareDrawError drawError = gfx::PrepareDrawError::None;
@@ -105,26 +116,81 @@ private:
   gfx::PreparedDraw preparedScratch_{};
   std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
   std::deque<gfx::FixedVertexUniforms> fixedVertexUniforms_{};
-  gfx::PipelineDesc translatedGpuPipeline_{};
   gfx::FlatHashMap<uint64_t,uint64_t> fixedPipelineKeys_{};
   gfx::VertexTransformState translatedVertexState_{};
   gfx::DrawUniforms translatedUniforms_{};
+  uint32_t translatedUniformGeneration_ = 1;
+  uint32_t resolvedTextureGeneration_ = 1;
   bool translatedVertexStateValid_ = false;
   bool translatedVertexStateLightweight_ = false;
   gfx::Handle whiteTexture_ = gfx::InvalidHandle;
 #if defined(AURORA_VITA_UPSTREAM)
-  uint32_t translatedStateGeneration_ = 0;
-  uint8_t translatedPrimitive_ = 0;
+  struct PipelineTranslationEntry {
+    uint64_t fingerprintLo = 0;
+    uint64_t fingerprintHi = 0;
+    uint64_t pipelineKey = 0;
+    gfx::PipelineDesc pipeline{};
+    gfx::VertexDecodeLayout layout{};
+    gfx::PipelineDesc gpuPipeline{};
+    uint8_t fmt = 0;
+    uint8_t textureMask = 0;
+    bool usesOrigLod = false;
+    bool hasIndirect = false;
+    bool lit = false;
+    bool valid = false;
+  };
+  struct PipelineTranslationSet {
+    std::array<PipelineTranslationEntry, 2> ways{};
+    uint8_t mru = 0;
+  };
+  static constexpr size_t PipelineTranslationSetCount = 64;
+  using PipelineTranslationCache = std::array<PipelineTranslationSet, PipelineTranslationSetCount>;
+
+  struct TextureResolveStamp {
+    uintptr_t data = 0;
+    uint32_t mode0 = 0;
+    uint32_t mode1 = 0;
+    uint32_t image0 = 0;
+    uint32_t image3 = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t format = 0;
+    uint32_t tlut = 0;
+    uint32_t texObjId = 0;
+    uint32_t texDataVersion = 0;
+    uint8_t flags = 0;
+    uintptr_t paletteData = 0;
+    uint32_t paletteFormat = 0;
+    uint32_t paletteEntries = 0;
+    uint32_t paletteObjId = 0;
+    uint32_t paletteDataVersion = 0;
+    uint8_t paletteFlags = 0;
+    bool gxCopyPresent = false;
+    bool localCopyPresent = false;
+    uint32_t localCopyRevision = 0;
+
+    bool operator==(const TextureResolveStamp& rhs) const noexcept {
+      return data == rhs.data && mode0 == rhs.mode0 && mode1 == rhs.mode1 &&
+             image0 == rhs.image0 && image3 == rhs.image3 &&
+             width == rhs.width && height == rhs.height && format == rhs.format &&
+             tlut == rhs.tlut && texObjId == rhs.texObjId &&
+             texDataVersion == rhs.texDataVersion && flags == rhs.flags &&
+             paletteData == rhs.paletteData && paletteFormat == rhs.paletteFormat &&
+             paletteEntries == rhs.paletteEntries && paletteObjId == rhs.paletteObjId &&
+             paletteDataVersion == rhs.paletteDataVersion && paletteFlags == rhs.paletteFlags &&
+             gxCopyPresent == rhs.gxCopyPresent && localCopyPresent == rhs.localCopyPresent &&
+             localCopyRevision == rhs.localCopyRevision;
+    }
+    bool operator!=(const TextureResolveStamp& rhs) const noexcept { return !(*this == rhs); }
+  };
+  TextureResolveStamp texture_resolve_stamp(unsigned slot) const noexcept;
+  std::unique_ptr<PipelineTranslationCache> pipelineTranslationCache_{};
+  PipelineTranslationEntry* translatedEntry_ = nullptr;
+  uint64_t translatedFingerprintLo_ = 0;
+  uint64_t translatedFingerprintHi_ = 0;
   uint8_t translatedFmt_ = 0;
-  gfx::PipelineDesc translatedPipeline_{};
-  gfx::VertexDecodeLayout translatedLayout_{};
-  uint64_t translatedPipelineKey_ = 0;
-  uint8_t translatedTextureMask_ = 0;
-  bool translatedUsesOrigLod_ = false;
-  bool translatedHasIndirect_ = false;
-  bool translatedLit_ = false;
-  bool translatedStateValid_ = false;
   std::array<gfx::TextureBinding,gfx::MaxTextures> resolvedTextureBindings_{};
+  std::array<TextureResolveStamp,gfx::MaxTextures> resolvedTextureStamps_{};
   uint8_t resolvedTextureMask_ = 0;
   uint8_t resolvedVolatileTextureMask_ = 0;
   uint8_t resolvedFallbackTextureMask_ = 0;
@@ -139,9 +205,15 @@ private:
   bool queuedPipelineValid_ = false;
 #endif
   uint64_t submittedDraws_ = 0;
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+  static constexpr gfx::Telemetry* telemetry_ = nullptr;
+  static constexpr integration::FeatureCoverage* coverage_ = nullptr;
+  static constexpr integration::FrameTrace* trace_ = nullptr;
+#else
   gfx::Telemetry* telemetry_ = nullptr;
   integration::FeatureCoverage* coverage_ = nullptr;
   integration::FrameTrace* trace_ = nullptr;
+#endif
   bool verboseGeometryDiagnostics_ = false;
   bool strictUnsupported_ = false;
   bool strictFailed_ = false;

@@ -141,6 +141,65 @@ void Telemetry::pipeline(bool hit) noexcept {
   if (hit) { ++frame_.counters.pipelineHits; ++lifetime_.pipelineHits; }
   else { ++frame_.counters.pipelineMisses; ++lifetime_.pipelineMisses; }
 }
+void Telemetry::frontend_pipeline_translate(bool hit) noexcept {
+  auto& frame = hit ? frame_.counters.frontendPipelineTranslateHits : frame_.counters.frontendPipelineTranslateMisses;
+  auto& lifetime = hit ? lifetime_.frontendPipelineTranslateHits : lifetime_.frontendPipelineTranslateMisses;
+  ++frame;
+  ++lifetime;
+}
+void Telemetry::frontend_pipeline_fingerprint(bool hit) noexcept {
+  auto& frame = hit ? frame_.counters.frontendPipelineFingerprintHits : frame_.counters.frontendPipelineFingerprintMisses;
+  auto& lifetime = hit ? lifetime_.frontendPipelineFingerprintHits : lifetime_.frontendPipelineFingerprintMisses;
+  ++frame;
+  ++lifetime;
+}
+void Telemetry::frontend_vertex_state_reuse() noexcept {
+  ++frame_.counters.frontendVertexStateReuses;
+  ++lifetime_.frontendVertexStateReuses;
+}
+void Telemetry::frontend_vertex_state_build(bool lightweight) noexcept {
+  if (lightweight) {
+    ++frame_.counters.frontendVertexStateLightBuilds;
+    ++lifetime_.frontendVertexStateLightBuilds;
+  } else {
+    ++frame_.counters.frontendVertexStateFullBuilds;
+    ++lifetime_.frontendVertexStateFullBuilds;
+  }
+}
+void Telemetry::frontend_vertex_state_fallback() noexcept {
+  ++frame_.counters.frontendVertexStateFallbackBuilds;
+  ++lifetime_.frontendVertexStateFallbackBuilds;
+}
+void Telemetry::frontend_texture_binding(bool reused) noexcept {
+  if (reused) {
+    ++frame_.counters.frontendTextureBindingReuses;
+    ++lifetime_.frontendTextureBindingReuses;
+  } else {
+    ++frame_.counters.frontendTextureBindingBuilds;
+    ++lifetime_.frontendTextureBindingBuilds;
+  }
+}
+void Telemetry::frontend_queued_pipeline(bool reused) noexcept {
+  if (reused) {
+    ++frame_.counters.frontendQueuedPipelineReuses;
+    ++lifetime_.frontendQueuedPipelineReuses;
+  } else {
+    ++frame_.counters.frontendQueuedPipelineResolves;
+    ++lifetime_.frontendQueuedPipelineResolves;
+  }
+}
+void Telemetry::frontend_draw_path(bool gpuGeometry, bool streamed) noexcept {
+  if (gpuGeometry) {
+    ++frame_.counters.frontendGpuGeometryDraws;
+    ++lifetime_.frontendGpuGeometryDraws;
+  } else if (streamed) {
+    ++frame_.counters.frontendStreamedDraws;
+    ++lifetime_.frontendStreamedDraws;
+  } else {
+    ++frame_.counters.frontendPreparedDraws;
+    ++lifetime_.frontendPreparedDraws;
+  }
+}
 void Telemetry::texture(bool hit, bool uploaded, uint64_t uploadBytes) noexcept {
   if (hit) { ++frame_.counters.textureHits; ++lifetime_.textureHits; }
   else { ++frame_.counters.textureMisses; ++lifetime_.textureMisses; }
@@ -202,6 +261,21 @@ std::string Telemetry::format_frame() const {
       << " geo_volatile_bypass=" << frame_.counters.geometryVolatileBypasses
       << " pipeline_hit=" << frame_.counters.pipelineHits
       << " pipeline_miss=" << frame_.counters.pipelineMisses
+      << " fe_pipe_xlat_hit=" << frame_.counters.frontendPipelineTranslateHits
+      << " fe_pipe_xlat_miss=" << frame_.counters.frontendPipelineTranslateMisses
+      << " fe_pipe_fp_hit=" << frame_.counters.frontendPipelineFingerprintHits
+      << " fe_pipe_fp_miss=" << frame_.counters.frontendPipelineFingerprintMisses
+      << " fe_vtx_reuse=" << frame_.counters.frontendVertexStateReuses
+      << " fe_vtx_light=" << frame_.counters.frontendVertexStateLightBuilds
+      << " fe_vtx_full=" << frame_.counters.frontendVertexStateFullBuilds
+      << " fe_vtx_fallback=" << frame_.counters.frontendVertexStateFallbackBuilds
+      << " fe_tex_reuse=" << frame_.counters.frontendTextureBindingReuses
+      << " fe_tex_build=" << frame_.counters.frontendTextureBindingBuilds
+      << " fe_qpipe_reuse=" << frame_.counters.frontendQueuedPipelineReuses
+      << " fe_qpipe_resolve=" << frame_.counters.frontendQueuedPipelineResolves
+      << " fe_gpu_geo_draw=" << frame_.counters.frontendGpuGeometryDraws
+      << " fe_stream_draw=" << frame_.counters.frontendStreamedDraws
+      << " fe_prepared_draw=" << frame_.counters.frontendPreparedDraws
       << " texture_hit=" << frame_.counters.textureHits
       << " texture_miss=" << frame_.counters.textureMisses
       << " texture_uploads=" << frame_.counters.textureUploads
@@ -240,6 +314,7 @@ bool Telemetry::append_frame_log(const char* path) const noexcept {
   return ok;
 }
 
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
 ScopedTelemetryPhase::ScopedTelemetryPhase(Telemetry* telemetry, TelemetryPhase phase,
                                            TelemetryPhase aggregate) noexcept
     : telemetry_(telemetry), phase_(phase), aggregate_(aggregate),
@@ -251,5 +326,6 @@ ScopedTelemetryPhase::~ScopedTelemetryPhase() {
   if (aggregate_ != TelemetryPhase::Count && aggregate_ != phase_)
     telemetry_->add_time(aggregate_, elapsed);
 }
+#endif
 
 } // namespace aurora::vita::gfx

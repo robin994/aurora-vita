@@ -176,6 +176,163 @@ static GXPrimitive primitive_from_draw_cmd(u8 cmd) {
 static u32 bp_get(u32 reg, u32 size, u32 shift);
 static inline f32 read_f32(const u8* ptr, bool bigEndian);
 
+namespace {
+constexpr size_t VitaFpBpBase = 0;
+constexpr size_t VitaFpXfBase = 256;
+constexpr size_t VitaFpCpBase = 352;
+constexpr size_t VitaFpArrayPtrBase = 608;
+constexpr size_t VitaFpArrayMetaBase = VitaFpArrayPtrBase + MaxVtxAttr;
+constexpr size_t VitaFpSharedBase = VitaFpArrayMetaBase + MaxVtxAttr;
+constexpr size_t VitaFpNumTexGens = VitaFpSharedBase;
+constexpr size_t VitaFpTexMtxA = VitaFpSharedBase + 1;
+constexpr size_t VitaFpTexMtxB = VitaFpSharedBase + 2;
+constexpr u64 VitaFpWritten = u64{1} << 63;
+static_assert(VitaFpTexMtxB < GXState::VitaPipelineFingerprintSlotCount);
+
+static inline u64 vita_fp_mix(u64 x) noexcept {
+  x ^= x >> 30;
+  x *= 0xbf58476d1ce4e5b9ull;
+  x ^= x >> 27;
+  x *= 0x94d049bb133111ebull;
+  x ^= x >> 31;
+  return x;
+}
+
+static inline u64 vita_fp_token(size_t slot, u64 value, u64 salt) noexcept {
+  if (value == 0) return 0;
+  const u64 slotKey = (static_cast<u64>(slot) + 1u) * 0x9e3779b97f4a7c15ull;
+  return vita_fp_mix(value ^ slotKey ^ salt);
+}
+
+static inline void vita_fp_update(size_t slot, u64 value) noexcept {
+  auto& old = g_gxState.vitaPipelineFingerprintSlots[slot];
+  if (old == value) return;
+  constexpr u64 SaltLo = 0x243f6a8885a308d3ull;
+  constexpr u64 SaltHi = 0x13198a2e03707344ull;
+  g_gxState.vitaPipelineFingerprintLo ^=
+      vita_fp_token(slot, old, SaltLo) ^ vita_fp_token(slot, value, SaltLo);
+  g_gxState.vitaPipelineFingerprintHi ^=
+      vita_fp_token(slot, old, SaltHi) ^ vita_fp_token(slot, value, SaltHi);
+  old = value;
+}
+
+static inline void vita_fp_update_written(size_t slot, u64 value) noexcept {
+  vita_fp_update(slot, VitaFpWritten | value);
+}
+
+static void vita_fp_bp_write(u32 regId, u32 raw) noexcept {
+  raw &= 0x00ffffffu;
+  auto write = [&](u32 mask) noexcept {
+    vita_fp_update_written(VitaFpBpBase + regId, static_cast<u64>(raw & mask));
+  };
+
+  if (regId >= 0xc0 && regId <= 0xdf) {
+    write(0x00ffffffu);
+    return;
+  }
+  if (regId >= 0x10 && regId <= 0x1f) {
+    write(0x001fffffu);
+    return;
+  }
+  if (regId >= 0x28 && regId <= 0x2f) {
+    write(0x003fffffu);
+    return;
+  }
+  if (regId >= 0xf6 && regId <= 0xfd) {
+    write(0x00ffffffu);
+    return;
+  }
+
+  switch (regId) {
+  case 0x00:
+    // numTexGens is also written by XF 0x103f, so keep it in a shared
+    // semantic slot. The remaining shader-count/cull fields are BP-only.
+    write(0x0007fc00u);
+    vita_fp_update_written(VitaFpNumTexGens, raw & 0x0fu);
+    break;
+  case 0x25:
+  case 0x26:
+    write(0x0000ffffu);
+    break;
+  case 0x27:
+    write(0x00ffffffu);
+    break;
+  case 0x40:
+    write(0x0000001fu);
+    break;
+  case 0x41:
+    // Dither (bit 2) does not enter the Vita PipelineDesc.
+    write(0x0000fffbu);
+    break;
+  case 0x42:
+    write(0x000001ffu);
+    break;
+  case 0xe8:
+    write(1u << 10);
+    break;
+  case 0xf1:
+    // Only fog type/projection mode enters PipelineDesc; A/B/C/color are uniforms.
+    write(0x00f00000u);
+    break;
+  case 0xf3:
+    write(0x00ffffffu);
+    break;
+  default:
+    break;
+  }
+}
+
+static void vita_fp_xf_write(u32 reg, u32 value) noexcept {
+  auto write = [&](u32 mask) noexcept {
+    vita_fp_update_written(VitaFpXfBase + reg, static_cast<u64>(value & mask));
+  };
+  if (reg >= 0x0e && reg <= 0x11) {
+    write(0x00007fffu);
+  } else if (reg >= 0x40 && reg < 0x40 + MaxTexCoord) {
+    // type/projection, source row and bump source. inputFormAB11 is not
+    // consumed by the Vita direct translator.
+    write((1u << 1) | (7u << 4) | (0x1fu << 7) | (7u << 15));
+  } else if (reg >= 0x50 && reg < 0x50 + MaxTexCoord) {
+    write(0x0000013fu); // post matrix + normalize
+  }
+}
+
+static inline void vita_fp_num_texgens(u32 count) noexcept {
+  vita_fp_update_written(VitaFpNumTexGens, static_cast<u64>(count & 0xffu));
+}
+
+static void vita_fp_tex_mtx_group(unsigned first, size_t slot) noexcept {
+  u64 packed = 0;
+  for (unsigned i = 0; i < 4 && first + i < MaxTexCoord; ++i) {
+    packed |= (static_cast<u64>(g_gxState.tcgs[first + i].mtx) & 0xffu) << (i * 8u);
+  }
+  vita_fp_update_written(slot, packed);
+}
+
+static inline bool vita_fp_cp_raw_relevant(u8 addr) noexcept {
+  return addr == 0x50 || addr == 0x60 || (addr >= 0x70 && addr <= 0x97);
+}
+
+static void vita_fp_cp_write(u8 addr, u32 value) noexcept {
+  if (!vita_fp_cp_raw_relevant(addr)) return;
+  u32 mask = 0xffffffffu;
+  if (addr == 0x50) mask = 0x0001ffffu;
+  else if (addr == 0x60) mask = 0x0000ffffu;
+  vita_fp_update_written(VitaFpCpBase + addr, static_cast<u64>(value & mask));
+}
+
+static void vita_fp_array(unsigned attrIdx) noexcept {
+  if (attrIdx >= MaxVtxAttr) return;
+  const auto& array = g_gxState.arrays[attrIdx];
+  vita_fp_update(VitaFpArrayPtrBase + attrIdx,
+                 static_cast<u64>(reinterpret_cast<uintptr_t>(array.data)));
+  const u64 meta = static_cast<u64>(array.size) |
+                   (static_cast<u64>(array.stride) << 32) |
+                   (static_cast<u64>(array.le ? 1u : 0u) << 40);
+  vita_fp_update_written(VitaFpArrayMetaBase + attrIdx, meta);
+}
+} // namespace
+
 static GXPixelFmt decode_pixel_fmt(u32 peCtrl, u32 cmode1) {
   switch (bp_get(peCtrl, 3, 0)) {
   case 0:
@@ -275,7 +432,9 @@ static inline f32 read_f32(const u8* ptr, bool bigEndian) {
   return val;
 }
 
-// Marks draw state dirty *and* invalidates the resolved-pipeline memo.
+// Marks draw state dirty and invalidates the shared upstream pipeline memo.
+// Vita's translation reuse is keyed independently by the incremental
+// fingerprint above.
 static inline void mark_pipeline_state_dirty() noexcept {
   g_gxState.stateDirty = true;
   g_gxState.pipelineStateGeneration = next_gx_state_epoch();
@@ -651,6 +810,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     const u32 merged = (g_gxState.bpRegCache[regId] & ~ssMask) | (value & ssMask);
     value = (regId << 24) | (merged & 0x00FFFFFF);
     if (g_gxState.bpRegCache[regId] == value) return;
+    vita_fp_bp_write(regId, value & 0x00ffffffu);
     g_gxState.bpRegCache[regId] = value;
   }
   // TEV color combiner stages (0xC0, 0xC2, 0xC4, ... 0xDE)
@@ -871,24 +1031,30 @@ static void handle_bp(u32 value, bool bigEndian) {
 
     if (stage0 < MaxTevStages) {
       auto& s = g_gxState.tevStages[stage0];
-      s.texMapId = static_cast<GXTexMapID>(bp_get(value, 3, 0));
-      s.texCoordId = static_cast<GXTexCoordID>(bp_get(value, 3, 3));
+      auto texMapId = static_cast<GXTexMapID>(bp_get(value, 3, 0));
+      const auto texCoordId = static_cast<GXTexCoordID>(bp_get(value, 3, 3));
       // bit 6 = tex enable
       if (!bp_get(value, 1, 6)) {
-        s.texMapId = GX_TEXMAP_NULL;
+        texMapId = GX_TEXMAP_NULL;
       }
       u32 chanHw = bp_get(value, 3, 7);
-      s.channelId = (chanHw < 8) ? r2c[chanHw] : GX_COLOR_NULL;
+      const auto channelId = (chanHw < 8) ? r2c[chanHw] : GX_COLOR_NULL;
+      s.texMapId = texMapId;
+      s.texCoordId = texCoordId;
+      s.channelId = channelId;
     }
     if (stage1 < MaxTevStages) {
       auto& s = g_gxState.tevStages[stage1];
-      s.texMapId = static_cast<GXTexMapID>(bp_get(value, 3, 12));
-      s.texCoordId = static_cast<GXTexCoordID>(bp_get(value, 3, 15));
+      auto texMapId = static_cast<GXTexMapID>(bp_get(value, 3, 12));
+      const auto texCoordId = static_cast<GXTexCoordID>(bp_get(value, 3, 15));
       if (!bp_get(value, 1, 18)) {
-        s.texMapId = GX_TEXMAP_NULL;
+        texMapId = GX_TEXMAP_NULL;
       }
       u32 chanHw = bp_get(value, 3, 19);
-      s.channelId = (chanHw < 8) ? r2c[chanHw] : GX_COLOR_NULL;
+      const auto channelId = (chanHw < 8) ? r2c[chanHw] : GX_COLOR_NULL;
+      s.texMapId = texMapId;
+      s.texCoordId = texCoordId;
+      s.channelId = channelId;
     }
     mark_pipeline_state_dirty();
     break;
@@ -1323,10 +1489,12 @@ static void handle_bp(u32 value, bool bigEndian) {
   case 0xEA:
   case 0xEB:
   case 0xEC:
-  case 0xED:
-    g_gxState.fogRange[regId - 0xE8] = value & 0x00FFFFFFu;
+  case 0xED: {
+    const u32 idx = regId - 0xE8;
+    g_gxState.fogRange[idx] = value & 0x00FFFFFFu;
     mark_pipeline_state_dirty();
     break;
+  }
 
   default:
     if (const auto mapping = decode_tex_bp_reg(regId); mapping.has_value()) {
@@ -1402,6 +1570,7 @@ static bool cp_register_write_unchanged(u8 addr, u32 value) {
   if (s_cpRegisterCacheValid[addr] && s_cpRegisterCache[addr] == value) {
     return true;
   }
+  vita_fp_cp_write(addr, value);
   s_cpRegisterCacheValid[addr] = true;
   s_cpRegisterCache[addr] = value;
   return false;
@@ -1467,6 +1636,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     }
     // Same matrix indices as XF 0x18, written from a different bank.
     g_gxState.invalidateXfReg(0x18);
+    vita_fp_tex_mtx_group(0, VitaFpTexMtxA);
     mark_pipeline_state_dirty();
     break;
   }
@@ -1480,6 +1650,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     }
     // Same matrix indices as XF 0x19, written from a different bank.
     g_gxState.invalidateXfReg(0x19);
+    vita_fp_tex_mtx_group(4, VitaFpTexMtxB);
     mark_pipeline_state_dirty();
     break;
   }
@@ -1559,6 +1730,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
         const auto newStride = static_cast<u8>(value);
         if (array.stride != newStride) {
           array.stride = newStride;
+          vita_fp_array(attrIdx);
           mark_pipeline_state_dirty();
         }
       }
@@ -1604,6 +1776,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
       // Skip register writes that decode to state we already hold.
       const bool cacheable = reg < g_gxState.xfRegCache.size();
       const bool unchanged = cacheable && g_gxState.xfRegMatches(reg, val);
+      if (cacheable && !unchanged) vita_fp_xf_write(reg, val);
       if (cacheable) g_gxState.storeXfReg(reg, val);
       // Viewport (0x1A-0x1F) and projection (0x20-0x26) keep their unconditional apply below; only the banks that already had skip semantics and the TexGen bank drop out here.
       if (unchanged && (reg <= 0x19 || reg >= 0x3F)) continue;
@@ -1689,14 +1862,17 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
           g_gxState.tcgs[i].mtx = texMtx;
         }
+        vita_fp_tex_mtx_group(0, VitaFpTexMtxA);
         mark_pipeline_state_dirty();
         break;
       }
       case 0x19: {
         // Matrix index B: TexCoord4-7 matrix indices
         for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
-          g_gxState.tcgs[i + 4].mtx = static_cast<GXTexMtx>(bp_get(val, 6, i * 6));
+          const auto texMtx = static_cast<GXTexMtx>(bp_get(val, 6, i * 6));
+          g_gxState.tcgs[i + 4].mtx = texMtx;
         }
+        vita_fp_tex_mtx_group(4, VitaFpTexMtxB);
         mark_pipeline_state_dirty();
         break;
       }
@@ -1731,7 +1907,8 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
       }
       case 0x3F:
         // numTexGens
-        g_gxState.numTexGens = val;
+        g_gxState.numTexGens = static_cast<u8>(val);
+        vita_fp_num_texgens(g_gxState.numTexGens);
         mark_pipeline_state_dirty();
         break;
       default:
@@ -1767,8 +1944,11 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
         } else if (reg >= 0x50 && reg <= 0x5F) {
           u32 tcIdx = reg - 0x50;
           if (tcIdx < MaxTexCoord) {
-            g_gxState.tcgs[tcIdx].postMtx = static_cast<GXPTTexMtx>(bp_get(val, 6, 0) + 64);
-            g_gxState.tcgs[tcIdx].normalize = bp_get(val, 1, 8) != 0;
+            auto& tcg = g_gxState.tcgs[tcIdx];
+            const auto postMtx = static_cast<GXPTTexMtx>(bp_get(val, 6, 0) + 64);
+            const bool normalize = bp_get(val, 1, 8) != 0;
+            tcg.postMtx = postMtx;
+            tcg.normalize = normalize;
             mark_pipeline_state_dirty();
           }
         } else {
@@ -2434,6 +2614,7 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       array.le = le;
       // Only drop the cached upload when the backing array actually changes.
       array.cachedRange = {};
+      vita_fp_array(attrIdx);
       mark_pipeline_state_dirty();
     }
   } else if (subCmd == GX_LOAD_AURORA_TEXOBJ) {

@@ -475,9 +475,12 @@ void GXCopyDisp(void* dest, GXBool clear) {
   if (!aurora::vita::renderer().display_copy(source)) {
     static bool s_warnedDisplayCopy = false;
     if (!s_warnedDisplayCopy) {
-      std::printf("[aurora-vita] display copy failed; presenting raw EFB\n");
+      std::printf("[aurora-vita] display copy failed; discarding present\n");
       s_warnedDisplayCopy = true;
     }
+    // Never expose the internal 640x448 EFB directly as a Vita scanout. If the
+    // scaled copy fails, retain the previous valid frame instead.
+    aurora::vita::discard_present();
   }
 
   if (clear) {

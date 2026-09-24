@@ -149,19 +149,19 @@ void Renderer::clear_current(const Color& color,float depth,bool clearRgb,bool c
 #endif
 }
 void Renderer::execute(const CommandStream&s) noexcept {execute_range(s,0,s.size(),true);}
-void Renderer::execute_range(const CommandStream&s,size_t begin,size_t end,bool finalize) noexcept {const auto&commands=s.commands();begin=std::min(begin,commands.size());end=std::min(std::max(end,begin),commands.size());for(size_t index=begin;index<end;++index){const auto&c=commands[index];switch(c.type){case CommandType::Clear:
+void Renderer::execute_range(const CommandStream&s,size_t begin,size_t end,bool finalize) noexcept {const auto&commands=s.commands();begin=std::min(begin,commands.size());end=std::min(std::max(end,begin),commands.size());if(s.draw_only()){for(size_t index=begin;index<end;++index)draw(s.draw_packet(static_cast<uint32_t>(index)));if(finalize){pipelines_.clear_pins();pipelines_.trim_to_budget();}return;}for(size_t index=begin;index<end;++index){const auto&c=commands[index];switch(c.type){case CommandType::Clear:
   clear_current(c.clear.color,c.clear.depth,c.clear.colorEnable,c.clear.colorEnable,c.clear.depthEnable);break;
 case CommandType::Draw:draw(s.draw_packet(c.drawIndex));break;case CommandType::SetRenderTarget:if(c.target.target)bind_efb(c.target.target);else bind_default();break;case CommandType::CopyEfb:if(c.copy.destination)blit_efb(c.copy.destination);break;case CommandType::Barrier:
 #if defined(__vita__)
   glFlush();
 #endif
   break;}}if(finalize){pipelines_.clear_pins();pipelines_.trim_to_budget();}}
-void Renderer::draw(const DrawPacket&d) noexcept {const auto*p=pipelines_.find(d.pipelineKey);if(!p)return;if(p->desc.fixedVertexOnGpu&&!d.fixedVertexUniforms)return;pipelines_.bind(*p,d.uniforms,&stats_,d.fixedVertexUniforms);
+void Renderer::draw(const DrawPacket&d) noexcept {const auto*p=pipelines_.find(d.pipelineKey);if(!p)return;if(p->desc.fixedVertexOnGpu&&!d.fixedVertexUniforms)return;const auto&uniforms=d.gpu_uniforms();const auto&textures=d.texture_bindings();pipelines_.bind(*p,uniforms,&stats_,d.fixedVertexUniforms);
 #if defined(__vita__)
   if(!viewportValid_||!same_viewport(cachedViewport_,d.viewport)){const GLint vy=static_cast<GLint>(targetHeight_)-static_cast<GLint>(d.viewport.y+d.viewport.height);glViewport((GLint)d.viewport.x,vy,(GLsizei)d.viewport.width,(GLsizei)d.viewport.height);const float minDepth=std::clamp(std::min(d.viewport.znear,d.viewport.zfar),0.0f,1.0f);const float maxDepth=std::clamp(std::max(d.viewport.znear,d.viewport.zfar),0.0f,1.0f);glDepthRangef(minDepth,maxDepth);cachedViewport_=d.viewport;viewportValid_=true;}
   if(!scissorEnabled_){glEnable(GL_SCISSOR_TEST);scissorEnabled_=true;}
   if(!scissorValid_||!same_scissor(cachedScissor_,d.scissor)){const GLint sy=static_cast<GLint>(targetHeight_)-(d.scissor.y+d.scissor.height);glScissor(d.scissor.x,sy,d.scissor.width,d.scissor.height);cachedScissor_=d.scissor;scissorValid_=true;}
-  for(unsigned i=0;i<MaxTextures;i++)if(d.textures[i].texture&&(!textureStateValid_[i]||!same_texture_binding(cachedTextures_[i],d.textures[i]))){if(d.textures[i].source==TextureSource::Efb)efb_.bind_texture(d.textures[i].texture,i,d.textures[i].sampler);else textures_.bind(d.textures[i].texture,i,d.textures[i].sampler);cachedTextures_[i]=d.textures[i];textureStateValid_[i]=true;}
+  for(unsigned i=0;i<MaxTextures;i++)if(textures[i].texture&&(!textureStateValid_[i]||!same_texture_binding(cachedTextures_[i],textures[i]))){if(textures[i].source==TextureSource::Efb)efb_.bind_texture(textures[i].texture,i,textures[i].sampler);else textures_.bind(textures[i].texture,i,textures[i].sampler);cachedTextures_[i]=textures[i];textureStateValid_[i]=true;}
   GLuint vb=buffers_.gl_id(d.vertices.buffer);if(!vb)return;
   const uint32_t vertexBaseOffset=d.absoluteVertexIndices?0:d.vertices.offset;
   if(!vertexStateValid_||cachedVertexBuffer_!=d.vertices.buffer||cachedVertexOffset_!=vertexBaseOffset||cachedVertexPipeline_!=p->key){

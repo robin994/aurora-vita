@@ -506,17 +506,32 @@ struct DrawPacket {
   uint32_t indexCount = 0;
   uint32_t firstVertex = 0;
   uint32_t instanceCount = 1;
+  // Optional frontend generations. Zero means "unknown" and keeps the exact
+  // byte-comparison fallback. Non-zero values let native backends prove that
+  // queued uniform/texture state is unchanged without rescanning large structs.
+  uint32_t uniformGeneration = 0;
+  uint32_t textureGeneration = 0;
   // Streaming GX draws can store U16 indices relative to the start of the
   // frame VBO instead of the packet's vertex slice. This lets adjacent draws
   // concatenate index ranges into one physical draw without moving vertices.
   bool absoluteVertexIndices = false;
   std::array<TextureBinding, MaxTextures> textures{};
   GpuDrawUniforms uniforms{};
+  // CommandStream may intern these large immutable payloads. Immediate/probe
+  // draws leave the references null and keep using the inline values above.
+  const std::array<TextureBinding, MaxTextures>* textureRef = nullptr;
+  const GpuDrawUniforms* uniformRef = nullptr;
   // Optional immutable snapshot owned by the submitting command batch. Never
   // points at live GX state; the owner retains it until execute() has returned.
   const FixedVertexUniforms* fixedVertexUniforms = nullptr;
   Viewport viewport{};
   Scissor scissor{};
+  const std::array<TextureBinding, MaxTextures>& texture_bindings() const noexcept {
+    return textureRef ? *textureRef : textures;
+  }
+  const GpuDrawUniforms& gpu_uniforms() const noexcept {
+    return uniformRef ? *uniformRef : uniforms;
+  }
 };
 
 struct FrameStats {
@@ -546,6 +561,11 @@ struct FrameStats {
   uint32_t nativeHsrPassSwitches = 0;
   uint32_t nativeDirectTextureDraws = 0;
   uint32_t nativeDirectTextureSlots = 0;
+  uint32_t nativeFragmentTevOps = 0;
+  uint32_t nativeFragmentTextureOps = 0;
+  uint32_t nativeFragmentComplexDraws = 0;
+  uint32_t nativeFragmentIndirectDraws = 0;
+  uint32_t nativeFragmentMaxTevStages = 0;
   uint32_t nativeSceneCount = 0;
   uint32_t nativeDepthLoadScenes = 0;
   uint32_t nativeDepthWrittenScenes = 0;

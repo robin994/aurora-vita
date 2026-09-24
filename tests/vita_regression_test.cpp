@@ -110,9 +110,32 @@ void command_lifetimes() {
   CHECK(next.pipelineKey==0&&next.fixedVertexUniforms==nullptr);
   CHECK(next.textures[0].uvScaleX==1.f&&next.textures[0].uvScaleY==1.f);
 }
+
+void command_state_interning() {
+  CommandStream stream;
+  DrawUniforms uniforms{};
+  std::array<TextureBinding,MaxTextures> textures{};
+  uniforms.mvp[0]=3.f;textures[0].texture=77;
+  auto& a=stream.emplace_draw_fast();
+  stream.bind_state(a,uniforms,textures,11,21);
+  auto& b=stream.emplace_draw_fast();
+  stream.bind_state(b,uniforms,textures,11,21);
+  CHECK(a.uniformRef&&a.uniformRef==b.uniformRef);
+  CHECK(a.textureRef&&a.textureRef==b.textureRef);
+  CHECK(a.gpu_uniforms().mvp[0]==3.f&&a.texture_bindings()[0].texture==77);
+  uniforms.mvp[0]=9.f;
+  auto& c=stream.emplace_draw_fast();
+  stream.bind_state(c,uniforms,textures,12,21);
+  CHECK(c.uniformRef&&c.uniformRef!=a.uniformRef);
+  CHECK(c.textureRef==a.textureRef&&c.gpu_uniforms().mvp[0]==9.f);
+  stream.reset();
+  auto& d=stream.emplace_draw_fast();
+  stream.bind_state(d,uniforms,textures,12,21);
+  CHECK(d.uniformRef&&d.textureRef&&d.gpu_uniforms().mvp[0]==9.f);
+}
 }
 int main() {
-  compiled_decode_equivalence();arena_boundaries();bounded_mips();command_lifetimes();
+  compiled_decode_equivalence();arena_boundaries();bounded_mips();command_lifetimes();command_state_interning();
   const aurora::vita::BackendConfig defaults{};
   CHECK(defaults.static_geometry_budget==0);
   CHECK(defaults.render_width==0&&defaults.render_height==0);

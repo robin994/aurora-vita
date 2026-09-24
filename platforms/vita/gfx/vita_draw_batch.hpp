@@ -1,7 +1,7 @@
 #pragma once
 #include "vita_gfx_types.hpp"
 #include <cstring>
-#include "vita_byte_compare.h"
+#include "vita_byte_compare.hpp"
 
 namespace aurora::vita::gfx {
 // Only adjacent, CPU-prepared triangle lists may use this predicate. Their
@@ -15,7 +15,7 @@ inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noex
       uint64_t(a.vertexCount) + b.vertexCount >= 64000u) return false;
   if (a.fixedVertexUniforms != b.fixedVertexUniforms) {
     if (!a.fixedVertexUniforms || !b.fixedVertexUniforms ||
-        !aurora_vita_bytes_equal(a.fixedVertexUniforms,b.fixedVertexUniforms,sizeof(FixedVertexUniforms))) return false;
+        !byte_spans_equal(a.fixedVertexUniforms,b.fixedVertexUniforms,sizeof(FixedVertexUniforms))) return false;
   }
   if (a.vertices.buffer != b.vertices.buffer || a.indices.buffer != b.indices.buffer ||
       uint64_t(a.vertices.offset) + a.vertices.size != b.vertices.offset ||
@@ -24,10 +24,16 @@ inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noex
       a.viewport.width != b.viewport.width || a.viewport.height != b.viewport.height ||
       a.viewport.znear != b.viewport.znear || a.viewport.zfar != b.viewport.zfar ||
       a.scissor.x != b.scissor.x || a.scissor.y != b.scissor.y ||
-      a.scissor.width != b.scissor.width || a.scissor.height != b.scissor.height ||
-      !aurora_vita_bytes_equal(&a.uniforms, &b.uniforms, sizeof(a.uniforms))) return false;
+      a.scissor.width != b.scissor.width || a.scissor.height != b.scissor.height) return false;
+  if(a.uniformGeneration&&b.uniformGeneration) {
+    if(a.uniformGeneration!=b.uniformGeneration)return false;
+  } else if(!byte_spans_equal(&a.gpu_uniforms(),&b.gpu_uniforms(),sizeof(GpuDrawUniforms))) return false;
+  if(a.textureGeneration&&b.textureGeneration)
+    return a.textureGeneration==b.textureGeneration;
+  const auto& at=a.texture_bindings();
+  const auto& bt=b.texture_bindings();
   for (unsigned i = 0; i < MaxTextures; ++i) {
-    const auto& x = a.textures[i]; const auto& y = b.textures[i];
+    const auto& x = at[i]; const auto& y = bt[i];
     if (x.texture != y.texture || x.source != y.source || x.flipX != y.flipX ||
         x.flipY != y.flipY || x.forceOpaque != y.forceOpaque || x.sampleFormat != y.sampleFormat ||
         x.sampler.wrapS != y.sampler.wrapS || x.sampler.wrapT != y.sampler.wrapT ||

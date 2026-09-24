@@ -11,6 +11,7 @@ namespace aurora::vita::gfx {
 struct CompiledPipeline {
   uint64_t key=0;
   uint64_t lastUsed=0;
+#if !defined(AURORA_VITA_RENDERER_GXM)
   PipelineDesc desc{};
   unsigned program=0;
   int uMvp=-1,uKColor=-1,uTevReg=-1,uFogColor=-1,uFogParams=-1,uFogRangeK=-1,uRenderViewportWidth=-1,uIndMtx=-1,uTexcoordScale=-1,uTextureSizeBias=-1;
@@ -21,6 +22,7 @@ struct CompiledPipeline {
   std::array<int,MaxTextures> uGxTexture{},uGxPost{};
   mutable FixedVertexUniforms cachedFixedVertex{};
   mutable bool fixedVertexValid=false;
+#endif
 };
 
 // Only the subset that maps to vitaGL fixed-function state. Keeping this small
@@ -47,7 +49,8 @@ public:
   void clear() noexcept;
   void invalidate_bound() noexcept{bound_=0;boundPipeline_=nullptr;fixedStateValid_=false;}
   void set_max_entries(size_t maxEntries) noexcept;
-  void configure_hot_manifest(const char* path,size_t prewarmLimit=192) noexcept;
+  void configure_hot_manifest(const char* path,size_t prewarmLimit=192,
+                              bool trackUsage=true) noexcept;
   size_t prewarm_hot(FrameStats* stats=nullptr) noexcept;
   void save_hot_manifest() noexcept;
   void pin(uint64_t key) noexcept { if(key) pinned_.insert(key); }
@@ -93,5 +96,6 @@ private:
   size_t prewarmLimit_=192;
   size_t newHotEntriesSinceSave_=0;
   bool hotDirty_=false;
+  bool hotTrackingEnabled_=true;
 };
 } // namespace aurora::vita::gfx

@@ -117,8 +117,16 @@ bool batch_compatible(const DrawPacket&a,const DrawPacket&b) noexcept {
   // channel/light state is consumed by the CPU vertex pipeline before enqueue and
   // never reaches the Vita shader. Comparing it here both burns memory bandwidth
   // and prevents otherwise identical GPU draws from coalescing.
-  if(std::memcmp(&a.uniforms,&b.uniforms,sizeof(GpuDrawUniforms))!=0)return false;
-  for(unsigned i=0;i<MaxTextures;i++)if(!same_texture(a.textures[i],b.textures[i]))return false;
+  if(a.uniformGeneration&&b.uniformGeneration) {
+    if(a.uniformGeneration!=b.uniformGeneration)return false;
+  } else if(std::memcmp(&a.gpu_uniforms(),&b.gpu_uniforms(),sizeof(GpuDrawUniforms))!=0)return false;
+  if(a.textureGeneration&&b.textureGeneration) {
+    if(a.textureGeneration!=b.textureGeneration)return false;
+  } else {
+    const auto& at=a.texture_bindings();
+    const auto& bt=b.texture_bindings();
+    for(unsigned i=0;i<MaxTextures;i++)if(!same_texture(at[i],bt[i]))return false;
+  }
   return true;
 }
 
@@ -401,7 +409,7 @@ uint64_t resolve_draw_pipeline(Renderer&renderer,Primitive primitive,bool positi
   ScopedTelemetryPhase phase(telemetry,TelemetryPhase::PipelineResolve);
   return renderer.create_pipeline(desc);
 }
-bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,const PreparedDraw&prepared,const PipelineDesc&pipeline,const DrawUniforms&uniforms,const Viewport&viewport,const Scissor&scissor,const std::array<TextureBinding,MaxTextures>&textures,PrepareDrawError*err,Telemetry*telemetry,uint64_t resolvedPipelineKey) noexcept {
+bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,const PreparedDraw&prepared,const PipelineDesc&pipeline,const DrawUniforms&uniforms,const Viewport&viewport,const Scissor&scissor,const std::array<TextureBinding,MaxTextures>&textures,PrepareDrawError*err,Telemetry*telemetry,uint64_t resolvedPipelineKey,uint32_t uniformGeneration,uint32_t textureGeneration) noexcept {
   auto fail=[&](PrepareDrawError e){if(err)*err=e;return false;};
   if(!prepared.ok()||prepared.vertices.empty())return fail(prepared.error==PrepareDrawError::None?PrepareDrawError::InvalidInput:prepared.error);
   BufferSlice vb{},ib{};
@@ -434,13 +442,29 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
   }
   uint64_t key=resolvedPipelineKey?resolvedPipelineKey:resolve_draw_pipeline(renderer,prepared,pipeline,telemetry);
   if(!key)return fail(PrepareDrawError::PipelineFailed);
-  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild); DrawPacket d{};d.pipelineKey=key;d.vertices=vb;d.indices=ib;d.vertexCount=static_cast<uint32_t>(prepared.vertices.size());d.indexCount=static_cast<uint32_t>(prepared.indices.size());d.absoluteVertexIndices=!prepared.indices.empty()&&!renderer.uses_local_stream_indices();d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
-    if(auto*tail=stream.tail_draw();tail&&batch_compatible(*tail,d)){
-      tail->vertices.size=(d.vertices.offset+d.vertices.size)-tail->vertices.offset;
-      tail->indices.size+=d.indices.size;
-      tail->vertexCount+=d.vertexCount;
-      tail->indexCount+=d.indexCount;
-    }else stream.draw(d);
+  { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
+    if(renderer.uses_local_stream_indices()) {
+      auto& d=stream.emplace_draw_fast();
+      d.pipelineKey=key;d.vertices=vb;d.indices=ib;
+      d.vertexCount=static_cast<uint32_t>(prepared.vertices.size());
+      d.indexCount=static_cast<uint32_t>(prepared.indices.size());
+      d.absoluteVertexIndices=false;
+      stream.bind_state(d,uniforms,textures,uniformGeneration,textureGeneration);
+      d.viewport=viewport;d.scissor=scissor;
+    } else {
+      DrawPacket d{};d.pipelineKey=key;d.vertices=vb;d.indices=ib;
+      d.vertexCount=static_cast<uint32_t>(prepared.vertices.size());
+      d.indexCount=static_cast<uint32_t>(prepared.indices.size());
+      d.absoluteVertexIndices=!prepared.indices.empty();
+      d.uniformGeneration=uniformGeneration;d.textureGeneration=textureGeneration;
+      d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
+      if(auto*tail=stream.tail_draw();tail&&batch_compatible(*tail,d)){
+        tail->vertices.size=(d.vertices.offset+d.vertices.size)-tail->vertices.offset;
+        tail->indices.size+=d.indices.size;
+        tail->vertexCount+=d.vertexCount;
+        tail->indexCount+=d.indexCount;
+      }else stream.draw(d);
+    }
   }
   if(err) *err=PrepareDrawError::None;
   return true;
@@ -448,14 +472,16 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
 
 bool enqueue_streamed_draw(CommandStream&stream,const StreamedDraw&prepared,uint64_t resolvedPipelineKey,
                            const DrawUniforms&uniforms,const Viewport&viewport,const Scissor&scissor,
-                           const std::array<TextureBinding,MaxTextures>&textures,PrepareDrawError*err) noexcept {
+                           const std::array<TextureBinding,MaxTextures>&textures,PrepareDrawError*err,
+                           uint32_t uniformGeneration,uint32_t textureGeneration) noexcept {
   auto fail=[&](PrepareDrawError e){if(err)*err=e;return false;};
   if(!prepared.ok()||!prepared.vertices.buffer||!prepared.vertexCount||!resolvedPipelineKey)
     return fail(prepared.error==PrepareDrawError::None?PrepareDrawError::InvalidInput:prepared.error);
-  DrawPacket& d=stream.emplace_draw();
+  DrawPacket& d=stream.emplace_draw_fast();
   d.pipelineKey=resolvedPipelineKey;d.vertices=prepared.vertices;d.indices=prepared.indices;
   d.vertexCount=prepared.vertexCount;d.indexCount=prepared.indexCount;d.absoluteVertexIndices=false;
-  d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
+  stream.bind_state(d,uniforms,textures,uniformGeneration,textureGeneration);
+  d.viewport=viewport;d.scissor=scissor;
   if(err)*err=PrepareDrawError::None;
   return true;
 }

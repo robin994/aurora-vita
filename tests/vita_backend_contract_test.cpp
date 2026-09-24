@@ -11,6 +11,7 @@
 #include "gfx/vita_hash_map.hpp"
 #include "gxm/gxm_texture_layout.hpp"
 #include "gxm/gxm_program_cache.hpp"
+#include "gx/aurora_vita_draw_sink.hpp"
 #include "vita_data_paths.hpp"
 #include <array>
 #include <cmath>
@@ -40,6 +41,13 @@ PipelineDesc basic() {
   d.tev.stages[0].color.d = TevColorArg::RasColor;
   d.tev.stages[0].alpha.d = TevAlphaArg::RasAlpha;
   return d;
+}
+void full_target_scissor_contract() {
+  const gfx::Scissor internalFull{0,0,640,448};
+  REQUIRE(gxbridge::scissor_covers_full_target(internalFull,true,960,544,640,448));
+  REQUIRE(!gxbridge::scissor_covers_full_target(internalFull,false,960,544,640,448));
+  REQUIRE(!gxbridge::scissor_covers_full_target({8,0,632,448},true,960,544,640,448));
+  REQUIRE(gxbridge::scissor_covers_full_target({0,0,960,544},false,960,544,640,448));
 }
 void no_undeclared_inputs(const gxm::ShaderSources& s) {
   REQUIRE(s.ok());
@@ -571,6 +579,7 @@ int main() {
     REQUIRE(nodes.find(7)!=nodes.end());REQUIRE(&nodes.find(7)->second==stable);
     REQUIRE(*stable==0x12345678u);
   }
+  full_target_scissor_contract();
   shader_masks(); shader_operations(); rejection_tests(); projection_contract(); common_decode_contract(); keys_and_defaults();
   native_extended_contract();
   std::printf("PASS: %u checks, 1024 input-mask combinations; native Cg generation and shared CPU contracts (not GPU execution).\n", checks);

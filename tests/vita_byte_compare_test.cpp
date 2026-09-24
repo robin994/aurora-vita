@@ -1,4 +1,3 @@
-#include "gfx/vita_byte_compare.h"
 #include "gfx/vita_byte_compare.hpp"
 #include <array>
 #include <cstdio>
@@ -17,18 +16,18 @@ void check(bool result) {
 }
 void exercise(unsigned char* a, unsigned char* b, size_t length) {
     for (size_t i = 0; i < length; ++i) a[i] = b[i] = static_cast<unsigned char>(i * 73u + 19u);
-    check(aurora_vita_bytes_equal(a, b, length));
-    check(aurora_vita_bytes_equal(a, a, length));
+    check(aurora::vita::gfx::byte_spans_equal(a, b, length));
+    check(aurora::vita::gfx::byte_spans_equal(a, a, length));
     for (size_t i = 0; i < length; ++i) {
         b[i] ^= 0x80;
-        check(!aurora_vita_bytes_equal(a, b, length));
-        check(!aurora_vita_bytes_equal(b, a, length));
+        check(!aurora::vita::gfx::byte_spans_equal(a, b, length));
+        check(!aurora::vita::gfx::byte_spans_equal(b, a, length));
         b[i] ^= 0x80;
     }
 }
 }
 int main() {
-    check(aurora_vita_bytes_equal(nullptr, nullptr, 0));
+    check(aurora::vita::gfx::byte_spans_equal(nullptr, nullptr, 0));
     std::array<unsigned char, 576> a{}, b{};
     for(size_t i=0;i<a.size();++i)a[i]=b[i]=static_cast<unsigned char>(i*29u+7u);
     const auto baseHash=aurora::vita::gfx::byte_span_hash(a.data(),a.size());

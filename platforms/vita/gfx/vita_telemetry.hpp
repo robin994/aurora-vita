@@ -81,6 +81,21 @@ struct TelemetryCounters {
   uint64_t geometryVolatileBypasses=0;
   uint64_t pipelineHits = 0;
   uint64_t pipelineMisses = 0;
+  uint64_t frontendPipelineTranslateHits = 0;
+  uint64_t frontendPipelineTranslateMisses = 0;
+  uint64_t frontendPipelineFingerprintHits = 0;
+  uint64_t frontendPipelineFingerprintMisses = 0;
+  uint64_t frontendVertexStateReuses = 0;
+  uint64_t frontendVertexStateLightBuilds = 0;
+  uint64_t frontendVertexStateFullBuilds = 0;
+  uint64_t frontendVertexStateFallbackBuilds = 0;
+  uint64_t frontendTextureBindingReuses = 0;
+  uint64_t frontendTextureBindingBuilds = 0;
+  uint64_t frontendQueuedPipelineReuses = 0;
+  uint64_t frontendQueuedPipelineResolves = 0;
+  uint64_t frontendGpuGeometryDraws = 0;
+  uint64_t frontendStreamedDraws = 0;
+  uint64_t frontendPreparedDraws = 0;
   uint64_t textureHits = 0;
   uint64_t textureMisses = 0;
   uint64_t textureUploads = 0;
@@ -120,6 +135,14 @@ public:
   void set_split_vertex_phases(bool enabled) noexcept { splitVertexPhases_ = enabled; }
   bool split_vertex_phases() const noexcept { return splitVertexPhases_; }
   void pipeline(bool hit) noexcept;
+  void frontend_pipeline_translate(bool hit) noexcept;
+  void frontend_pipeline_fingerprint(bool hit) noexcept;
+  void frontend_vertex_state_reuse() noexcept;
+  void frontend_vertex_state_build(bool lightweight) noexcept;
+  void frontend_vertex_state_fallback() noexcept;
+  void frontend_texture_binding(bool reused) noexcept;
+  void frontend_queued_pipeline(bool reused) noexcept;
+  void frontend_draw_path(bool gpuGeometry, bool streamed) noexcept;
   void texture(bool hit, bool uploaded, uint64_t uploadBytes = 0) noexcept;
   void fallback_texture(uint32_t count = 1) noexcept;
   void efb_copy() noexcept;
@@ -138,6 +161,16 @@ private:
   bool splitVertexPhases_ = false;
 };
 
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+class ScopedTelemetryPhase {
+public:
+  constexpr ScopedTelemetryPhase(Telemetry*, TelemetryPhase,
+                                 TelemetryPhase = TelemetryPhase::Count) noexcept {}
+  ~ScopedTelemetryPhase() = default;
+  ScopedTelemetryPhase(const ScopedTelemetryPhase&) = delete;
+  ScopedTelemetryPhase& operator=(const ScopedTelemetryPhase&) = delete;
+};
+#else
 class ScopedTelemetryPhase {
 public:
   ScopedTelemetryPhase(Telemetry* telemetry, TelemetryPhase phase,
@@ -151,6 +184,7 @@ private:
   TelemetryPhase aggregate_ = TelemetryPhase::Count;
   uint64_t startUs_ = 0;
 };
+#endif
 
 uint64_t telemetry_now_us() noexcept;
 const char* telemetry_phase_name(TelemetryPhase phase) noexcept;

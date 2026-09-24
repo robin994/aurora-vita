@@ -474,6 +474,14 @@ struct GXState {
   bool stateDirty = true;
   // Bumped by the decoded register writes that feed populate_pipeline_config, and by nothing else.
   u32 pipelineStateGeneration = next_gx_state_epoch();
+  // Incremental canonical state used only by the Vita pipeline-translation cache.
+  // Slots are updated when BP/XF/CP writes change a translation-relevant value;
+  // draw submission therefore reads two ready-made 64-bit words instead of
+  // rescanning GX state.
+  static constexpr size_t VitaPipelineFingerprintSlotCount = 768;
+  u64 vitaPipelineFingerprintLo = 0;
+  u64 vitaPipelineFingerprintHi = 0;
+  std::array<u64, VitaPipelineFingerprintSlotCount> vitaPipelineFingerprintSlots{};
   std::array<u32, 0x100> bpRegCache = [] {
     std::array<u32, 0x100> regs{};
     regs[0xFE] = 0x00FFFFFF;

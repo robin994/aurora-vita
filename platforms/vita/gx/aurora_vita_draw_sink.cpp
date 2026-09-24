@@ -1,6 +1,7 @@
 #include "aurora_vita_draw_sink.hpp"
 #include "../gfx/vita_renderer.hpp"
 #include "../gfx/vita_pipeline_key.hpp"
+#include "../../../lib/vita/render_size.hpp"
 
 #if defined(AURORA_VITA_UPSTREAM)
 #if defined(AURORA_VITA_UPSTREAM_STUB)
@@ -13,12 +14,51 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include "../vita_diag.hpp"
 #include <limits>
 #if defined(__vita__)
 #include <psp2/kernel/sysmem.h>
 #endif
 
 namespace aurora::vita::gxbridge {
+
+#if defined(AURORA_VITA_UPSTREAM)
+DrawSink::TextureResolveStamp DrawSink::texture_resolve_stamp(unsigned slot) const noexcept {
+  TextureResolveStamp stamp{};
+  if(slot>=gfx::MaxTextures)return stamp;
+  const auto& g=aurora::gx::g_gxState;
+  const auto& obj=g.loadedTextures[slot];
+  stamp.data=reinterpret_cast<uintptr_t>(obj.data);
+  stamp.mode0=obj.mode0;
+  stamp.mode1=obj.mode1;
+  stamp.image0=obj.image0;
+  stamp.image3=obj.image3;
+  stamp.width=obj.mWidth;
+  stamp.height=obj.mHeight;
+  stamp.format=obj.mFormat;
+  stamp.tlut=static_cast<uint32_t>(obj.tlut);
+  stamp.texObjId=obj.texObjId;
+  stamp.texDataVersion=obj.texDataVersion;
+  stamp.flags=obj.flags;
+  const unsigned tlut=static_cast<unsigned>(obj.tlut);
+  if(tlut<aurora::gx::MaxTluts) {
+    const auto& palette=g.loadedTluts[tlut];
+    stamp.paletteData=reinterpret_cast<uintptr_t>(palette.data);
+    stamp.paletteFormat=static_cast<uint32_t>(palette.format);
+    stamp.paletteEntries=palette.numEntries;
+    stamp.paletteObjId=palette.tlutObjId;
+    stamp.paletteDataVersion=palette.tlutDataVersion;
+    stamp.paletteFlags=palette.flags;
+  }
+  stamp.gxCopyPresent=g.copyTextures.find(obj.data)!=g.copyTextures.end();
+  const auto copy=copyTextures_.find(reinterpret_cast<uintptr_t>(obj.data));
+  if(copy!=copyTextures_.end()) {
+    stamp.localCopyPresent=true;
+    stamp.localCopyRevision=copy->second.revision;
+  }
+  return stamp;
+}
+#endif
 
 gfx::MemoryBudgetSnapshot DrawSink::memory_budget() const noexcept {
   if (!renderer_ || !arena_) return {};
@@ -43,14 +83,18 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
     return false;
   }
   stream_.reserve(config.commandReserve);
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   telemetry_ = config.telemetry;
   coverage_ = config.coverage;
   trace_ = config.trace;
+#endif
   verboseGeometryDiagnostics_ = config.verboseGeometryDiagnostics;
   strictUnsupported_ = config.strictUnsupported;
   allowLitFixedVertexGpu_ = config.allowLitFixedVertexGpu;
   diagnosticDrawLimit_ = config.diagnosticDrawLimit;
   frameDrawIndex_ = 0;
+  translatedUniformGeneration_=1;
+  resolvedTextureGeneration_=1;
   strictFailed_ = false;
   whiteTexture_ = white_texture();
   if (!whiteTexture_) {
@@ -62,6 +106,9 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   initialized_ = true;
   if(config.staticGeometryBudget && renderer.supports_fixed_vertex())
     staticGeometry_=std::make_unique<gfx::StaticGeometryCache>(renderer,config.staticGeometryBudget);
+#if defined(AURORA_VITA_UPSTREAM)
+  pipelineTranslationCache_=std::make_unique<PipelineTranslationCache>();
+#endif
   return true;
 }
 
@@ -72,8 +119,13 @@ void DrawSink::shutdown() noexcept {
   fixedVertexUniforms_.clear();staticGeometry_.reset();fixedPipelineKeys_.clear();
   translatedVertexStateValid_=false;
   translatedVertexStateLightweight_=false;
+  translatedUniformGeneration_=1;
+  resolvedTextureGeneration_=1;
 #if defined(AURORA_VITA_UPSTREAM)
-  translatedStateValid_=false;
+  translatedEntry_=nullptr;
+  translatedFingerprintLo_=0;
+  translatedFingerprintHi_=0;
+  pipelineTranslationCache_.reset();
   resolvedTextureBindingsValid_=false;
   clear_copy_textures();
 #endif
@@ -89,9 +141,11 @@ void DrawSink::shutdown() noexcept {
 #endif
   reset_pipeline_run_cache();
   submittedDraws_ = 0;
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   telemetry_ = nullptr;
   coverage_ = nullptr;
   trace_ = nullptr;
+#endif
   verboseGeometryDiagnostics_ = false;
   strictUnsupported_ = false;
   strictFailed_ = false;
@@ -184,7 +238,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
     if(a.semantic==gfx::VertexSemantic::Position)posAttr=&a;
     else if(a.semantic==gfx::VertexSemantic::PnMatrixIndex)pnAttr=&a;
   }
-  std::fprintf(stderr,
+  AURORA_VITA_DIAGF(
     "[aurora-vita][3d-layout] in=%u stride=%u current_pn=%u vita_current_pn=%u "
     "pos_src=%u pos_comp=%u pos_cnt=%u pos_frac=%u pos_arr_stride=%u pos_arr_le=%u pn_src=%u\n",
     inputVertices,static_cast<unsigned>(layout.streamStride),static_cast<unsigned>(currentPn),
@@ -198,10 +252,10 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
   for(unsigned i=0;i<rawSamples;i++){
     gfx::CanonicalVertex raw{};
     if(gfx::decode_vertex_into(rawVertices,rawBytes,i,layout,raw)){
-      std::fprintf(stderr,"[aurora-vita][3d-raw-v] n=%u p=%g,%g,%g pn=%u\n",i,
+      AURORA_VITA_DIAGF("[aurora-vita][3d-raw-v] n=%u p=%g,%g,%g pn=%u\n",i,
                    raw.position[0],raw.position[1],raw.position[2],static_cast<unsigned>(raw.pnMatrixIndex));
     }else{
-      std::fprintf(stderr,"[aurora-vita][3d-raw-v] n=%u decode_failed\n",i);
+      AURORA_VITA_DIAGF("[aurora-vita][3d-raw-v] n=%u decode_failed\n",i);
     }
   }
 
@@ -229,7 +283,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
       if(xy&&c.z>=0.f&&c.z<=c.w)++insideZ01;
     }
   }
-  std::fprintf(stderr,
+  AURORA_VITA_DIAGF(
     "[aurora-vita][3d-geom] in=%u out=%u idx=%u clip=%u finite=%u wpos=%u xy=%u glz=%u z01=%u "
     "pos=[%g,%g,%g,%g..%g,%g,%g,%g] clipbox=[%g,%g,%g,%g..%g,%g,%g,%g] "
     "depth=%u/%u cull=%u revz=%u warn_zbefore=%u\n",
@@ -240,7 +294,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
     pipeline.depthTest?1u:0u,static_cast<unsigned>(pipeline.depthFunc),static_cast<unsigned>(pipeline.cull),
     pipeline.reversedZ?1u:0u,aurora::gx::g_gxState.zCompLocBeforeTex?1u:0u);
 
-  std::fprintf(stderr,"[aurora-vita][3d-proj] %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
+  AURORA_VITA_DIAGF("[aurora-vita][3d-proj] %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",
     state.projection[0],state.projection[1],state.projection[2],state.projection[3],
     state.projection[4],state.projection[5],state.projection[6],state.projection[7],
     state.projection[8],state.projection[9],state.projection[10],state.projection[11],
@@ -249,10 +303,10 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
   const unsigned samples=std::min<unsigned>(3,static_cast<unsigned>(prepared.vertices.size()));
   for(unsigned i=0;i<samples;i++){
     const auto& v=prepared.vertices[i];const auto c=project_for_diag(state.projection,v,prepared.positionIsClipSpace);
-    std::fprintf(stderr,"[aurora-vita][3d-v] n=%u p=%g,%g,%g,%g c=%g,%g,%g,%g pn=%u\n",
+    AURORA_VITA_DIAGF("[aurora-vita][3d-v] n=%u p=%g,%g,%g,%g c=%g,%g,%g,%g pn=%u\n",
       i,v.position[0],v.position[1],v.position[2],v.position[3],c.x,c.y,c.z,c.w,static_cast<unsigned>(v.pnMatrixIndex));
   }
-  std::fprintf(stderr,"[aurora-vita][3d-i] %u %u %u %u %u %u\n",
+  AURORA_VITA_DIAGF("[aurora-vita][3d-i] %u %u %u %u %u %u\n",
     prepared.indices.size()>0?prepared.indices[0]:0u,prepared.indices.size()>1?prepared.indices[1]:0u,
     prepared.indices.size()>2?prepared.indices[2]:0u,prepared.indices.size()>3?prepared.indices[3]:0u,
     prepared.indices.size()>4?prepared.indices[4]:0u,prepared.indices.size()>5?prepared.indices[5]:0u);
@@ -320,7 +374,30 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const uint32_t rawCopyFormat = static_cast<uint32_t>(g.texCopyFmt);
   const gfx::EfbCopyFormat copyFormat = gfx::efb_copy_format_from_gx_raw(rawCopyFormat);
 #endif
-  uint32_t captureW=dstW,captureH=dstH;
+  uint32_t copyDstW=dstW,copyDstH=dstH;
+#if defined(__vita__) && defined(AURORA_VITA_RENDERER_GXM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  const bool promoteReducedFullFrameCopy =
+      copyFormat==gfx::EfbCopyFormat::RGB565 &&
+      src.x==0 && src.y==0 &&
+      static_cast<uint32_t>(src.width)==renderer_->target_width() &&
+      static_cast<uint32_t>(src.height)==renderer_->target_height() &&
+      g.texCopySrc.width>0 && g.texCopySrc.height>0 &&
+      static_cast<uint32_t>(g.texCopySrc.width)==g.texCopyDstWidth*2u &&
+      static_cast<uint32_t>(g.texCopySrc.height)==g.texCopyDstHeight*2u;
+  if(promoteReducedFullFrameCopy) {
+    // The pre-match/glass effect consumes the half-resolution XFB image rather
+    // than the raw EFB. Keep its physical size tied to Vita scanout even when
+    // the default EFB raster is reduced to 640x448.
+    const auto frameSize=aurora::gfx::get_frame_buffer_size();
+    const float frameSx=logicalFb.x?static_cast<float>(frameSize.x)/static_cast<float>(logicalFb.x):1.f;
+    const float frameSy=logicalFb.y?static_cast<float>(frameSize.y)/static_cast<float>(logicalFb.y):1.f;
+    copyDstW=std::max<uint32_t>(1,static_cast<uint32_t>(
+        std::lround(static_cast<float>(g.texCopyDstWidth)*frameSx)));
+    copyDstH=std::max<uint32_t>(1,static_cast<uint32_t>(
+        std::lround(static_cast<float>(g.texCopyDstHeight)*frameSy)));
+  }
+#endif
+  uint32_t captureW=copyDstW,captureH=copyDstH;
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   const bool promoteFullFrameHalfScale =
       copyFormat==gfx::EfbCopyFormat::RGB565 &&
@@ -343,9 +420,9 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
     static uint64_t copyLogCount=0;
     const uint64_t n=++copyLogCount;
     if(n<=8 || (n&(n-1))==0)
-      std::fprintf(stderr,
+      AURORA_VITA_DIAGF(
         "[aurora-vita] gx_copy_tex n=%llu src=%d,%d %dx%d dst=%ux%u physical=%ux%u fmt=0x%x mapped=%u clear=%u\n",
-        static_cast<unsigned long long>(n),src.x,src.y,src.width,src.height,dstW,dstH,captureW,captureH,
+        static_cast<unsigned long long>(n),src.x,src.y,src.width,src.height,copyDstW,copyDstH,captureW,captureH,
         rawCopyFormat,static_cast<unsigned>(copyFormat),clear?1u:0u);
   }
 #endif
@@ -398,7 +475,7 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
     return false;
   }
   if (telemetry_) telemetry_->efb_copy();
-  copyTextures_[copyKey] = CopyTextureEntry{h, dstW, dstH, oldRevision + 1, logicalFlipX, logicalFlipY, forceOpaque, sampleFormat};
+  copyTextures_[copyKey] = CopyTextureEntry{h, copyDstW, copyDstH, oldRevision + 1, logicalFlipX, logicalFlipY, forceOpaque, sampleFormat};
   resolvedTextureBindingsValid_=false;
   if (clear) {
 #if defined(AURORA_VITA_UPSTREAM_STUB)
@@ -448,47 +525,79 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     coverage_->observe(integration::FeatureClass::Primitive, primitive, "GX primitive");
     coverage_->observe(integration::FeatureClass::VertexFormat, fmt, "GX vertex format");
   }
-  const uint32_t stateGeneration = aurora::gx::g_gxState.pipelineStateGeneration;
-  const bool translatedCacheHit = translatedStateValid_ && translatedStateGeneration_ == stateGeneration &&
-                                  translatedPrimitive_ == primitive && translatedFmt_ == fmt;
-  if (!translatedCacheHit) {
+  const auto& gxState=aurora::gx::g_gxState;
+  const uint64_t fingerprintLo=gxState.vitaPipelineFingerprintLo;
+  const uint64_t fingerprintHi=gxState.vitaPipelineFingerprintHi;
+  const bool runCacheHit=translatedEntry_&&translatedFingerprintLo_==fingerprintLo&&
+                         translatedFingerprintHi_==fingerprintHi&&translatedFmt_==fmt;
+  bool associativeCacheHit=false;
+  if (!runCacheHit) {
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StatePipelineTranslate,
                                     gfx::TelemetryPhase::StateTranslate);
-    {
-      gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineBuild);
-      translate_current_pipeline_and_layout(primitive,fmt,translatedPipeline_,translatedLayout_);
-    }
-    {
-      gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineKey);
-      translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
-    }
-    {
-      gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineDerived);
-      if(staticGeometry_){
-        translatedGpuPipeline_=translatedPipeline_;
-        translatedGpuPipeline_.fixedVertexOnGpu=true;
-        translatedGpuPipeline_.fixedVertexIndexedPn=gfx::vertex_layout_has_semantic(
-            translatedLayout_,gfx::VertexSemantic::PnMatrixIndex);
-        translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
+    const uint64_t rotatedHi=(fingerprintHi<<17)|(fingerprintHi>>(64-17));
+    const uint64_t setHash=fingerprintLo^rotatedHi^
+                           (static_cast<uint64_t>(fmt)*0x9e3779b97f4a7c15ull);
+    auto& set=(*pipelineTranslationCache_)[static_cast<size_t>(setHash)&
+                                           (PipelineTranslationSetCount-1u)];
+    PipelineTranslationEntry* entry=nullptr;
+    for(size_t way=0;way<set.ways.size();++way) {
+      auto& candidate=set.ways[way];
+      if(candidate.valid&&candidate.fingerprintLo==fingerprintLo&&
+         candidate.fingerprintHi==fingerprintHi&&candidate.fmt==fmt) {
+        entry=&candidate;
+        set.mru=static_cast<uint8_t>(way);
+        associativeCacheHit=true;
+        break;
       }
-      translatedTextureMask_=gfx::pipeline_sampled_texture_mask(translatedPipeline_);
-      translatedUsesOrigLod_=false;
-      translatedHasIndirect_=translatedPipeline_.tev.indirectStageCount!=0;
-      translatedLit_=false;
-      for(unsigned i=0;i<translatedPipeline_.tev.stageCount&&i<translatedPipeline_.tev.stages.size();++i){
-        const auto&s=translatedPipeline_.tev.stages[i];
-        translatedUsesOrigLod_=translatedUsesOrigLod_||s.indirectUseOrigLod;
-        translatedHasIndirect_=translatedHasIndirect_||s.indirectEnabled;
-      }
-      for(const auto&c:translatedPipeline_.colorChannels)translatedLit_=translatedLit_||c.lightingEnabled;
     }
-    translatedStateGeneration_ = stateGeneration;
-    translatedPrimitive_ = primitive;
+    if(!entry) {
+      size_t replacementWay=0;
+      if(set.ways[0].valid)replacementWay=set.ways[1].valid?(set.mru^1u):1u;
+      entry=&set.ways[replacementWay];
+      {
+        gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineBuild);
+        translate_current_pipeline_and_layout(primitive,fmt,entry->pipeline,entry->layout);
+      }
+      {
+        gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineKey);
+        entry->pipelineKey=gfx::pipeline_key(entry->pipeline);
+      }
+      {
+        gfx::ScopedTelemetryPhase subphase(telemetry_,gfx::TelemetryPhase::StatePipelineDerived);
+        entry->gpuPipeline=entry->pipeline;
+        if(staticGeometry_){
+          entry->gpuPipeline.fixedVertexOnGpu=true;
+          entry->gpuPipeline.fixedVertexIndexedPn=gfx::vertex_layout_has_semantic(
+              entry->layout,gfx::VertexSemantic::PnMatrixIndex);
+          entry->gpuPipeline.layout=gfx::fixed_vertex_gpu_layout(entry->gpuPipeline);
+        }
+        entry->textureMask=gfx::pipeline_sampled_texture_mask(entry->pipeline);
+        entry->usesOrigLod=false;
+        entry->hasIndirect=entry->pipeline.tev.indirectStageCount!=0;
+        entry->lit=false;
+        for(unsigned i=0;i<entry->pipeline.tev.stageCount&&i<entry->pipeline.tev.stages.size();++i){
+          const auto&s=entry->pipeline.tev.stages[i];
+          entry->usesOrigLod=entry->usesOrigLod||s.indirectUseOrigLod;
+          entry->hasIndirect=entry->hasIndirect||s.indirectEnabled;
+        }
+        for(const auto&c:entry->pipeline.colorChannels)entry->lit=entry->lit||c.lightingEnabled;
+      }
+      entry->fingerprintLo=fingerprintLo;
+      entry->fingerprintHi=fingerprintHi;
+      entry->fmt=fmt;
+      entry->valid=true;
+      set.mru=static_cast<uint8_t>(replacementWay);
+    }
+    translatedEntry_=entry;
+    translatedFingerprintLo_=fingerprintLo;
+    translatedFingerprintHi_=fingerprintHi;
     translatedFmt_ = fmt;
-    translatedStateValid_ = true;
+    if(telemetry_)telemetry_->frontend_pipeline_fingerprint(associativeCacheHit);
   }
-  const auto& pipeline = translatedPipeline_;
-  const auto& layout = translatedLayout_;
+  const bool translatedCacheHit=runCacheHit||associativeCacheHit;
+  if(telemetry_)telemetry_->frontend_pipeline_translate(translatedCacheHit);
+  const auto& pipeline=translatedEntry_->pipeline;
+  const auto& layout=translatedEntry_->layout;
   if(!aurora::gx::g_gxState.zCompLocBeforeTex &&
      gfx::alpha_compare_static_result(pipeline.tev.alphaCompare)==gfx::AlphaTestStaticResult::Fail) {
     // GX alpha compare rejects every fragment, so the draw cannot affect color
@@ -508,12 +617,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     for(unsigned i=0;i<4;++i)if(addresses[i]){
       SceKernelMemBlockInfo info{};info.size=sizeof(info);
       const int rc=sceKernelGetMemBlockInfoByAddr(const_cast<void*>(addresses[i]),&info);
-      std::fprintf(stderr,"[aurora-vita] memory_profile object=%s address=%p rc=%d type=0x%08x memory_type=0x%x\n",
+      AURORA_VITA_DIAGF("[aurora-vita] memory_profile object=%s address=%p rc=%d type=0x%08x memory_type=0x%x\n",
         labels[i],addresses[i],rc,static_cast<unsigned>(info.type),info.memoryType);
     }
   }
 #endif
-  const uint64_t translatedPipelineKey = translatedPipelineKey_;
+  const uint64_t translatedPipelineKey=translatedEntry_->pipelineKey;
   if (pipeline.blendMode == gfx::BlendMode::Logic && pipeline.logicOp != gfx::LogicOp::Clear &&
       pipeline.logicOp != gfx::LogicOp::Copy && pipeline.logicOp != gfx::LogicOp::Noop) {
     result.warnings |= SubmitWarning::LogicOpFallback;
@@ -521,7 +630,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (telemetry_) telemetry_->unsupported();
     if (strictUnsupported_) strictFailed_ = true;
   }
-  if (translatedUsesOrigLod_) {
+  if (translatedEntry_->usesOrigLod) {
     result.warnings |= SubmitWarning::OrigLodApproximation;
     if (coverage_) coverage_->fallback(translatedPipelineKey ^ 0x4f5249474c4f44ull, "indTexUseOrigLOD approximated by vitaGL sampler derivatives");
     if (telemetry_) telemetry_->unsupported();
@@ -535,25 +644,29 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
   if (coverage_) {
     coverage_->observe(integration::FeatureClass::TevProgram, translatedPipelineKey, "translated GX pipeline/TEV");
-    if (translatedHasIndirect_) coverage_->observe(integration::FeatureClass::IndirectTev, translatedPipelineKey, "indirect TEV");
+    if (translatedEntry_->hasIndirect) coverage_->observe(integration::FeatureClass::IndirectTev, translatedPipelineKey, "indirect TEV");
     if (pipeline.fogMode != gfx::FogMode::None) coverage_->observe(integration::FeatureClass::Fog, static_cast<uint64_t>(pipeline.fogMode), "GX fog mode");
     if (pipeline.texgenCount) coverage_->observe(integration::FeatureClass::TexGen, translatedPipelineKey ^ pipeline.texgenCount, "GX texgen program");
-    if (translatedLit_) coverage_->observe(integration::FeatureClass::Lighting, translatedPipelineKey, "GX lighting");
+    if (translatedEntry_->lit) coverage_->observe(integration::FeatureClass::Lighting, translatedPipelineKey, "GX lighting");
   }
   const auto source = translate_source_primitive(primitive);
   const auto drawViewport=translate_viewport();
   const auto drawScissor=translate_scissor();
   auto pipelineForDraw=pipeline;
-  auto gpuPipelineForDraw=translatedGpuPipeline_;
+  auto gpuPipelineForDraw=translatedEntry_->gpuPipeline;
 #if defined(AURORA_VITA_RENDERER_GXM)
   // GXM region clipping is tile-granular, so partial GX scissors still need
   // the exact fragment-side test.  For a full-target scissor that test can
   // never reject a pixel.  Omitting its discard keeps the draw in the opaque
   // HSR path instead of forcing SGX into a discard/punch-through pass.
-  const bool fullTargetScissor=
-      drawScissor.x<=0&&drawScissor.y<=0&&
-      int64_t(drawScissor.x)+drawScissor.width>=renderer_->target_width()&&
-      int64_t(drawScissor.y)+drawScissor.height>=renderer_->target_height();
+  // The native display surface stays 960x544 even when the logical GX EFB is
+  // rasterized at a smaller extent.  On the default EFB, pixels outside that
+  // internal extent are not part of GX rendering and are not sampled by the
+  // following GXCopyDisp, so the internal extent is the semantic full target.
+  const bool fullTargetScissor=scissor_covers_full_target(
+      drawScissor,renderer_->target_is_default(),
+      renderer_->target_width(),renderer_->target_height(),
+      aurora::vita::render_size::g_renderWidth,aurora::vita::render_size::g_renderHeight);
   if(fullTargetScissor) {
     pipelineForDraw.fragmentScissor=false;
     gpuPipelineForDraw.fragmentScissor=false;
@@ -564,7 +677,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   gfx::FixedVertexReject fixedReject=gfx::FixedVertexReject::UnsupportedFeatures;
   bool fixedCandidate=false;
   if(!staticGeometry_)fixedReject=gfx::FixedVertexReject::NoCache;
-  else if(translatedLit_&&!allowLitFixedVertexGpu_)fixedReject=gfx::FixedVertexReject::LitDisabled;
+  else if(translatedEntry_->lit&&!allowLitFixedVertexGpu_)fixedReject=gfx::FixedVertexReject::LitDisabled;
   else if(vertexCount<48)fixedReject=gfx::FixedVertexReject::SmallDraw;
   else if(rawIndices!=nullptr||indexCount!=0)fixedReject=gfx::FixedVertexReject::IndexedDraw;
   else if(source==gfx::SourcePrimitive::Lines||source==gfx::SourcePrimitive::LineStrip||source==gfx::SourcePrimitive::Points)
@@ -583,14 +696,16 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
                                          gfx::TelemetryPhase::StateVertexFull;
     gfx::ScopedTelemetryPhase phase(telemetry_,statePhase,gfx::TelemetryPhase::StateTranslate);
     if(fixedCandidate) {
-      translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_);
+      translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedEntry_->gpuPipeline);
       translatedVertexStateLightweight_=true;
     } else {
       translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
       translatedVertexStateLightweight_=false;
     }
+    if(++translatedUniformGeneration_==0)translatedUniformGeneration_=1;
+    if(telemetry_)telemetry_->frontend_vertex_state_build(fixedCandidate);
     translatedVertexStateValid_=true;
-  }
+  } else if(telemetry_)telemetry_->frontend_vertex_state_reuse();
   const auto& vertexState=translatedVertexState_;
   auto& uniforms=translatedUniforms_;
   const gfx::StaticGeometryCache::Entry* gpuGeometry=nullptr;
@@ -599,7 +714,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
 #if defined(__vita__)
     static unsigned debugGpuDraws=0;
     const bool debugGpu=telemetry_&&telemetry_->split_vertex_phases()&&debugGpuDraws++<4;
-    if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe begin count=%u primitive=%u key=%llx\n",vertexCount,primitive,static_cast<unsigned long long>(translatedPipelineKey));
+    if(debugGpu)AURORA_VITA_DIAGF("[aurora-vita] gpu_vertex_probe begin count=%u primitive=%u key=%llx\n",vertexCount,primitive,static_cast<unsigned long long>(translatedPipelineKey));
 #endif
     const uint64_t gpuPipelineDescKey=gfx::pipeline_key(gpuPipelineForDraw);
     auto key=fixedPipelineKeys_.find(gpuPipelineDescKey);
@@ -610,7 +725,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(fixedPipelineKey)fixedPipelineKeys_[gpuPipelineDescKey]=fixedPipelineKey;
     }
 #if defined(__vita__)
-    if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe pipeline=%llx\n",static_cast<unsigned long long>(fixedPipelineKey));
+    if(debugGpu)AURORA_VITA_DIAGF("[aurora-vita] gpu_vertex_probe pipeline=%llx\n",static_cast<unsigned long long>(fixedPipelineKey));
 #endif
     if(fixedPipelineKey){
       // A warm geometry hit still queues a reference to this program. Protect
@@ -618,9 +733,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       renderer_->pipelines().pin(fixedPipelineKey);
       gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::GeometryCache);
       const auto before=staticGeometry_->hits();
-      gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,translatedGpuPipeline_,vertexState,telemetry_,stableSource);
+      gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,translatedEntry_->gpuPipeline,vertexState,telemetry_,stableSource);
 #if defined(__vita__)
-      if(debugGpu)std::fprintf(stderr,"[aurora-vita] gpu_vertex_probe geometry=%p entries=%u\n",static_cast<const void*>(gpuGeometry),static_cast<unsigned>(staticGeometry_->size()));
+      if(debugGpu)AURORA_VITA_DIAGF("[aurora-vita] gpu_vertex_probe geometry=%p entries=%u\n",static_cast<const void*>(gpuGeometry),static_cast<unsigned>(staticGeometry_->size()));
 #endif
       if(gpuGeometry&&telemetry_)telemetry_->gpu_geometry(staticGeometry_->hits()!=before,gpuGeometry->vertexCount);
     }
@@ -632,6 +747,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
                                     gfx::TelemetryPhase::StateTranslate);
     translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
     translatedVertexStateLightweight_=false;
+    if(++translatedUniformGeneration_==0)translatedUniformGeneration_=1;
+    if(telemetry_)telemetry_->frontend_vertex_state_fallback();
   }
   const auto expansion = translate_primitive_expansion(translate_line_mode(primitive));
   const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
@@ -692,7 +809,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       static uint64_t rolloverLogCount=0;
       const auto n=arena_->recycles();
       if(rolloverLogCount<8||(n&&(n&(n-1))==0)){
-        std::fprintf(stderr,"[aurora-vita] stream_rollover total=%llu syncs=%llu slot=%u gpu_stride=%u next_vtx=%u next_idx=%u\n",
+        AURORA_VITA_DIAGF("[aurora-vita] stream_rollover total=%llu syncs=%llu slot=%u gpu_stride=%u next_vtx=%u next_idx=%u\n",
                      static_cast<unsigned long long>(n),static_cast<unsigned long long>(arena_->gpu_syncs()),arena_->slot(),
                      static_cast<unsigned>(gpuStride),required.vertexCount,required.indexCount);
         ++rolloverLogCount;
@@ -751,11 +868,18 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
 #endif
 
   std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
-  const uint8_t textureMask = translatedTextureMask_;
+  std::array<TextureResolveStamp,gfx::MaxTextures> currentTextureStamps{};
+  const uint8_t textureMask=translatedEntry_->textureMask;
   const auto white = white_texture();
-  const bool reuseResolvedTextures=resolvedTextureBindingsValid_&&
-                                   !aurora::gx::g_gxState.stateDirty&&resolvedTextureMask_==textureMask&&
-                                   resolvedVolatileTextureMask_==0;
+  bool reuseResolvedTextures=resolvedTextureBindingsValid_&&resolvedTextureMask_==textureMask&&
+                             resolvedVolatileTextureMask_==0;
+  for(unsigned slot=0;slot<gfx::MaxTextures;++slot) {
+    if((textureMask&(1u<<slot))==0)continue;
+    currentTextureStamps[slot]=texture_resolve_stamp(slot);
+    if(reuseResolvedTextures&&currentTextureStamps[slot]!=resolvedTextureStamps_[slot])
+      reuseResolvedTextures=false;
+  }
+  if(telemetry_)telemetry_->frontend_texture_binding(reuseResolvedTextures);
   if(reuseResolvedTextures){
     bindings=resolvedTextureBindings_;
     result.fallbackTextureMask=resolvedFallbackTextureMask_;
@@ -785,8 +909,11 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
     if (translated.valid) {
       if(!translated.texture.cacheable)volatileTextureMask|=static_cast<uint8_t>(1u<<slot);
-      const auto statsBeforeTexture = renderer_->stats();
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+      const auto statsBeforeTexture = telemetry_ ? renderer_->stats() : gfx::FrameStats{};
+#endif
       const auto handle = renderer_->create_texture(translated.texture);
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
       if (telemetry_) {
         const auto statsAfterTexture = renderer_->stats();
         const uint32_t hits = statsAfterTexture.textureHits - statsBeforeTexture.textureHits;
@@ -795,6 +922,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         for (uint32_t i = 0; i < hits; ++i) telemetry_->texture(true, false, 0);
         for (uint32_t i = 0; i < misses; ++i) telemetry_->texture(false, uploads != 0, uploads ? translated.texture.dataSize : 0);
       }
+#endif
       if (handle) {
         bindings[slot] = gfx::TextureBinding{handle, translated.sampler, gfx::TextureSource::Cache};
         continue;
@@ -808,12 +936,14 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     else result.warnings |= SubmitWarning::MissingTextureFallback;
   }
   resolvedTextureBindings_=bindings;
+  resolvedTextureStamps_=currentTextureStamps;
   resolvedTextureMask_=textureMask;
   resolvedVolatileTextureMask_=volatileTextureMask;
   resolvedFallbackTextureMask_=result.fallbackTextureMask;
   resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
     (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
   resolvedTextureBindingsValid_=true;
+  if(++resolvedTextureGeneration_==0)resolvedTextureGeneration_=1;
   }
 #if defined(AURORA_VITA_RENDERER_GXM)
   // Keep the shader-side direct-sample specialization available, but do not
@@ -848,7 +978,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         minT=std::min(minT,v.texcoord[slot][1]);maxT=std::max(maxT,v.texcoord[slot][1]);
       }
       ++fullFrameEfbReports;
-      std::fprintf(stderr,
+      AURORA_VITA_DIAGF(
         "[aurora-vita] efb_sample n=%u pipe=%llx slot=%u verts=%u logical=%ux%u physical=%ux%u "
         "wrap=%u,%u filter=%u,%u tcscale=%u,%u pos=[%.4f,%.4f]x[%.4f,%.4f] uv=[%.6f,%.6f]x[%.6f,%.6f]\n",
         fullFrameEfbReports,static_cast<unsigned long long>(translatedPipelineKey),slot,
@@ -876,7 +1006,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
 
   gfx::PrepareDrawError error = gfx::PrepareDrawError::None;
-  const auto statsBeforeEnqueue = renderer_->stats();
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+  const auto statsBeforeEnqueue = telemetry_ ? renderer_->stats() : gfx::FrameStats{};
+#endif
   uint64_t resolvedPipelineKey = 0;
   if(gpuGeometry){
     resolvedPipelineKey=fixedPipelineKey;
@@ -888,8 +1020,10 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         preparedClipSpace == queuedPositionIsClipSpace_ &&
         pipelineForDraw.fragmentScissor == queuedFragmentScissor_ &&
         pipelineForDraw.nativeTextureWrapMask == queuedNativeTextureWrapMask_) {
-    resolvedPipelineKey = queuedResolvedPipelineKey_;
+      resolvedPipelineKey = queuedResolvedPipelineKey_;
+      if(telemetry_)telemetry_->frontend_queued_pipeline(true);
     } else {
+      if(telemetry_)telemetry_->frontend_queued_pipeline(false);
       resolvedPipelineKey = gfx::resolve_draw_pipeline(*renderer_,preparedPrimitive,preparedClipSpace,pipelineForDraw,telemetry_);
       if (resolvedPipelineKey) {
         queuedTranslatedPipelineKey_ = translatedPipelineKey;
@@ -902,23 +1036,26 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       }
     }
   }
+  if(telemetry_)telemetry_->frontend_draw_path(gpuGeometry,useStreamed);
   bool enqueued=false;
   if(gpuGeometry){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
-    fixedVertexUniforms_.push_back(gfx::fixed_vertex_uniforms(translatedGpuPipeline_,vertexState));
-    gfx::DrawPacket& packet=stream_.emplace_draw();
+    fixedVertexUniforms_.push_back(gfx::fixed_vertex_uniforms(translatedEntry_->gpuPipeline,vertexState));
+    gfx::DrawPacket& packet=stream_.emplace_draw_fast();
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
-    packet.textures=bindings;packet.uniforms=uniforms;packet.viewport=drawViewport;packet.scissor=drawScissor;
+    stream_.bind_state(packet,uniforms,bindings,translatedUniformGeneration_,resolvedTextureGeneration_);
+    packet.viewport=drawViewport;packet.scissor=drawScissor;
     packet.fixedVertexUniforms=&fixedVertexUniforms_.back();
     enqueued=true;
     queuedPipelineValid_=false;
   }else if(useStreamed) {
     enqueued=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
-                         drawViewport,drawScissor,bindings,&error);
+                         drawViewport,drawScissor,bindings,&error,
+                         translatedUniformGeneration_,resolvedTextureGeneration_);
   }else enqueued=gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipelineForDraw, uniforms,
                          drawViewport, drawScissor, bindings, &error, telemetry_,
-                         resolvedPipelineKey);
+                         resolvedPipelineKey,translatedUniformGeneration_,resolvedTextureGeneration_);
   if(!enqueued) {
     result.drawError = error;
     if (coverage_) coverage_->unsupported(static_cast<uint64_t>(error), "enqueue_draw failed");
@@ -926,6 +1063,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (strictUnsupported_) strictFailed_ = true;
     return result;
   }
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   if (telemetry_) {
     const auto statsAfterEnqueue = renderer_->stats();
     const uint32_t hitDelta = statsAfterEnqueue.pipelineHits - statsBeforeEnqueue.pipelineHits;
@@ -933,6 +1071,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     for (uint32_t i = 0; i < hitDelta; ++i) telemetry_->pipeline(true);
     for (uint32_t i = 0; i < missDelta; ++i) telemetry_->pipeline(false);
   }
+#endif
   ++submittedDraws_;
   if (telemetry_) {
     if(gpuGeometry)telemetry_->add_draw(gpuGeometry->vertexCount,gpuGeometry->indexCount,gpuGeometry->indexCount/3);

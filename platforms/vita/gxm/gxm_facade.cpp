@@ -3,8 +3,10 @@
 #include "gfx/vita_pipeline_key.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_efb_copy.hpp"
+#include "../../../lib/vita/render_size.hpp"
 #include <algorithm>
 #include <cstdio>
+#include "../vita_diag.hpp"
 #include <cstring>
 #include <limits>
 #include <type_traits>
@@ -50,14 +52,20 @@ void BufferPool::clear() noexcept {
 
 TextureCache::~TextureCache() { clear(); }
 void TextureCache::pre_evict(size_t required,uint64_t frame,uint64_t protectKey) noexcept {
-  while((required>budget_ || bytes_>budget_-required) && !byKey_.empty()) {
-    auto victim=byKey_.end();
-    for(auto it=byKey_.begin();it!=byKey_.end();++it)
-      if(it->first!=protectKey && it->second.lastUse<frame &&
-          (victim==byKey_.end() || it->second.lastUse<victim->second.lastUse)) victim=it;
-    if(victim==byKey_.end()) break;
-    ++preEvictions_;preEvictedBytes_+=victim->second.bytes;
-    erase(victim->second.handle);
+  if(required>budget_ || bytes_<=budget_-required || byKey_.empty())return;
+  struct Victim { Handle handle=InvalidHandle; uint64_t lastUse=0; size_t bytes=0; };
+  std::vector<Victim> victims;
+  victims.reserve(byKey_.size());
+  for(const auto& [key,entry]:byKey_)
+    if(key!=protectKey && entry.lastUse<frame)
+      victims.push_back({entry.handle,entry.lastUse,entry.bytes});
+  std::sort(victims.begin(),victims.end(),[](const Victim& a,const Victim& b){
+    return a.lastUse!=b.lastUse?a.lastUse<b.lastUse:a.bytes>b.bytes;
+  });
+  for(const auto& victim:victims) {
+    if(bytes_<=budget_-required)break;
+    ++preEvictions_;preEvictedBytes_+=victim.bytes;
+    erase(victim.handle);
   }
 }
 Handle TextureCache::get_or_upload(const TextureDesc& desc,uint64_t frame,FrameStats* stats) noexcept {
@@ -157,9 +165,9 @@ bool PipelineCache::evict_one() noexcept {
 }
 void PipelineCache::set_max_entries(size_t n) noexcept {maxEntries_=n;trim_to_budget();}
 void PipelineCache::trim_to_budget() noexcept {while(maxEntries_ && map_.size()>maxEntries_ && evict_one()) {}}
-void PipelineCache::configure_hot_manifest(const char* path,size_t prewarmLimit) noexcept {
+void PipelineCache::configure_hot_manifest(const char* path,size_t prewarmLimit,bool trackUsage) noexcept {
   hotManifestPath_=path&&*path?path:"";prewarmLimit_=prewarmLimit;hot_.clear();
-  newHotEntriesSinceSave_=0;hotDirty_=false;
+  newHotEntriesSinceSave_=0;hotDirty_=false;hotTrackingEnabled_=trackUsage;
   if(hotManifestPath_.empty())return;
   FILE* file=std::fopen(hotManifestPath_.c_str(),"rb");
   if(!file)return;
@@ -175,7 +183,7 @@ void PipelineCache::configure_hot_manifest(const char* path,size_t prewarmLimit)
     hot_[disk.key]=HotRecord{disk.desc,disk.hits};
   }
   std::fclose(file);
-  if(!hot_.empty())std::fprintf(stderr,"[aurora-gxm] pipeline_manifest loaded=%u prewarm_limit=%u\n",
+  if(!hot_.empty())AURORA_VITA_DIAGF("[aurora-gxm] pipeline_manifest loaded=%u prewarm_limit=%u\n",
       static_cast<unsigned>(hot_.size()),static_cast<unsigned>(prewarmLimit_));
 }
 size_t PipelineCache::prewarm_hot(FrameStats* stats) noexcept {
@@ -188,17 +196,17 @@ size_t PipelineCache::prewarm_hot(FrameStats* stats) noexcept {
     if(warmed>=prewarmLimit_||map_.size()>=maxEntries_)break;
     if(map_.contains(key))continue;
     if(!native_->create_pipeline(record->desc)){failedKeys_.insert(key);++compileFailures_;continue;}
-    CompiledPipeline p{};p.key=key;p.desc=record->desc;p.lastUsed=++useSequence_;
+    CompiledPipeline p{};p.key=key;p.lastUsed=++useSequence_;
     map_.emplace(key,std::move(p));++warmed;
     if(stats)++stats->pipelineHits;
   }
   highWaterEntries_=std::max(highWaterEntries_,map_.size());
-  if(warmed)std::fprintf(stderr,"[aurora-gxm] pipeline_prewarm warmed=%u resident=%u\n",
+  if(warmed)AURORA_VITA_DIAGF("[aurora-gxm] pipeline_prewarm warmed=%u resident=%u\n",
       static_cast<unsigned>(warmed),static_cast<unsigned>(map_.size()));
   return warmed;
 }
 void PipelineCache::save_hot_manifest() noexcept {
-  if(!hotDirty_||hotManifestPath_.empty()||hot_.empty())return;
+  if(!hotTrackingEnabled_||!hotDirty_||hotManifestPath_.empty()||hot_.empty())return;
   std::vector<std::pair<uint64_t,const HotRecord*>> ordered;ordered.reserve(hot_.size());
   for(const auto& [key,record]:hot_)ordered.emplace_back(key,&record);
   std::sort(ordered.begin(),ordered.end(),[](const auto&a,const auto&b){return a.second->hits>b.second->hits;});
@@ -216,16 +224,18 @@ void PipelineCache::save_hot_manifest() noexcept {
   if(!ok){std::remove(temporary.c_str());return;}
   newHotEntriesSinceSave_=0;
   hotDirty_=false;
-  std::fprintf(stderr,"[aurora-gxm] pipeline_manifest saved=%u\n",header.count);
+  AURORA_VITA_DIAGF("[aurora-gxm] pipeline_manifest saved=%u\n",header.count);
 }
 const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& desc,FrameStats* stats) noexcept {
   const auto key=pipeline_key(desc);
-  auto hotIt=hot_.find(key);
-  if(hotIt==hot_.end()){
-    hotIt=hot_.emplace(key,HotRecord{desc,0}).first;
-    ++newHotEntriesSinceSave_;
+  if(hotTrackingEnabled_) {
+    auto hotIt=hot_.find(key);
+    if(hotIt==hot_.end()){
+      hotIt=hot_.emplace(key,HotRecord{desc,0}).first;
+      ++newHotEntriesSinceSave_;
+    }
+    ++hotIt->second.hits;hotDirty_=true;
   }
-  ++hotIt->second.hits;hotDirty_=true;
   if(mruPipeline_&&mruKey_==key){
     mruPipeline_->lastUsed=++useSequence_;++frameMruHits_;
     if(stats)++stats->pipelineHits;
@@ -240,7 +250,7 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& desc,Fr
   if(!native_ || failedKeys_.contains(key))return nullptr;
   if(maxEntries_ && map_.size()>=maxEntries_)evict_one();
   if(!native_->create_pipeline(desc)) {failedKeys_.insert(key);++compileFailures_;return nullptr;}
-  CompiledPipeline p{};p.key=key;p.desc=desc;p.lastUsed=++useSequence_;
+  CompiledPipeline p{};p.key=key;p.lastUsed=++useSequence_;
   const auto result=map_.emplace(key,std::move(p));
   mruKey_=key;mruPipeline_=&result.first->second;
   highWaterEntries_=std::max(highWaterEntries_,map_.size());
@@ -368,7 +378,10 @@ Renderer::Renderer(const RendererConfig& cfg):cfg_(cfg),native_(std::make_unique
 Renderer::~Renderer() {shutdown();}
 bool Renderer::initialize() noexcept {
   if(initialized_)return true;
-  gxm::Config c{};c.width=cfg_.width;c.height=cfg_.height;c.displayBuffers=cfg_.displayBuffers;
+  gxm::Config c{};c.width=cfg_.width;c.height=cfg_.height;
+  c.renderWidth=aurora::vita::render_size::g_renderWidth;
+  c.renderHeight=aurora::vita::render_size::g_renderHeight;
+  c.displayBuffers=cfg_.displayBuffers;
   c.scenesPerFrame=std::max(cfg_.nativeScenesPerFrame,1u);
   c.waitVblank=cfg_.waitVblank;c.resourceBudgetBytes=cfg_.nativeResourceBudget;
   c.cdramPoolBytes=cfg_.nativeCdramPoolBytes;
@@ -378,9 +391,17 @@ bool Renderer::initialize() noexcept {
   c.maxPipelines=cfg_.pipelineBudget+16; // Native clear/blit variants are not GX cache entries.
   if(!native_->initialize(c))return false;
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=native_.get();
-  pipelines_.configure_hot_manifest(cfg_.pipelineWarmupPath,cfg_.pipelinePrewarmLimit);
+  pipelines_.configure_hot_manifest(cfg_.pipelineWarmupPath,cfg_.pipelinePrewarmLimit,
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+                                    false
+#else
+                                    true
+#endif
+  );
   pipelines_.prewarm_hot();
-  targetWidth_=cfg_.width;targetHeight_=cfg_.height;initialized_=true;failed_=false;
+  targetWidth_=aurora::vita::render_size::g_renderWidth;
+  targetHeight_=aurora::vita::render_size::g_renderHeight;
+  initialized_=true;failed_=false;
   return true;
 }
 void Renderer::shutdown() noexcept {
@@ -391,19 +412,27 @@ void Renderer::shutdown() noexcept {
 }
 const char* Renderer::last_error() const noexcept {return native_->last_error();}
 void Renderer::begin_frame() noexcept {
-  pipelines_.clear_pins();pipelines_.trim_to_budget();pipelines_.reset_frame_counters();stats_={};
-  failed_=!native_->begin_frame();boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;
+  pipelines_.clear_pins();pipelines_.trim_to_budget();pipelines_.reset_frame_counters();
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
+  stats_={};
+#endif
+  failed_=!native_->begin_frame();boundEfb_=0;
+  targetWidth_=aurora::vita::render_size::g_renderWidth;
+  targetHeight_=aurora::vita::render_size::g_renderHeight;
 }
 void Renderer::end_frame() noexcept {
   textures_.trim(frame_);++frame_;
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   // Persist newly discovered gameplay pipelines soon enough that a short
   // hardware run becomes useful training data. Usage-only ranking updates can
   // stay on the slower cadence to avoid unnecessary filesystem traffic.
   if(((frame_%120u)==0 && pipelines_.has_unsaved_hot_entries()) || (frame_%300u)==0)
     pipelines_.save_hot_manifest();
+#endif
 }
 bool Renderer::present(bool display) noexcept {
   const bool ok=native_->end_frame(display);failed_=failed_||!ok;
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   // Include internal clears, copies and the final display scene. The last GX
   // draw alone is not a complete snapshot of the native frame.
   const auto& s=native_->stats();
@@ -429,6 +458,11 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeHsrPassSwitches=s.nativeHsrPassSwitches;
   stats_.nativeDirectTextureDraws=s.nativeDirectTextureDraws;
   stats_.nativeDirectTextureSlots=s.nativeDirectTextureSlots;
+  stats_.nativeFragmentTevOps=s.nativeFragmentTevOps;
+  stats_.nativeFragmentTextureOps=s.nativeFragmentTextureOps;
+  stats_.nativeFragmentComplexDraws=s.nativeFragmentComplexDraws;
+  stats_.nativeFragmentIndirectDraws=s.nativeFragmentIndirectDraws;
+  stats_.nativeFragmentMaxTevStages=s.nativeFragmentMaxTevStages;
   stats_.nativeEfbCopies=s.nativeEfbCopies;stats_.nativeEfbEndSceneUs=s.nativeEfbEndSceneUs;
   stats_.nativeEfbDownscaleAttempts=s.nativeEfbDownscaleAttempts;
   stats_.nativeEfbDownscaleSuccesses=s.nativeEfbDownscaleSuccesses;
@@ -436,13 +470,25 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeEfbTransferSubmitUs=s.nativeEfbTransferSubmitUs;
   stats_.nativeEfbTransferWaitUs=s.nativeEfbTransferWaitUs;
   stats_.nativeEfbCpuFixupUs=s.nativeEfbCpuFixupUs;
+#endif
   return ok;
 }
 bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) noexcept {return native_->readback_rgba8(pixels);}
 uint64_t Renderer::create_pipeline(const PipelineDesc& d) noexcept {
-  const auto* p=pipelines_.get_or_create(d,&stats_);if(!p)return 0;pipelines_.pin(p->key);return p->key;
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+  const auto* p=pipelines_.get_or_create(d,nullptr);
+#else
+  const auto* p=pipelines_.get_or_create(d,&stats_);
+#endif
+  if(!p)return 0;pipelines_.pin(p->key);return p->key;
 }
-Handle Renderer::create_texture(const TextureDesc& d) noexcept {return textures_.get_or_upload(d,frame_,&stats_);}
+Handle Renderer::create_texture(const TextureDesc& d) noexcept {
+#if defined(AURORA_VITA_NO_DIAGNOSTICS)
+  return textures_.get_or_upload(d,frame_,nullptr);
+#else
+  return textures_.get_or_upload(d,frame_,&stats_);
+#endif
+}
 size_t Renderer::invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept {return textures_.invalidate_source_range(start,bytes);}
 Handle Renderer::create_vertex_buffer(const void* data,size_t bytes,bool dynamic) noexcept {return buffers_.create_vertex(data,bytes,dynamic);}
 Handle Renderer::create_index_buffer(const void* data,size_t bytes,bool dynamic) noexcept {return buffers_.create_index(data,bytes,dynamic);}
@@ -453,26 +499,42 @@ bool Renderer::bind_efb(Handle h) noexcept {
   boundEfb_=h;targetWidth_=w;targetHeight_=ht;return true;
 }
 void Renderer::bind_default() noexcept {
-  efb_.bind_default(cfg_.width,cfg_.height);boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;
+  efb_.bind_default(aurora::vita::render_size::g_renderWidth,
+                    aurora::vita::render_size::g_renderHeight);
+  boundEfb_=0;
+  targetWidth_=aurora::vita::render_size::g_renderWidth;
+  targetHeight_=aurora::vita::render_size::g_renderHeight;
 }
 bool Renderer::blit_efb(Handle h) noexcept {
-  if(!efb_.blit_to_default(h,cfg_.width,cfg_.height))return false;
-  boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;return true;
+  if(!efb_.blit_to_default(h,aurora::vita::render_size::g_renderWidth,
+                           aurora::vita::render_size::g_renderHeight))return false;
+  boundEfb_=0;
+  targetWidth_=aurora::vita::render_size::g_renderWidth;
+  targetHeight_=aurora::vita::render_size::g_renderHeight;
+  return true;
 }
 bool Renderer::display_copy(const Scissor& src) noexcept {
   if(!native_->copy_display_region(src)) {failed_=true;return false;}
-  boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;return true;
+  // Presenting into the 960x544 scanout does not change the logical default
+  // EFB. Keep subsequent GXCopyDisp/GXCopyTex mapping on the 640x448 render
+  // extent instead of treating the scanout size as a new render target.
+  boundEfb_=0;
+  targetWidth_=aurora::vita::render_size::g_renderWidth;
+  targetHeight_=aurora::vita::render_size::g_renderHeight;
+  return true;
 }
 Handle Renderer::capture_current(Handle existing,const Scissor& s,uint32_t dw,uint32_t dh,EfbCopyFormat f,bool fx,bool fy) noexcept {
   const int64_t y=int64_t(targetHeight_)-s.y-s.height;
   if(s.width<=0||s.height<=0||y<INT32_MIN||y>INT32_MAX)return 0;
   const auto h=efb_.capture_from_bound(existing,s.x,int32_t(y),s.width,s.height,dw,dh,f,false,fx,fy);
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   const auto& sNative=native_->stats();
   stats_.nativeEfbCopies=sNative.nativeEfbCopies;
   stats_.nativeEfbEndSceneUs=sNative.nativeEfbEndSceneUs;
   stats_.nativeEfbTransferSubmitUs=sNative.nativeEfbTransferSubmitUs;
   stats_.nativeEfbTransferWaitUs=sNative.nativeEfbTransferWaitUs;
   stats_.nativeEfbCpuFixupUs=sNative.nativeEfbCpuFixupUs;
+#endif
   return h;
 }
 Handle Renderer::upload_efb_rgba(Handle existing,uint32_t w,uint32_t h,const void* data) noexcept {return efb_.upload_rgba(existing,w,h,data);}
@@ -488,6 +550,7 @@ void Renderer::invalidate_draw_state() noexcept {pipelines_.invalidate_bound();}
 void Renderer::draw(const DrawPacket& packet) noexcept {
   if(failed_)return;
   if(!native_->draw(packet)) {failed_=true;return;}
+#if !defined(AURORA_VITA_NO_DIAGNOSTICS)
   const auto& s=native_->stats();stats_.drawCalls=s.drawCalls;stats_.triangles=s.triangles;
   stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;stats_.nativeDrawUs=s.nativeDrawUs;
   stats_.pipelineMruHits=pipelines_.frame_mru_hits();
@@ -499,7 +562,13 @@ void Renderer::draw(const DrawPacket& packet) noexcept {
   stats_.nativeHsrPassSwitches=s.nativeHsrPassSwitches;
   stats_.nativeDirectTextureDraws=s.nativeDirectTextureDraws;
   stats_.nativeDirectTextureSlots=s.nativeDirectTextureSlots;
+  stats_.nativeFragmentTevOps=s.nativeFragmentTevOps;
+  stats_.nativeFragmentTextureOps=s.nativeFragmentTextureOps;
+  stats_.nativeFragmentComplexDraws=s.nativeFragmentComplexDraws;
+  stats_.nativeFragmentIndirectDraws=s.nativeFragmentIndirectDraws;
+  stats_.nativeFragmentMaxTevStages=s.nativeFragmentMaxTevStages;
   stats_.nativeSceneCount=s.nativeSceneCount;
+#endif
 }
 void Renderer::execute(const CommandStream& stream) noexcept {
   execute_range(stream,0,stream.size(),true);
@@ -507,6 +576,11 @@ void Renderer::execute(const CommandStream& stream) noexcept {
 void Renderer::execute_range(const CommandStream& stream,size_t begin,size_t end,bool finalize) noexcept {
   const auto& commands=stream.commands();
   begin=std::min(begin,commands.size());end=std::min(std::max(end,begin),commands.size());
+  if(stream.draw_only()) {
+    for(size_t index=begin;index<end&&!failed_;++index)draw(stream.draw_packet(static_cast<uint32_t>(index)));
+    if(finalize){pipelines_.clear_pins();pipelines_.trim_to_budget();}
+    return;
+  }
   for(size_t index=begin;index<end;++index) {
     const auto& c=commands[index];
     if(failed_)break;

@@ -21,6 +21,9 @@ add_library(aurora::vita_gxm_backend ALIAS aurora_vita_gxm_backend)
 target_compile_features(aurora_vita_gxm_backend PUBLIC cxx_std_20)
 target_compile_definitions(aurora_vita_gxm_backend PUBLIC AURORA_VITA_RENDERER_GXM=1)
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE AURORA_VITA_DIRECT_STREAM_WRITE=0)
+if(NOT STRIKERS_VITA_DIAGNOSTICS)
+    target_compile_definitions(aurora_vita_gxm_backend PRIVATE AURORA_VITA_NO_DIAGNOSTICS=1)
+endif()
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE
     AURORA_VITA_NATIVE_CMPR=$<BOOL:${AURORA_VITA_NATIVE_CMPR}>
     AURORA_VITA_NATIVE_GX_TEXTURES=$<BOOL:${AURORA_VITA_NATIVE_GX_TEXTURES}>)

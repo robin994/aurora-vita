@@ -91,6 +91,7 @@ public:
   void invalidate_resource_bindings() noexcept;
   const FrameStats& stats()const noexcept{return stats_;}uint64_t frame()const noexcept{return frame_;}
   uint32_t target_width()const noexcept{return targetWidth_;}uint32_t target_height()const noexcept{return targetHeight_;}
+  bool target_is_default()const noexcept{return boundEfb_==InvalidHandle;}
   PipelineCache& pipelines() noexcept{return pipelines_;}TextureCache& textures() noexcept{return textures_;}BufferPool& buffers() noexcept{return buffers_;}EfbManager& efb() noexcept{return efb_;}
 private:
   void invalidate_draw_state() noexcept;

@@ -101,11 +101,13 @@ bool enqueue_draw(Renderer& renderer,StreamingArena& arena,CommandStream& stream
                   const PipelineDesc& pipeline,const DrawUniforms& uniforms,const Viewport& viewport,
                   const Scissor& scissor,const std::array<TextureBinding,MaxTextures>& textures={},
                   PrepareDrawError* error=nullptr,Telemetry* telemetry=nullptr,
-                  uint64_t resolvedPipelineKey=0) noexcept;
+                  uint64_t resolvedPipelineKey=0,uint32_t uniformGeneration=0,
+                  uint32_t textureGeneration=0) noexcept;
 
 bool enqueue_streamed_draw(CommandStream& stream,const StreamedDraw& prepared,uint64_t resolvedPipelineKey,
                            const DrawUniforms& uniforms,const Viewport& viewport,const Scissor& scissor,
                            const std::array<TextureBinding,MaxTextures>& textures={},
-                           PrepareDrawError* error=nullptr) noexcept;
+                           PrepareDrawError* error=nullptr,uint32_t uniformGeneration=0,
+                           uint32_t textureGeneration=0) noexcept;
 
 } // namespace aurora::vita::gfx

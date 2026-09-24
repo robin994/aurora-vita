@@ -27,7 +27,23 @@ private:
 #if defined(AURORA_VITA_RENDERER_GXM)
   gxm::Renderer* native_=nullptr;
 #endif
-  struct Entry{Handle handle=InvalidHandle;unsigned gl=0;uint64_t key=0,lastUse=0;size_t bytes=0;uint32_t width=0,height=0;TextureFormat format=TextureFormat::RGBA8;uint8_t mipCount=0;bool hasMipmaps=false,cacheable=true;uint64_t sourceId=0,paletteSourceId=0;size_t sourceBytes=0,paletteBytes=0;SamplerDesc sampler{};bool samplerValid=false;uint8_t explicitMipCount=0,appliedMipCount=0;};
+  struct Entry{
+    Handle handle=InvalidHandle;
+    uint64_t key=0,lastUse=0;
+    size_t bytes=0;
+    bool hasMipmaps=false,cacheable=true;
+    uint64_t sourceId=0,paletteSourceId=0;
+    size_t sourceBytes=0,paletteBytes=0;
+#if !defined(AURORA_VITA_RENDERER_GXM)
+    unsigned gl=0;
+    uint32_t width=0,height=0;
+    TextureFormat format=TextureFormat::RGBA8;
+    uint8_t mipCount=0;
+    SamplerDesc sampler{};
+    bool samplerValid=false;
+    uint8_t explicitMipCount=0,appliedMipCount=0;
+#endif
+  };
   // Evict LRU entries (never the entry keyed protectKey) until bytes_+requiredBytes fits
   // under budget_ with headroom. Runs BEFORE any vitaGL allocation.
   void pre_evict(size_t requiredBytes,uint64_t frame,uint64_t protectKey) noexcept;
