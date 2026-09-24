@@ -9,7 +9,8 @@ using CpuRangeTask = bool (*)(void* context, size_t begin, size_t end, uint32_t 
 
 // Vita applications have three CPU cores available for game work. Keep the
 // render thread as one execution lane and add up to two persistent CPU workers.
-bool initialize_cpu_workers(uint32_t workerThreads = 2, size_t minItems = 512) noexcept;
+bool initialize_cpu_workers(uint32_t workerThreads = 2, size_t minItems = 512,
+                            uint32_t defaultExecutionLanes = 0) noexcept;
 void shutdown_cpu_workers() noexcept;
 
 // Runs a disjoint range on the caller and the persistent workers, or falls back
@@ -20,6 +21,8 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept;
 // for game-side jobs whose item count is much smaller than a vertex batch. The
 // pool remains single-producer; nested/re-entrant calls fall back to the caller.
 bool cpu_parallel_for_min(size_t count, size_t minItems, CpuRangeTask task, void* context) noexcept;
+bool cpu_parallel_for_min_lanes(size_t count, size_t minItems, uint32_t maxExecutionLanes,
+                                CpuRangeTask task, void* context) noexcept;
 
 uint32_t cpu_worker_threads() noexcept;
 uint32_t cpu_execution_lanes() noexcept;

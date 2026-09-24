@@ -80,6 +80,10 @@ struct BackendConfig {
   // CPU-side per-vertex decode/transform work, giving Vita three CPU lanes in
   // total with the default two workers plus the caller.
   uint32_t cpu_worker_threads=2;
+  // Maximum caller+worker lanes used by Aurora's own decode/transform path.
+  // Zero uses every configured lane. Ports with real-time work on CPU1 can
+  // create a low-priority second helper but cap renderer work to CPU0+CPU2.
+  uint32_t cpu_renderer_execution_lanes=0;
   // Minimum useful work per CPU lane. Smaller draws stay on the render thread;
   // larger draws progressively use one or two workers as their size warrants.
   uint32_t cpu_parallel_min_vertices=512;

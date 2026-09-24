@@ -58,10 +58,12 @@ namespace {
 struct Job {
   std::array<std::atomic<unsigned>,192> visits{};
   std::atomic<unsigned> active{0};
+  std::atomic<unsigned> laneMask{0};
   unsigned iteration=0;
 };
 bool task(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
   auto& job=*static_cast<Job*>(opaque);++job.active;
+  job.laneMask.fetch_or(1u<<lane);
   const auto iteration=job.iteration;
   // Vary whether the caller or either worker finishes first, and alternate
   // active lane counts across jobs so stale acknowledgements become visible.
@@ -74,7 +76,7 @@ bool task(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
 int main() {
   using namespace aurora::vita::gfx;
   for(unsigned workers=1;workers<=2;++workers) {
-    require(initialize_cpu_workers(workers,64),"initialize");
+    require(initialize_cpu_workers(workers,64,workers==2?2:0),"initialize");
     for(unsigned iteration=1;iteration<=4000;++iteration) {
       Job job;job.iteration=iteration;
       const size_t count=iteration%3==0?192:(iteration%3==1?128:32);
@@ -86,10 +88,16 @@ int main() {
     }
     {
       Job job;job.iteration=7;
-      require(cpu_parallel_for_min(10,4,task,&job),"per-call minimum result");
+      require(cpu_parallel_for_min(10,3,task,&job),"per-call minimum result");
       require(job.active.load()==0,"per-call minimum returned early");
       for(size_t i=0;i<job.visits.size();++i)
         require(job.visits[i].load()==unsigned(i<10),"per-call minimum coverage");
+      if(workers==2)require((job.laneMask.load()&0x7u)==0x7u,"game override did not use three lanes");
+    }
+    if(workers==2) {
+      Job job;job.iteration=11;
+      require(cpu_parallel_for(192,task,&job),"default lane cap result");
+      require((job.laneMask.load()&0x7u)==0x3u,"renderer default lane cap used CPU1 helper");
     }
     shutdown_cpu_workers();
     require(semas.empty()&&threads.empty(),"shutdown leaked resources");

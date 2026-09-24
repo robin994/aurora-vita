@@ -283,7 +283,8 @@ bool initialize(const BackendConfig& c) noexcept {
     g_renderer.reset();
     return false;
   }
-  if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices)) {
+  if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices,
+                                   c.cpu_renderer_execution_lanes)) {
     AURORA_VITA_LOG_ERROR(
         "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }

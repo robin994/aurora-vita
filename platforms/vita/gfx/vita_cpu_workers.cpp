@@ -30,6 +30,7 @@ struct CpuWorkerState {
   std::array<Lane, MaxWorkers> lanes{};
   bool initialized = false;
   uint32_t workerCount = 0;
+  uint32_t defaultExecutionLanes = 1;
   size_t minItems = 512;
   std::atomic_flag busy = ATOMIC_FLAG_INIT;
 };
@@ -60,7 +61,7 @@ void destroy_lane(CpuWorkerState::Lane &lane) noexcept {
 }
 } // namespace
 
-bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
+bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t defaultExecutionLanes) noexcept {
   if (g_workers.initialized) shutdown_cpu_workers();
 
   g_workers.workerCount = 0;
@@ -73,12 +74,13 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
     lane.done=sceKernelCreateSema("aurora_cpu_done",0,0,1,nullptr);
     if(lane.wake<0 || lane.done<0) {destroy_lane(lane);break;}
     char name[24];std::snprintf(name,sizeof(name),"aurora_cpu_%u",i+1);
-    // With one helper, leave core 1 available to the title's audio thread and
-    // put Aurora's parallel vertex/decode work on core 2. Two-worker callers
-    // retain the historical core 1/core 2 placement.
-    const int affinity=requested==1?SCE_KERNEL_CPU_MASK_USER_2:
-        (i==0?SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2);
-    lane.thread=sceKernelCreateThread(name,cpu_worker_main,0x10000110,
+    // Keep lane 1 on CPU2 in every topology so renderer jobs capped to two
+    // execution lanes always use CPU0+CPU2. With two helpers, lane 2 lives on
+    // CPU1 at a deliberately lower priority than the title's default-priority
+    // audio pthread; MusyX can therefore pre-empt opportunistic game work.
+    const int affinity=i==0?SCE_KERNEL_CPU_MASK_USER_2:SCE_KERNEL_CPU_MASK_USER_1;
+    const int priority=i==0?0x10000110:0x10000180;
+    lane.thread=sceKernelCreateThread(name,cpu_worker_main,priority,
                                      WorkerStackBytes,0,affinity,nullptr);
     if(lane.thread<0 || sceKernelStartThread(lane.thread,sizeof(i),&i)<0) {
       destroy_lane(lane);break;
@@ -87,9 +89,12 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems) noexcept {
   }
 
   g_workers.initialized = true;
+  const uint32_t availableLanes=g_workers.workerCount+1;
+  g_workers.defaultExecutionLanes=defaultExecutionLanes==0?availableLanes:
+      std::max<uint32_t>(1,std::min(defaultExecutionLanes,availableLanes));
   AURORA_VITA_LOG_INFO(
-      "[aurora-vita] cpu workers=%u lanes=%u sync=paired_semaphores cores=1,2 parallel_min_items=%llu\n",
-      g_workers.workerCount,g_workers.workerCount+1,
+      "[aurora-vita] cpu workers=%u lanes=%u default_lanes=%u sync=paired_semaphores helpers=cpu2,cpu1-lowpri parallel_min_items=%llu\n",
+      g_workers.workerCount,g_workers.workerCount+1,g_workers.defaultExecutionLanes,
       static_cast<unsigned long long>(g_workers.minItems));
   return true;
 }
@@ -112,7 +117,8 @@ void shutdown_cpu_workers() noexcept {
   g_workers.workerCount = 0;
 }
 
-bool cpu_parallel_for_min(size_t count, size_t minItems, CpuRangeTask task, void* context) noexcept {
+bool cpu_parallel_for_min_lanes(size_t count, size_t minItems, uint32_t maxExecutionLanes,
+                                CpuRangeTask task, void* context) noexcept {
   if (!task) return false;
   if (count == 0) return true;
   if (!g_workers.initialized || g_workers.workerCount == 0) {
@@ -137,7 +143,9 @@ bool cpu_parallel_for_min(size_t count, size_t minItems, CpuRangeTask task, void
   // active lane count with the draw instead and keep small draws on the caller.
   // A dedicated semaphore per lane replaces the shared condition-variable
   // barrier, which stalled under sustained Vita hardware workloads.
-  const uint32_t maxLanes = g_workers.workerCount + 1;
+  const uint32_t availableLanes = g_workers.workerCount + 1;
+  const uint32_t maxLanes = maxExecutionLanes==0?availableLanes:
+      std::max<uint32_t>(1,std::min(maxExecutionLanes,availableLanes));
   const uint32_t usefulLanes = static_cast<uint32_t>(std::min<size_t>(
       maxLanes, std::max<size_t>(1, count / minItems)));
   if (usefulLanes <= 1) return task(context, 0, count, 0);
@@ -177,8 +185,12 @@ bool cpu_parallel_for_min(size_t count, size_t minItems, CpuRangeTask task, void
   return mainResult && workersResult;
 }
 
+bool cpu_parallel_for_min(size_t count, size_t minItems, CpuRangeTask task, void* context) noexcept {
+  return cpu_parallel_for_min_lanes(count,minItems,g_workers.workerCount+1,task,context);
+}
+
 bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
-  return cpu_parallel_for_min(count, g_workers.minItems, task, context);
+  return cpu_parallel_for_min_lanes(count,g_workers.minItems,g_workers.defaultExecutionLanes,task,context);
 }
 
 uint32_t cpu_worker_threads() noexcept { return g_workers.workerCount; }
@@ -190,7 +202,7 @@ namespace {
 size_t g_minItems = 512;
 }
 
-bool initialize_cpu_workers(uint32_t, size_t minItems) noexcept {
+bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t) noexcept {
   g_minItems = std::max<size_t>(1, minItems);
   return true;
 }
@@ -199,6 +211,9 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
   return task ? task(context, 0, count, 0) : false;
 }
 bool cpu_parallel_for_min(size_t count, size_t, CpuRangeTask task, void* context) noexcept {
+  return task ? task(context, 0, count, 0) : false;
+}
+bool cpu_parallel_for_min_lanes(size_t count, size_t, uint32_t, CpuRangeTask task, void* context) noexcept {
   return task ? task(context, 0, count, 0) : false;
 }
 uint32_t cpu_worker_threads() noexcept { return 0; }
