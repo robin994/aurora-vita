@@ -49,6 +49,7 @@ struct PerformanceSnapshot {
   uint32_t shaderDiskCacheHits=0;
   uint32_t shaderDiskCacheMisses=0;
 };
+using ParallelRangeTask = bool (*)(void* context, size_t begin, size_t end, uint32_t lane) noexcept;
 struct BackendConfig {
   uint32_t width=960,height=544;
   // Zero follows the display extent, preserving the validated raster scale.
@@ -163,4 +164,10 @@ integration::FeatureCoverage& feature_coverage() noexcept;
 integration::FrameTrace& frame_trace() noexcept;
 gfx::MemoryBudgetSnapshot memory_budget() noexcept;
 size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept;
+// Shared Vita CPU helper. CPU0 participates as lane 0 and Aurora's persistent
+// helper executes lane 1 on CPU2. Jobs are synchronous: this returns only after
+// all ranges complete. Nested calls safely fall back to the caller.
+bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* context) noexcept;
+uint32_t worker_threads() noexcept;
+uint32_t execution_lanes() noexcept;
 } // namespace aurora::vita

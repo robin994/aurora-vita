@@ -475,6 +475,13 @@ size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept{
   return invalidated;
 }
 
+bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* context) noexcept {
+  return gfx::cpu_parallel_for_min(count,minItems,task,context);
+}
+
+uint32_t worker_threads() noexcept { return gfx::cpu_worker_threads(); }
+uint32_t execution_lanes() noexcept { return gfx::cpu_execution_lanes(); }
+
 // benchmark.c keeps this hook weak so non-Aurora builds do not need to provide
 // it.  On Vita provide a strong implementation backed by the actual CPU time
 // spent in sceGxmDisplayQueueAddEntry.  Values are reported in nanoseconds to

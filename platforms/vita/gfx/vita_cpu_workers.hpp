@@ -16,6 +16,11 @@ void shutdown_cpu_workers() noexcept;
 // to the caller for small jobs and when workers are unavailable.
 bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept;
 
+// Same worker pool, but with a per-call granularity override. This is intended
+// for game-side jobs whose item count is much smaller than a vertex batch. The
+// pool remains single-producer; nested/re-entrant calls fall back to the caller.
+bool cpu_parallel_for_min(size_t count, size_t minItems, CpuRangeTask task, void* context) noexcept;
+
 uint32_t cpu_worker_threads() noexcept;
 uint32_t cpu_execution_lanes() noexcept;
 size_t cpu_parallel_min_items() noexcept;

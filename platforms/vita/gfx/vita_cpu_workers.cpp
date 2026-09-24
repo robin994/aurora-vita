@@ -31,6 +31,7 @@ struct CpuWorkerState {
   bool initialized = false;
   uint32_t workerCount = 0;
   size_t minItems = 512;
+  std::atomic_flag busy = ATOMIC_FLAG_INIT;
 };
 
 CpuWorkerState g_workers{};
@@ -111,12 +112,23 @@ void shutdown_cpu_workers() noexcept {
   g_workers.workerCount = 0;
 }
 
-bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
+bool cpu_parallel_for_min(size_t count, size_t minItems, CpuRangeTask task, void* context) noexcept {
   if (!task) return false;
   if (count == 0) return true;
   if (!g_workers.initialized || g_workers.workerCount == 0) {
     return task(context, 0, count, 0);
   }
+
+  // Renderer and game phases intentionally share one persistent producer. If
+  // a callback ever recurses into another parallel-for, keep the inner call on
+  // the caller instead of deadlocking on this pool's completion semaphores.
+  if (g_workers.busy.test_and_set(std::memory_order_acquire))
+    return task(context, 0, count, 0);
+  struct BusyGuard {
+    ~BusyGuard() { g_workers.busy.clear(std::memory_order_release); }
+  } busyGuard;
+
+  minItems = std::max<size_t>(1, minItems);
 
   // `minItems` is the minimum useful amount of work per execution lane, not
   // merely the threshold for waking every worker.  Waking two Vita pthreads for
@@ -127,7 +139,7 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
   // barrier, which stalled under sustained Vita hardware workloads.
   const uint32_t maxLanes = g_workers.workerCount + 1;
   const uint32_t usefulLanes = static_cast<uint32_t>(std::min<size_t>(
-      maxLanes, std::max<size_t>(1, count / g_workers.minItems)));
+      maxLanes, std::max<size_t>(1, count / minItems)));
   if (usefulLanes <= 1) return task(context, 0, count, 0);
 
   const uint32_t lanes = usefulLanes;
@@ -165,6 +177,10 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
   return mainResult && workersResult;
 }
 
+bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
+  return cpu_parallel_for_min(count, g_workers.minItems, task, context);
+}
+
 uint32_t cpu_worker_threads() noexcept { return g_workers.workerCount; }
 uint32_t cpu_execution_lanes() noexcept { return g_workers.workerCount + 1; }
 size_t cpu_parallel_min_items() noexcept { return g_workers.minItems; }
@@ -180,6 +196,9 @@ bool initialize_cpu_workers(uint32_t, size_t minItems) noexcept {
 }
 void shutdown_cpu_workers() noexcept {}
 bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
+  return task ? task(context, 0, count, 0) : false;
+}
+bool cpu_parallel_for_min(size_t count, size_t, CpuRangeTask task, void* context) noexcept {
   return task ? task(context, 0, count, 0) : false;
 }
 uint32_t cpu_worker_threads() noexcept { return 0; }

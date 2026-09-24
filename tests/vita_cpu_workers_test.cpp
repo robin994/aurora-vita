@@ -84,6 +84,13 @@ int main() {
       for(size_t i=0;i<job.visits.size();++i)
         require(job.visits[i].load()==unsigned(i<count),"range duplicated or missing");
     }
+    {
+      Job job;job.iteration=7;
+      require(cpu_parallel_for_min(10,4,task,&job),"per-call minimum result");
+      require(job.active.load()==0,"per-call minimum returned early");
+      for(size_t i=0;i<job.visits.size();++i)
+        require(job.visits[i].load()==unsigned(i<10),"per-call minimum coverage");
+    }
     shutdown_cpu_workers();
     require(semas.empty()&&threads.empty(),"shutdown leaked resources");
   }
