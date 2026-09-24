@@ -10,8 +10,13 @@ using CpuRangeTask = bool (*)(void* context, size_t begin, size_t end, uint32_t 
 // Vita applications have three CPU cores available for game work. Keep the
 // render thread as one execution lane and add up to two persistent CPU workers.
 bool initialize_cpu_workers(uint32_t workerThreads = 2, size_t minItems = 512,
-                            uint32_t defaultExecutionLanes = 0) noexcept;
+                            uint32_t defaultExecutionLanes = 0,
+                            bool useSystemCore = false) noexcept;
 void shutdown_cpu_workers() noexcept;
+
+// Capability probe for CapUnlocker-style access to the normally system-only
+// fourth Vita core. Returns true only if a real thread runs with CPU id 3.
+bool probe_system_core() noexcept;
 
 // Runs a disjoint range on the caller and the persistent workers, or falls back
 // to the caller for small jobs and when workers are unavailable.

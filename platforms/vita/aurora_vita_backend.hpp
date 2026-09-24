@@ -84,6 +84,9 @@ struct BackendConfig {
   // Zero uses every configured lane. Ports with real-time work on CPU1 can
   // create a low-priority second helper but cap renderer work to CPU0+CPU2.
   uint32_t cpu_renderer_execution_lanes=0;
+  // If true, Aurora may place one persistent worker on the normally reserved
+  // system core. The port must enable this only after probe_system_core().
+  bool cpu_use_system_core=false;
   // Minimum useful work per CPU lane. Smaller draws stay on the render thread;
   // larger draws progressively use one or two workers as their size warrants.
   uint32_t cpu_parallel_min_vertices=512;
@@ -172,6 +175,7 @@ size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept;
 // helper executes lane 1 on CPU2. Jobs are synchronous: this returns only after
 // all ranges complete. Nested calls safely fall back to the caller.
 bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* context) noexcept;
+bool probe_system_core() noexcept;
 uint32_t worker_threads() noexcept;
 uint32_t execution_lanes() noexcept;
 } // namespace aurora::vita

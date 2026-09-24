@@ -8,14 +8,20 @@
 
 #if defined(__vita__)
 #include <psp2/kernel/threadmgr.h>
+#ifndef SCE_KERNEL_CPU_MASK_SYSTEM
+#define SCE_KERNEL_CPU_MASK_SYSTEM 0x00080000
+#endif
+extern "C" int sceKernelGetCpuId(void);
+extern "C" int sceKernelGetThreadCpuAffinityMask(SceUID thid);
 #endif
 
 namespace aurora::vita::gfx {
 
 #if defined(__vita__)
 namespace {
-constexpr uint32_t MaxWorkers = 2;
+constexpr uint32_t MaxWorkers = 3;
 constexpr size_t WorkerStackBytes = 128u * 1024u;
+constexpr size_t ProbeStackBytes = 16u * 1024u;
 
 struct CpuWorkerState {
   struct Lane {
@@ -36,6 +42,16 @@ struct CpuWorkerState {
 };
 
 CpuWorkerState g_workers{};
+
+struct SystemCoreProbeArgs {
+  int* cpuId = nullptr;
+};
+
+int system_core_probe_main(SceSize, void* opaque) {
+  auto* args = static_cast<SystemCoreProbeArgs*>(opaque);
+  if (args && args->cpuId) *args->cpuId = sceKernelGetCpuId();
+  return 0;
+}
 
 int cpu_worker_main(SceSize, void* opaque) {
   const uint32_t index = *static_cast<const uint32_t*>(opaque);
@@ -61,12 +77,30 @@ void destroy_lane(CpuWorkerState::Lane &lane) noexcept {
 }
 } // namespace
 
-bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t defaultExecutionLanes) noexcept {
+bool probe_system_core() noexcept {
+  int cpuId = -1;
+  SystemCoreProbeArgs args{&cpuId};
+  const SceUID thread = sceKernelCreateThread(
+      "aurora_core3_probe", system_core_probe_main, 0x10000180,
+      ProbeStackBytes, 0, SCE_KERNEL_CPU_MASK_SYSTEM, nullptr);
+  if (thread < 0) return false;
+
+  const int affinity = sceKernelGetThreadCpuAffinityMask(thread);
+  const int start = sceKernelStartThread(thread, sizeof(args), &args);
+  int wait = -1;
+  if (start >= 0) wait = sceKernelWaitThreadEnd(thread, nullptr, nullptr);
+  sceKernelDeleteThread(thread);
+  return affinity == SCE_KERNEL_CPU_MASK_SYSTEM && start >= 0 && wait >= 0 && cpuId == 3;
+}
+
+bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t defaultExecutionLanes,
+                            bool useSystemCore) noexcept {
   if (g_workers.initialized) shutdown_cpu_workers();
 
   g_workers.workerCount = 0;
   g_workers.minItems = std::max<size_t>(1, minItems);
-  const uint32_t requested = std::min(workerThreads, MaxWorkers);
+  const uint32_t maxAllowedWorkers = useSystemCore ? MaxWorkers : 2u;
+  const uint32_t requested = std::min(workerThreads, maxAllowedWorkers);
   for (uint32_t i = 0; i < requested; ++i) {
     auto &lane=g_workers.lanes[i];
     lane.stop.store(false);lane.state.store(0);
@@ -74,12 +108,19 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t de
     lane.done=sceKernelCreateSema("aurora_cpu_done",0,0,1,nullptr);
     if(lane.wake<0 || lane.done<0) {destroy_lane(lane);break;}
     char name[24];std::snprintf(name,sizeof(name),"aurora_cpu_%u",i+1);
-    // Keep lane 1 on CPU2 in every topology so renderer jobs capped to two
-    // execution lanes always use CPU0+CPU2. With two helpers, lane 2 lives on
-    // CPU1 at a deliberately lower priority than the title's default-priority
-    // audio pthread; MusyX can therefore pre-empt opportunistic game work.
-    const int affinity=i==0?SCE_KERNEL_CPU_MASK_USER_2:SCE_KERNEL_CPU_MASK_USER_1;
-    const int priority=i==0?0x10000110:0x10000180;
+    // Stable 3-core topology: CPU2 is the primary helper and CPU1 is a low-
+    // priority opportunistic lane below audio. With CapUnlocker, insert CPU3
+    // before CPU1 so renderer jobs capped to three execution lanes use
+    // CPU0+CPU2+CPU3 and never depend on the audio core.
+    int affinity = SCE_KERNEL_CPU_MASK_USER_1;
+    int priority = 0x10000180;
+    if (i == 0) {
+      affinity = SCE_KERNEL_CPU_MASK_USER_2;
+      priority = 0x10000110;
+    } else if (useSystemCore && i == 1) {
+      affinity = SCE_KERNEL_CPU_MASK_SYSTEM;
+      priority = 0x10000120;
+    }
     lane.thread=sceKernelCreateThread(name,cpu_worker_main,priority,
                                      WorkerStackBytes,0,affinity,nullptr);
     if(lane.thread<0 || sceKernelStartThread(lane.thread,sizeof(i),&i)<0) {
@@ -93,8 +134,9 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t de
   g_workers.defaultExecutionLanes=defaultExecutionLanes==0?availableLanes:
       std::max<uint32_t>(1,std::min(defaultExecutionLanes,availableLanes));
   AURORA_VITA_LOG_INFO(
-      "[aurora-vita] cpu workers=%u lanes=%u default_lanes=%u sync=paired_semaphores helpers=cpu2,cpu1-lowpri parallel_min_items=%llu\n",
+      "[aurora-vita] cpu workers=%u lanes=%u default_lanes=%u system_core=%u sync=paired_semaphores parallel_min_items=%llu\n",
       g_workers.workerCount,g_workers.workerCount+1,g_workers.defaultExecutionLanes,
+      useSystemCore?1u:0u,
       static_cast<unsigned long long>(g_workers.minItems));
   return true;
 }
@@ -202,7 +244,8 @@ namespace {
 size_t g_minItems = 512;
 }
 
-bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t) noexcept {
+bool probe_system_core() noexcept { return false; }
+bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t, bool) noexcept {
   g_minItems = std::max<size_t>(1, minItems);
   return true;
 }

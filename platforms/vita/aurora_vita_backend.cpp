@@ -284,7 +284,8 @@ bool initialize(const BackendConfig& c) noexcept {
     return false;
   }
   if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices,
-                                   c.cpu_renderer_execution_lanes)) {
+                                   c.cpu_renderer_execution_lanes,
+                                   c.cpu_use_system_core)) {
     AURORA_VITA_LOG_ERROR(
         "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
@@ -479,6 +480,8 @@ size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept{
 bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* context) noexcept {
   return gfx::cpu_parallel_for_min(count,minItems,task,context);
 }
+
+bool probe_system_core() noexcept { return gfx::probe_system_core(); }
 
 uint32_t worker_threads() noexcept { return gfx::cpu_worker_threads(); }
 uint32_t execution_lanes() noexcept { return gfx::cpu_execution_lanes(); }
