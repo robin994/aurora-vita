@@ -8,6 +8,7 @@
 #include "gfx/vita_pipeline_key.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_sampler_units.hpp"
+#include "gfx/vita_cpu_workers.hpp"
 #include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
 #include <vitashark.h>
@@ -187,24 +188,38 @@ bool same_sampler(const SamplerDesc& a,const SamplerDesc& b) noexcept {
 bool same_viewport(const Viewport& a,const Viewport& b) noexcept {
   return a.x==b.x&&a.y==b.y&&a.width==b.width&&a.height==b.height&&a.znear==b.znear&&a.zfar==b.zfar;
 }
+uint32_t spread_swizzle(uint32_t value,unsigned axis,unsigned shared) noexcept {
+  uint32_t result=0;
+  for(unsigned bit=0;bit<shared;++bit)result|=((value>>bit)&1u)<<(bit*2u+axis);
+  return result|((value>>shared)<<(shared*2u));
+}
+struct SwizzleUnitsJob {
+  const uint8_t* linear=nullptr;
+  uint8_t* out=nullptr;
+  const uint32_t* xOffsets=nullptr;
+  uint32_t width=0;
+  size_t unitBytes=0;
+  unsigned shared=0;
+};
+bool swizzle_units_range(void* opaque,size_t begin,size_t end,uint32_t) noexcept {
+  auto& job=*static_cast<SwizzleUnitsJob*>(opaque);
+  for(size_t y=begin;y<end;++y) {
+    const uint32_t yOffset=spread_swizzle(static_cast<uint32_t>(y),0,job.shared);
+    for(uint32_t x=0;x<job.width;++x)
+      std::memcpy(job.out+size_t(job.xOffsets[x]|yOffset)*job.unitBytes,
+                  job.linear+(y*job.width+x)*job.unitBytes,job.unitBytes);
+  }
+  return true;
+}
 void swizzle_units(const uint8_t* linear,uint32_t width,uint32_t height,size_t unitBytes,
                    std::vector<uint8_t>& out) {
   out.resize(size_t(width)*height*unitBytes);
   unsigned shared=0;
   while((1u<<shared)<std::min(width,height))++shared;
-  const auto spread=[shared](uint32_t value,unsigned axis) {
-    uint32_t result=0;
-    for(unsigned bit=0;bit<shared;++bit)result|=((value>>bit)&1u)<<(bit*2u+axis);
-    return result|((value>>shared)<<(shared*2u));
-  };
   std::vector<uint32_t> xOffsets(width);
-  for(uint32_t x=0;x<width;++x)xOffsets[x]=spread(x,1);
-  for(uint32_t y=0;y<height;++y) {
-    const uint32_t yOffset=spread(y,0);
-    for(uint32_t x=0;x<width;++x)
-      std::memcpy(out.data()+size_t(xOffsets[x]|yOffset)*unitBytes,
-                  linear+(size_t(y)*width+x)*unitBytes,unitBytes);
-  }
+  for(uint32_t x=0;x<width;++x)xOffsets[x]=spread_swizzle(x,1,shared);
+  SwizzleUnitsJob job{linear,out.data(),xOffsets.data(),width,unitBytes,shared};
+  (void)cpu_parallel_for(height,swizzle_units_range,&job);
 }
 struct NativeTextureUpload {
   std::vector<uint8_t> pixels;

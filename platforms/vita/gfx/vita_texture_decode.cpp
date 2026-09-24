@@ -3,6 +3,7 @@
 #include "vita_cpu_workers.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 
 namespace aurora::vita::gfx {
@@ -43,10 +44,13 @@ RGBA palette_color(const TextureDesc& d, uint32_t idx) {
 #if defined(__vita__)
     // Report malformed palette metadata once per sampled source, not once per
     // texel. Preserve the diagnostic color rather than hide missing GX data.
-    static unsigned reported=0;
-    static uint64_t lastSource=~uint64_t{0};
-    if(reported<8&&lastSource!=d.sourceId){
-      lastSource=d.sourceId;++reported;
+    static std::atomic<unsigned> reported{0};
+    static std::atomic<uint64_t> lastSource{~uint64_t{0}};
+    uint64_t seen=lastSource.load(std::memory_order_relaxed);
+    const auto count=reported.load(std::memory_order_relaxed);
+    if(count<8&&seen!=d.sourceId&&lastSource.compare_exchange_strong(
+          seen,d.sourceId,std::memory_order_relaxed)){
+      reported.fetch_add(1,std::memory_order_relaxed);
       AURORA_VITA_LOG_ERROR(
           "[aurora-vita] palette_oob source=%llx palette=%llx fmt=%u size=%ux%u entries=%u index=%u palette_format=%u\n",
           static_cast<unsigned long long>(d.sourceId),static_cast<unsigned long long>(d.paletteSourceId),
@@ -172,6 +176,97 @@ void cmpr_block(const uint8_t* src, std::vector<uint8_t>& out, uint32_t w, uint3
     for (uint32_t x=0;x<4;x++) put(out,w,h,ox+x,oy+y,c[(bits>>(6-2*x))&3]);
   }
 }
+
+struct RgbaDecodeJob {
+  const TextureDesc* desc=nullptr;
+  const uint8_t* src=nullptr;
+  std::vector<uint8_t>* out=nullptr;
+  uint32_t tilesX=0;
+  uint32_t tileWidth=0;
+  uint32_t tileHeight=0;
+  uint32_t tileBytes=0;
+};
+
+bool decode_rgba_tiles_range(void* opaque,size_t begin,size_t end,uint32_t) noexcept {
+  auto& job=*static_cast<RgbaDecodeJob*>(opaque);
+  const auto& d=*job.desc;
+  auto& out=*job.out;
+  for(size_t tileIndex=begin;tileIndex<end;++tileIndex){
+    const uint32_t tileX=static_cast<uint32_t>(tileIndex%job.tilesX);
+    const uint32_t tileY=static_cast<uint32_t>(tileIndex/job.tilesX);
+    const uint32_t bx=tileX*job.tileWidth,by=tileY*job.tileHeight;
+    const auto* tile=job.src+tileIndex*job.tileBytes;
+    size_t p=0;
+    switch(d.format){
+    case TextureFormat::I4:
+      for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){
+        const uint8_t v=tile[p++],a=expand4(v>>4),b=expand4(v&15);
+        put(out,d.width,d.height,bx+x,by+y,{a,a,a,a});
+        put(out,d.width,d.height,bx+x+1,by+y,{b,b,b,b});
+      }
+      break;
+    case TextureFormat::I8:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){
+        const uint8_t v=tile[p++];put(out,d.width,d.height,bx+x,by+y,{v,v,v,v});
+      }
+      break;
+    case TextureFormat::IA4:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){
+        const uint8_t v=tile[p++],a=expand4(v>>4),i=expand4(v&15);
+        put(out,d.width,d.height,bx+x,by+y,{i,i,i,a});
+      }
+      break;
+    case TextureFormat::IA8:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){
+        const uint8_t a=tile[p++],i=tile[p++];put(out,d.width,d.height,bx+x,by+y,{i,i,i,a});
+      }
+      break;
+    case TextureFormat::RGB565:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){
+        put(out,d.width,d.height,bx+x,by+y,decode_rgb565(be16(tile+p)));p+=2;
+      }
+      break;
+    case TextureFormat::RGB5A3:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){
+        put(out,d.width,d.height,bx+x,by+y,decode_rgb5a3(be16(tile+p)));p+=2;
+      }
+      break;
+    case TextureFormat::RGBA8:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){
+        const size_t i=y*4+x;
+        put(out,d.width,d.height,bx+x,by+y,
+            {tile[i*2+1],tile[32+i*2],tile[32+i*2+1],tile[i*2]});
+      }
+      break;
+    case TextureFormat::C4:
+      for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){
+        const uint8_t v=tile[p++];
+        put(out,d.width,d.height,bx+x,by+y,palette_color(d,v>>4));
+        put(out,d.width,d.height,bx+x+1,by+y,palette_color(d,v&15));
+      }
+      break;
+    case TextureFormat::C8:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++)
+        put(out,d.width,d.height,bx+x,by+y,palette_color(d,tile[p++]));
+      break;
+    case TextureFormat::C14X2:
+      for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){
+        const uint16_t v=be16(tile+p)&0x3fff;p+=2;
+        put(out,d.width,d.height,bx+x,by+y,palette_color(d,v));
+      }
+      break;
+    case TextureFormat::CMPR:
+      cmpr_block(tile,out,d.width,d.height,bx,by);
+      cmpr_block(tile+8,out,d.width,d.height,bx+4,by);
+      cmpr_block(tile+16,out,d.width,d.height,bx,by+4);
+      cmpr_block(tile+24,out,d.width,d.height,bx+4,by+4);
+      break;
+    case TextureFormat::RGBA8888:
+      return false;
+    }
+  }
+  return true;
+}
 }
 
 void set_texture_decode_diagnostics(bool enabled) noexcept {textureDiagnostics=enabled;textureReports=0;}
@@ -268,25 +363,23 @@ bool decode_texture_rgba8(const TextureDesc& d,std::vector<uint8_t>& out) noexce
   const size_t need=encoded_texture_size(d.width,d.height,d.format);
   if(d.dataSize && d.dataSize<need) return false;
   out.assign(static_cast<size_t>(d.width)*d.height*4,0);
-  const auto* s=static_cast<const uint8_t*>(d.data); size_t off=0;
+  const auto* s=static_cast<const uint8_t*>(d.data);
   if(d.format==TextureFormat::RGBA8888){ std::copy_n(s,need,out.data()); report_texture_colors(d,out); return true; }
-  auto tile=[&](uint32_t bw,uint32_t bh,auto fn){
-    for(uint32_t by=0;by<d.height;by+=bh) for(uint32_t bx=0;bx<d.width;bx+=bw) fn(bx,by);
-  };
+  uint32_t tileWidth=0,tileHeight=0,tileBytes=0;
   switch(d.format){
-  case TextureFormat::I4: tile(8,8,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){uint8_t v=s[off++];uint8_t a=expand4(v>>4),b=expand4(v&15);put(out,d.width,d.height,bx+x,by+y,{a,a,a,a});put(out,d.width,d.height,bx+x+1,by+y,{b,b,b,b});}});break;
-  case TextureFormat::I8: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){uint8_t v=s[off++];put(out,d.width,d.height,bx+x,by+y,{v,v,v,v});}});break;
-  case TextureFormat::IA4: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++){uint8_t v=s[off++],a=expand4(v>>4),i=expand4(v&15);put(out,d.width,d.height,bx+x,by+y,{i,i,i,a});}});break;
-  case TextureFormat::IA8: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){uint8_t a=s[off++],i=s[off++];put(out,d.width,d.height,bx+x,by+y,{i,i,i,a});}});break;
-  case TextureFormat::RGB565: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){put(out,d.width,d.height,bx+x,by+y,decode_rgb565(be16(s+off)));off+=2;}});break;
-  case TextureFormat::RGB5A3: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){put(out,d.width,d.height,bx+x,by+y,decode_rgb5a3(be16(s+off)));off+=2;}});break;
-  case TextureFormat::RGBA8: tile(4,4,[&](uint32_t bx,uint32_t by){size_t base=off; for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){size_t i=y*4+x; RGBA c{s[base+i*2+1],s[base+32+i*2],s[base+32+i*2+1],s[base+i*2]};put(out,d.width,d.height,bx+x,by+y,c);}off+=64;});break;
-  case TextureFormat::C4: tile(8,8,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<8;y++)for(uint32_t x=0;x<8;x+=2){uint8_t v=s[off++];put(out,d.width,d.height,bx+x,by+y,palette_color(d,v>>4));put(out,d.width,d.height,bx+x+1,by+y,palette_color(d,v&15));}});break;
-  case TextureFormat::C8: tile(8,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<8;x++)put(out,d.width,d.height,bx+x,by+y,palette_color(d,s[off++]));});break;
-  case TextureFormat::C14X2: tile(4,4,[&](uint32_t bx,uint32_t by){for(uint32_t y=0;y<4;y++)for(uint32_t x=0;x<4;x++){uint16_t v=be16(s+off)&0x3fff;off+=2;put(out,d.width,d.height,bx+x,by+y,palette_color(d,v));}});break;
-  case TextureFormat::CMPR: tile(8,8,[&](uint32_t bx,uint32_t by){cmpr_block(s+off,out,d.width,d.height,bx,by);cmpr_block(s+off+8,out,d.width,d.height,bx+4,by);cmpr_block(s+off+16,out,d.width,d.height,bx,by+4);cmpr_block(s+off+24,out,d.width,d.height,bx+4,by+4);off+=32;});break;
-  case TextureFormat::RGBA8888: break;
+  case TextureFormat::I4:case TextureFormat::C4:tileWidth=8;tileHeight=8;tileBytes=32;break;
+  case TextureFormat::I8:case TextureFormat::IA4:case TextureFormat::C8:tileWidth=8;tileHeight=4;tileBytes=32;break;
+  case TextureFormat::IA8:case TextureFormat::RGB565:case TextureFormat::RGB5A3:case TextureFormat::C14X2:
+    tileWidth=4;tileHeight=4;tileBytes=32;break;
+  case TextureFormat::RGBA8:tileWidth=4;tileHeight=4;tileBytes=64;break;
+  case TextureFormat::CMPR:tileWidth=8;tileHeight=8;tileBytes=32;break;
+  case TextureFormat::RGBA8888:break;
   }
+  if(!tileWidth||!tileHeight||!tileBytes)return false;
+  const uint32_t tilesX=static_cast<uint32_t>(blocks(d.width,tileWidth));
+  const uint32_t tilesY=static_cast<uint32_t>(blocks(d.height,tileHeight));
+  RgbaDecodeJob job{&d,s,&out,tilesX,tileWidth,tileHeight,tileBytes};
+  if(!cpu_parallel_for(static_cast<size_t>(tilesX)*tilesY,decode_rgba_tiles_range,&job))return false;
   report_texture_colors(d,out);
   return true;
 }
