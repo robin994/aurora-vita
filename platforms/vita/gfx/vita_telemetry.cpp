@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <algorithm>
 #include "vita_telemetry.hpp"
 #include <chrono>
 #include <sstream>
@@ -156,6 +158,29 @@ FifoProfile fifo_profile_take() noexcept {
   auto& profile = fifo_profile_accumulator();
   const FifoProfile out = profile;
   profile = FifoProfile{};
+  return out;
+}
+
+namespace {
+constexpr unsigned InvalidationSlots=64;
+unsigned g_invalidationLine[InvalidationSlots]{};
+uint32_t g_invalidationCount[InvalidationSlots]{};
+}
+void note_pipeline_invalidation(unsigned line) noexcept {
+  for(unsigned i=0;i<InvalidationSlots;++i){
+    if(g_invalidationLine[i]==line){++g_invalidationCount[i];return;}
+    if(g_invalidationLine[i]==0){g_invalidationLine[i]=line;g_invalidationCount[i]=1;return;}
+  }
+}
+std::string take_pipeline_invalidation_report() {
+  unsigned order[InvalidationSlots];unsigned n=0;
+  for(unsigned i=0;i<InvalidationSlots&&g_invalidationLine[i];++i)order[n++]=i;
+  std::sort(order,order+n,[](unsigned a,unsigned b){return g_invalidationCount[a]>g_invalidationCount[b];});
+  std::string out;char buf[32];
+  for(unsigned k=0;k<n&&k<12;++k){
+    std::snprintf(buf,sizeof(buf)," %u:%u",g_invalidationLine[order[k]],g_invalidationCount[order[k]]);out+=buf;
+  }
+  for(unsigned i=0;i<InvalidationSlots;++i){g_invalidationLine[i]=0;g_invalidationCount[i]=0;}
   return out;
 }
 

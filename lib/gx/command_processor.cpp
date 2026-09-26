@@ -278,10 +278,16 @@ static inline f32 read_f32(const u8* ptr, bool bigEndian) {
 }
 
 // Marks draw state dirty *and* invalidates the resolved-pipeline memo.
-static inline void mark_pipeline_state_dirty() noexcept {
+static inline void mark_pipeline_state_dirty_at(unsigned line) noexcept {
+#if defined(AURORA_VITA_FIFO_PROFILE)
+  if (aurora::vita::gfx::g_fifoProfileEnabled) aurora::vita::gfx::note_pipeline_invalidation(line);
+#else
+  (void)line;
+#endif
   g_gxState.stateDirty = true;
   g_gxState.pipelineStateGeneration = next_gx_state_epoch();
 }
+#define mark_pipeline_state_dirty() mark_pipeline_state_dirty_at(__LINE__)
 
 // Indexed-array bindings change for almost every mesh. On Vita they only
 // affect the vertex decode layout; elsewhere they stay part of the pipeline.

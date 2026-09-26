@@ -90,6 +90,7 @@ void ensure_parent_dir(const char*) noexcept {}
 #endif
 
 gfx::FifoProfile g_lastFifoProfile{};
+std::string g_lastInvalidations;
 
 // With the asynchronous GX worker the renderer, DrawSink and their frame state
 // are owned by the worker thread. Game-thread entry points queue their work
@@ -169,15 +170,17 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(g_lastFifoProfile.us[5]),g_lastFifoProfile.count[5],
       static_cast<unsigned long long>(g_lastFifoProfile.us[6]),g_lastFifoProfile.count[6],
       static_cast<unsigned long long>(g_lastFifoProfile.us[7]),g_lastFifoProfile.count[7]);
+  const std::string invalidationLine="[AURORA-VITA][INVALIDATE] frame="+std::to_string(g_telemetry.frame().frame)+g_lastInvalidations;
   if(writeConsole)
-    AURORA_VITA_LOG_INFO("%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str());
+    AURORA_VITA_LOG_INFO("%s\n%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str(),invalidationLine.c_str());
   if (writeFile) {
     ensure_parent_dir(g_config.telemetry_log_path);
     g_telemetry.append_frame_log(g_config.telemetry_log_path);
     FILE* fp = std::fopen(g_config.telemetry_log_path, "ab");
     if (fp) {
       std::fwrite(rendererLine,1,std::strlen(rendererLine),fp);std::fwrite("\n",1,1,fp);
-      std::fwrite(memLine.data(),1,memLine.size(),fp); std::fwrite("\n",1,1,fp); std::fclose(fp);
+      std::fwrite(memLine.data(),1,memLine.size(),fp); std::fwrite("\n",1,1,fp);
+      std::fwrite(invalidationLine.data(),1,invalidationLine.size(),fp); std::fwrite("\n",1,1,fp); std::fclose(fp);
     }
   }
   if(g_coverageEnabled && g_config.coverage_log_path && *g_config.coverage_log_path) {
@@ -516,6 +519,7 @@ void end_frame_now() noexcept {
   }
   ++g_frame;
   g_lastFifoProfile=gfx::fifo_profile_take();
+  g_lastInvalidations=gfx::take_pipeline_invalidation_report();
   emit_periodic_diagnostics();
 }
 void end_frame_task(void*) {
