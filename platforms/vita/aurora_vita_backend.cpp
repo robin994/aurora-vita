@@ -139,6 +139,40 @@ extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes
   aurora::vita::gfx::note_memory_write(address,bytes);
 }
 
+extern "C" uint32_t aurora_vita_debug_runtime_flags(void) noexcept {
+  return g_drawSink?g_drawSink->runtime_feature_flags():0;
+}
+
+extern "C" uint32_t aurora_vita_debug_runtime_capabilities(void) noexcept {
+  return g_drawSink?g_drawSink->runtime_feature_capabilities():0;
+}
+
+extern "C" void aurora_vita_debug_set_runtime_flags(uint32_t flags) noexcept {
+  if(g_drawSink)g_drawSink->set_runtime_feature_flags(flags);
+}
+
+extern "C" int aurora_vita_debug_shader_runtime_compile(void) noexcept {
+  return runtime_shader_compilation_enabled()?1:0;
+}
+
+extern "C" void aurora_vita_debug_set_shader_runtime_compile(int enabled) noexcept {
+  set_runtime_shader_compilation_enabled(enabled!=0);
+}
+
+extern "C" uint32_t aurora_vita_debug_build_flags(void) noexcept {
+  uint32_t flags=0;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  flags|=1u<<0;
+#endif
+#if defined(AURORA_VITA_GXM_DIRECT_STREAM_WRITE) && AURORA_VITA_GXM_DIRECT_STREAM_WRITE
+  flags|=1u<<1;
+#endif
+#if defined(AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT) && AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT
+  flags|=1u<<2;
+#endif
+  return flags;
+}
+
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
@@ -259,6 +293,7 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
   rc.nativeScenesPerFrame=std::max(c.gxm_scenes_per_frame,1u);
+  rc.nativeParameterBufferBytes=c.gxm_parameter_buffer_bytes;
   // The native budget covers persistent streaming buffers as well as textures.
   rc.nativeResourceBudget=c.texture_cache_budget+c.static_geometry_budget+
       (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
@@ -311,7 +346,9 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.strictUnsupported=c.strict_unsupported;
   dc.staticGeometryBudget=c.static_geometry_budget;
   dc.staticGeometryMinVertices=c.static_geometry_min_vertices;
+  dc.staticGeometryStableOnly=c.static_geometry_stable_only;
   dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
+  dc.allowStreamedFixedVertexGpu=c.gxm_streamed_fixed_vertex_gpu;
   dc.allowDynamicTexMatrixGpu=c.gxm_dynamic_tex_matrix_gpu;
   dc.allowBumpFixedVertexGpu=c.gxm_bump_fixed_vertex_gpu;
   dc.allowPrimitiveExpansionGpu=c.gxm_primitive_expand_gpu;

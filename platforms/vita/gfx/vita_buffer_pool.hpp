@@ -12,6 +12,9 @@ public:
   Handle create_vertex(const void* data,size_t bytes,bool dynamic=false) noexcept;
   Handle create_index(const void* data,size_t bytes,bool dynamic=false) noexcept;
   bool update(Handle h,const void* data,size_t bytes,size_t offset=0) noexcept;
+  // Native GXM streaming pages are CpuGpu-visible. This exposes their backing
+  // storage only for buffers created as dynamic; other backends return null.
+  void* writable(Handle h,size_t bytes,size_t offset=0) noexcept;
   void destroy(Handle h) noexcept;void clear() noexcept;
   // Complete submitted reads before the streaming allocator reuses storage.
   void wait_idle() noexcept;

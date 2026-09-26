@@ -103,15 +103,20 @@ struct BackendConfig {
   // Native GXM render-target scene budget. Gameplay telemetry should stay below
   // this in steady state; Strikers currently averages ~2.4 and peaks at 3.
   uint32_t gxm_scenes_per_frame=5;
+  size_t gxm_parameter_buffer_bytes=4*1024*1024;
   // Experimental native-GXM A/B profile: cache immutable geometry and keep
   // eligible lit GX vertex work on the GPU. VitaGL/host keep the conservative
   // CPU defaults. Ports can still force the GXM control path with false/0.
 #if defined(AURORA_VITA_RENDERER_GXM)
   bool gxm_lit_fixed_vertex_gpu=true;
+  bool gxm_streamed_fixed_vertex_gpu=false;
   size_t static_geometry_budget=8*1024*1024;
+  bool static_geometry_stable_only=false;
 #else
   bool gxm_lit_fixed_vertex_gpu=false;
+  bool gxm_streamed_fixed_vertex_gpu=false;
   size_t static_geometry_budget=0;
+  bool static_geometry_stable_only=false;
 #endif
   // Extended native-GXM fixed-vertex features. These stay opt-in at the engine
   // level so ports can hardware-A/B them independently while retaining the

@@ -55,7 +55,7 @@ if (VITA OR CMAKE_SYSTEM_NAME STREQUAL "Vita" OR CMAKE_CXX_COMPILER MATCHES "arm
         -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard -fsigned-char
         -fno-math-errno -funsafe-math-optimizations -fno-signed-zeros -ffp-contract=fast)
     if (AURORA_VITA_LTO)
-        target_compile_options(aurora_vita_common PRIVATE -flto=auto -ffat-lto-objects)
+        target_compile_options(aurora_vita_common PRIVATE -flto=${AURORA_VITA_LTO_JOBS} -ffat-lto-objects)
     endif ()
     target_link_libraries(aurora_vita_common PUBLIC SceLibKernel_stub pthread m)
 endif ()

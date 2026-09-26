@@ -15,6 +15,10 @@
 #endif
 #endif
 
+#ifndef AURORA_VITA_GXM_DIRECT_STREAM_WRITE
+#define AURORA_VITA_GXM_DIRECT_STREAM_WRITE 0
+#endif
+
 namespace aurora::vita::gfx {
 
 StreamingArena::StreamingArena(BufferPool& pool, StreamingArenaConfig cfg) noexcept : pool_(pool), cfg_(cfg) {}
@@ -42,8 +46,19 @@ bool StreamingArena::initialize() noexcept {
       shutdown();
       return false;
     }
+#if AURORA_VITA_GXM_DIRECT_STREAM_WRITE
+    // Native GXM streaming buffers are persistent CpuGpu allocations. Resolve
+    // their writable base once per ring slot instead of repeating two layers
+    // of handle lookup for every vertex/index reservation in the frame.
+    slot.vdirect = pool_.writable(slot.vertex, cfg_.vertexBytes, 0);
+    slot.idirect = pool_.writable(slot.index, cfg_.indexBytes, 0);
+    if (!slot.vdirect || !slot.idirect) {
+      shutdown();
+      return false;
+    }
+#endif
   }
-#if !AURORA_VITA_DIRECT_STREAM_WRITE
+#if !AURORA_VITA_DIRECT_STREAM_WRITE && !AURORA_VITA_GXM_DIRECT_STREAM_WRITE
   vertexStage_.resize(cfg_.vertexBytes);
   indexStage_.resize(cfg_.indexBytes);
 #else
@@ -155,7 +170,15 @@ BufferSlice StreamingArena::reserve(bool vertex, size_t bytes, size_t alignment,
   }
 
   const Handle handle = vertex ? slot.vertex : slot.index;
-#if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
+#if AURORA_VITA_GXM_DIRECT_STREAM_WRITE
+  // Native GXM buffers live in uncached CpuGpu memory. StreamingArena already
+  // owns retirement of these ring pages, so write the final packed data
+  // directly into GPU-visible storage and remove both the staging/update copy
+  // and the per-reservation buffer-handle lookup.
+  void* base = vertex ? slot.vdirect : slot.idirect;
+  if(!base)return {};
+  *writable = static_cast<uint8_t*>(base) + aligned;
+#elif defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
   void*& mapped = vertex ? slot.vmapped : slot.imapped;
   if (!mapped) {
     const GLenum target = vertex ? GL_ARRAY_BUFFER : GL_ELEMENT_ARRAY_BUFFER;
@@ -216,7 +239,13 @@ BufferSlice StreamingArena::upload_rebased_indices(const uint16_t* data, size_t 
 bool StreamingArena::flush() noexcept {
   if (!initialized_ || slots_.empty()) return false;
   auto& slot = slots_[current_];
-#if defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
+#if AURORA_VITA_GXM_DIRECT_STREAM_WRITE
+  // Direct writes are already visible to GXM; the command stream still owns
+  // draw ordering and page lifetime, but there is no upload phase anymore.
+  slot.vflushed=slot.voff;
+  slot.iflushed=slot.ioff;
+  return true;
+#elif defined(__vita__) && AURORA_VITA_DIRECT_STREAM_WRITE
   bool ok = true;
   if (slot.vmapped) {
     glBindBuffer(GL_ARRAY_BUFFER, pool_.gl_id(slot.vertex));

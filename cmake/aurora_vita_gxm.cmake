@@ -9,6 +9,10 @@ if (AURORA_VITA_BUILD_SDL3_PROBE)
 endif ()
 option(AURORA_VITA_NATIVE_CMPR "Experimental GXM CMPR/BC1 uploads; requires hardware image comparison" OFF)
 option(AURORA_VITA_NATIVE_GX_TEXTURES "Experimental GXM I/I+A/RGB565 uploads; requires hardware image comparison" OFF)
+option(AURORA_VITA_GXM_DIRECT_STREAM_WRITE
+    "Write streamed vertices/indices directly into CpuGpu GXM ring pages" OFF)
+option(AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT
+    "Submit streamed GXM draws directly instead of routing through CommandStream" OFF)
 add_library(aurora_vita_gxm_backend STATIC
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_memory.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_program_cache.cpp
@@ -23,14 +27,16 @@ target_compile_definitions(aurora_vita_gxm_backend PUBLIC AURORA_VITA_RENDERER_G
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE AURORA_VITA_DIRECT_STREAM_WRITE=0)
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE
     AURORA_VITA_NATIVE_CMPR=$<BOOL:${AURORA_VITA_NATIVE_CMPR}>
-    AURORA_VITA_NATIVE_GX_TEXTURES=$<BOOL:${AURORA_VITA_NATIVE_GX_TEXTURES}>)
+    AURORA_VITA_NATIVE_GX_TEXTURES=$<BOOL:${AURORA_VITA_NATIVE_GX_TEXTURES}>
+    AURORA_VITA_GXM_DIRECT_STREAM_WRITE=$<BOOL:${AURORA_VITA_GXM_DIRECT_STREAM_WRITE}>
+    AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT=$<BOOL:${AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT}>)
 target_compile_options(aurora_vita_gxm_backend PRIVATE
     -O3 -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
     -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard -fsigned-char
     -fno-math-errno -funsafe-math-optimizations -fno-signed-zeros -ffp-contract=fast)
 if (AURORA_VITA_LTO)
-    target_compile_options(aurora_vita_gxm_backend PRIVATE -flto=auto -ffat-lto-objects)
-    target_link_options(aurora_vita_gxm_backend INTERFACE -flto=auto)
+    target_compile_options(aurora_vita_gxm_backend PRIVATE -flto=${AURORA_VITA_LTO_JOBS} -ffat-lto-objects)
+    target_link_options(aurora_vita_gxm_backend INTERFACE -flto=${AURORA_VITA_LTO_JOBS})
 endif ()
 target_link_libraries(aurora_vita_gxm_backend PUBLIC aurora::vita_common
     vitashark SceShaccCgExt SceShaccCg_stub taihen_stub

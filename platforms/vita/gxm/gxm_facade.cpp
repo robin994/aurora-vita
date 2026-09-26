@@ -40,6 +40,11 @@ bool BufferPool::update(Handle h,const void* data,size_t bytes,size_t offset) no
   const auto it=map_.find(h);
   return native_ && it!=map_.end() && native_->update_buffer(h,data,bytes,offset,it->second.dynamic);
 }
+void* BufferPool::writable(Handle h,size_t bytes,size_t offset) noexcept {
+  const auto it=map_.find(h);
+  if(!native_ || it==map_.end() || !it->second.dynamic)return nullptr;
+  return native_->writable_buffer(h,bytes,offset);
+}
 void BufferPool::wait_idle() noexcept { if(native_) native_->finish(); }
 void BufferPool::destroy(Handle h) noexcept {
   if(map_.erase(h) && native_) native_->destroy_buffer(h);
@@ -386,6 +391,7 @@ bool Renderer::initialize() noexcept {
   if(initialized_)return true;
   gxm::Config c{};c.width=cfg_.width;c.height=cfg_.height;c.displayBuffers=cfg_.displayBuffers;
   c.scenesPerFrame=std::max(cfg_.nativeScenesPerFrame,1u);
+  c.parameterBufferBytes=cfg_.nativeParameterBufferBytes;
   c.waitVblank=cfg_.waitVblank;c.resourceBudgetBytes=cfg_.nativeResourceBudget;
   c.cdramPoolBytes=cfg_.nativeCdramPoolBytes;
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;

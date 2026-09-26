@@ -2,9 +2,18 @@
 
 #include "../internal.hpp"
 
+#include <array>
 #include <cstring>
 
 namespace aurora::gx::fifo {
+
+struct StableSourceSpan {
+  uint32_t offset = 0;
+  uint32_t bytes = 0;
+  const uint8_t* source = nullptr;
+};
+
+constexpr uint32_t StableSourceSpanCapacity = 32;
 
 namespace detail {
 extern uint8_t* sBufferData;
@@ -14,12 +23,12 @@ extern bool sInDisplayList;
 extern uint8_t* sDlBuffer;
 extern uint32_t sDlSize;
 extern uint32_t sDlWritePos;
-extern uint32_t sStableSourceOffset;
-extern uint32_t sStableSourceBytes;
-extern const uint8_t* sStableSource;
+extern std::array<StableSourceSpan, StableSourceSpanCapacity> sStableSourceSpans;
+extern uint32_t sStableSourceSpanCount;
 } // namespace detail
 
 void init();
+void drain();
 
 #if defined(MKW_TARGET_VITA) || defined(TARGET_VITA)
 using VitaWorkerTask = void (*)(void*);
@@ -59,15 +68,10 @@ inline void write_data(const void* data, const uint32_t length) {
 }
 
 // Append one permanent display-list span while remembering its original guest
-// address. The command processor can then propagate a stable geometry identity
-// even though the bytes themselves are copied into the fast FIFO buffer.
-inline void write_stable_data(const void* data,const uint32_t length) {
-  if(detail::sInDisplayList) { write_data(data,length); return; }
-  detail::sStableSourceOffset=detail::sBufferSize;
-  detail::sStableSourceBytes=length;
-  detail::sStableSource=static_cast<const uint8_t*>(data);
-  write_data(data,length);
-}
+// address. Multiple lists can share one FIFO batch; the command processor uses
+// the recorded spans to recover the stable source for each draw.
+void write_stable_data(const void* data, uint32_t length);
+void write_stable_data_from(const void* bytes, const void* stableSource, uint32_t length);
 
 inline void write_u8(const uint8_t val) {
   if (!detail::sInDisplayList)
@@ -108,9 +112,6 @@ inline void write_f32(const float val) {
 void begin_display_list(uint8_t* buf, uint32_t size);
 uint32_t end_display_list();
 bool in_display_list();
-
-// Drain the internal FIFO buffer through the command processor
-void drain();
 
 // Internal buffer inspection
 const uint8_t* get_buffer_data();

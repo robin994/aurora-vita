@@ -821,6 +821,18 @@ Handle Renderer::create_buffer(const void* data, size_t bytes) {
   return handle;
 }
 
+void* Renderer::writable_buffer(Handle handle,size_t bytes,size_t offset) {
+  auto& d=*impl_;
+  auto it=d.buffers.find(handle);
+  if(it==d.buffers.end() || offset>it->second.bytes || bytes>it->second.bytes-offset)
+    return nullptr;
+  // The streaming allocator is monotonic within a page. An in-flight draw may
+  // still consume an earlier range after an EFB ordering flush, but the range
+  // returned here has never been submitted. Do not clear the buffer-level
+  // inFlight flag: destruction/reuse must still synchronize old ranges.
+  return static_cast<uint8_t*>(it->second.memory.data())+offset;
+}
+
 Handle Renderer::create_texture(const TextureDesc& desc) {
   auto& d = *impl_;
   if (!d.initialized || !desc.data || !desc.width || desc.width > 4096 || !desc.height || desc.height > 4096 || !d.nextHandle) {

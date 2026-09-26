@@ -11,6 +11,8 @@ struct Config {
   uint32_t height = 544;
   uint32_t displayBuffers = 3;
   uint32_t scenesPerFrame = 8;
+  // Keep Strikers' hardware-proven baseline. Larger values are useful for
+  // experiments but consume scarce main memory and are selectable by config.
   size_t parameterBufferBytes = 4 * 1024 * 1024;
   size_t resourceBudgetBytes = 24 * 1024 * 1024;
   size_t cdramPoolBytes = 64 * 1024 * 1024;
@@ -46,6 +48,10 @@ public:
   uint64_t create_pipeline(const gfx::PipelineDesc& desc);
   void destroy_pipeline(uint64_t key);
   gfx::Handle create_buffer(const void* data, size_t bytes);
+  // Return CPU-visible storage for a dynamic streaming buffer. CpuGpu blocks
+  // are deliberately uncached on Vita, so callers can write packed vertices
+  // and indices in place without a staging memcpy or cache maintenance.
+  void* writable_buffer(gfx::Handle handle, size_t bytes, size_t offset=0);
   // `storageRetired` is only for common streaming pages whose owner has already
   // observed the configured frames-in-flight retirement interval.
   bool update_buffer(gfx::Handle handle, const void* data, size_t bytes, size_t offset=0,

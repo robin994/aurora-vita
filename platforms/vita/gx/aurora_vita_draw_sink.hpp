@@ -52,11 +52,26 @@ struct DrawSinkConfig {
   bool strictUnsupported = false;
   size_t staticGeometryBudget = 0; // Zero keeps the established CPU vertex path.
   uint32_t staticGeometryMinVertices = 48;
+  // Restrict the persistent fixed-vertex cache to sources whose lifetime is
+  // explicitly tracked by the GX display-list path. Dynamic GXBegin/GXEnd
+  // streams otherwise pay a full content hash before falling back to CPU work.
+  bool staticGeometryStableOnly = false;
   bool allowLitFixedVertexGpu = false;
+  bool allowStreamedFixedVertexGpu = false;
   bool allowDynamicTexMatrixGpu = false;
   bool allowBumpFixedVertexGpu = false;
   bool allowPrimitiveExpansionGpu = false;
   uint32_t diagnosticDrawLimit = 0;
+};
+
+enum DrawSinkRuntimeFeature : uint32_t {
+  RuntimeStaticGeometry      = 1u << 0,
+  RuntimeStreamedFixedVertex = 1u << 1,
+  RuntimeLitFixedVertex      = 1u << 2,
+  RuntimeDynamicTexMatrix    = 1u << 3,
+  RuntimeBumpFixedVertex     = 1u << 4,
+  RuntimePrimitiveExpansion  = 1u << 5,
+  RuntimeStaticStableOnly    = 1u << 6,
 };
 
 class DrawSink {
@@ -95,6 +110,9 @@ public:
   uint64_t submitted_draws() const noexcept { return submittedDraws_; }
   bool strict_failed() const noexcept { return strictFailed_; }
   gfx::MemoryBudgetSnapshot memory_budget() const noexcept;
+  uint32_t runtime_feature_flags() const noexcept;
+  uint32_t runtime_feature_capabilities() const noexcept;
+  void set_runtime_feature_flags(uint32_t flags) noexcept;
 
 private:
   gfx::Handle white_texture() noexcept;
@@ -148,9 +166,12 @@ private:
   bool strictUnsupported_ = false;
   bool strictFailed_ = false;
   bool allowLitFixedVertexGpu_ = false;
+  bool allowStreamedFixedVertexGpu_ = false;
   bool allowDynamicTexMatrixGpu_ = false;
   bool allowBumpFixedVertexGpu_ = false;
   bool allowPrimitiveExpansionGpu_ = false;
+  bool staticGeometryRuntimeEnabled_ = false;
+  bool staticGeometryStableOnly_ = false;
   uint32_t staticGeometryMinVertices_ = 48;
   uint32_t diagnosticDrawLimit_ = 0;
   uint32_t frameDrawIndex_ = 0;

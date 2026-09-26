@@ -66,10 +66,12 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
 
   // Keep state writes and the display-list draw in one FIFO stream. On Vita the
   // game's permanent display lists live in CDRAM, which is a poor CPU decode
-  // source; copying them into the normal FIFO buffer also mirrors the ordering
-  // used by Aurora's producer path before the Vita backend was split out.
+  // source. The Vita FIFO batches several stable spans per consumer job instead
+  // of forcing one semaphore round-trip for every display list.
   aurora::gx::fifo::write_stable_data(data, nbytes);
+#if !defined(MKW_TARGET_VITA)
   aurora::gx::fifo::drain();
+#endif
 }
 
 void GXCallDisplayListLE(const void* data, u32 nbytes) {

@@ -2108,6 +2108,22 @@ TEST_F(GXFifoTest, DisplayListCallWhileRecordingInlinesNestedCommands) {
   EXPECT_EQ(aurora::gx::fifo::get_buffer_size(), 0u);
 }
 
+TEST_F(GXFifoTest, StableSourceMappingSurvivesMultipleDisplayListsInOneBatch) {
+  aurora::gx::fifo::clear_buffer();
+  const std::array<u8, 4> first{GX_NOP, GX_NOP, GX_NOP, GX_NOP};
+  const std::array<u8, 5> second{GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP};
+
+  aurora::gx::fifo::write_stable_data(first.data(), static_cast<u32>(first.size()));
+  aurora::gx::fifo::write_u8(GX_NOP);
+  aurora::gx::fifo::write_stable_data(second.data(), static_cast<u32>(second.size()));
+
+  const u8* batch = aurora::gx::fifo::get_buffer_data();
+  ASSERT_NE(batch, nullptr);
+  EXPECT_EQ(aurora::gx::fifo::stable_source_for(batch + 1, 2), first.data() + 1);
+  EXPECT_EQ(aurora::gx::fifo::stable_source_for(batch + first.size(), 1), nullptr);
+  EXPECT_EQ(aurora::gx::fifo::stable_source_for(batch + first.size() + 2, 3), second.data() + 1);
+}
+
 TEST_F(GXFifoTest, DirectEfbCopiesDrainQueuedCommands) {
   aurora::gx::fifo::write_u8(GX_NOP);
   ASSERT_GT(aurora::gx::fifo::get_buffer_size(), 0u);

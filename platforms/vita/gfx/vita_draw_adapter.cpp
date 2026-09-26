@@ -206,6 +206,19 @@ bool decode_transform_pack_range(void* opaque,size_t begin,size_t end,uint32_t l
   return true;
 }
 
+bool decode_pack_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
+  auto&ctx=*static_cast<StreamedVertexContext*>(opaque);
+  if(lane>=ctx.error.size()||!ctx.destination||!ctx.gpuStride)return false;
+  for(size_t i=begin;i<end;++i){
+    CanonicalVertex v{};
+    if(!decode_vertex_into(ctx.raw,ctx.rawBytes,static_cast<uint32_t>(i),*ctx.layout,v,ctx.decodeSemantics)){
+      ctx.error[lane]=1;return false;
+    }
+    pack_gpu_vertex(ctx.destination+i*ctx.gpuStride,v,ctx.gpuLayout);
+  }
+  return true;
+}
+
 VertexSemanticMask decode_semantics_for_pipeline(const PipelineDesc& pipeline,
                                                  VertexPipelineRequirements requirements) noexcept {
   VertexSemanticMask mask=vertex_semantic_bit(VertexSemantic::Position)|
@@ -338,7 +351,7 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
     out.error=PrepareDrawError::UnsupportedLineExpansion;return false;
   }
   if(!layout.streamStride||size_t(count)*layout.streamStride>bytes){out.error=PrepareDrawError::VertexDecodeFailed;return false;}
-  const VertexLayout gpuLayout=gpu_vertex_layout(pipeline_texcoord_mask(pipeline),pipeline_raster_color_mask(pipeline));
+  const VertexLayout gpuLayout=effective_gpu_vertex_layout(pipeline);
   if(gpuLayout.count<1||gpuLayout.attributes[0].stride==0){out.error=PrepareDrawError::InvalidInput;return false;}
   const size_t gpuStride=gpuLayout.attributes[0].stride;
   const auto footprint=estimate_draw_footprint(source,count,rawIndexCount,gpuStride);
@@ -359,11 +372,14 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
   out.primitive=Primitive::Triangles;
   out.positionIsClipSpace=false;
 
+  const VertexSemanticMask decodeSemantics=pipeline.fixedVertexOnGpu?
+      fixed_vertex_gpu_inputs(pipeline):decode_semantics_for_pipeline(pipeline,requirements);
   StreamedVertexContext fused{raw,bytes,&layout,&pipeline,&state,requirements,
-                              decode_semantics_for_pipeline(pipeline,requirements),gpuLayout,
+                              decodeSemantics,gpuLayout,
                               static_cast<uint8_t*>(vertexDst),gpuStride,true};
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
-    if(!cpu_parallel_for(count,decode_transform_pack_range,&fused)){
+    auto worker=pipeline.fixedVertexOnGpu?decode_pack_range:decode_transform_pack_range;
+    if(!cpu_parallel_for(count,worker,&fused)){
       bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;
       out.error=transformFailed?PrepareDrawError::VertexTransformFailed:PrepareDrawError::VertexDecodeFailed;
       return false;

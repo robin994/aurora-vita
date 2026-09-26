@@ -60,6 +60,8 @@ private:
   struct Slot {
     Handle vertex=InvalidHandle,index=InvalidHandle;
     size_t voff=0,ioff=0,vflushed=0,iflushed=0;
+    void* vdirect=nullptr;
+    void* idirect=nullptr;
     void* vmapped=nullptr;
     void* imapped=nullptr;
   };
