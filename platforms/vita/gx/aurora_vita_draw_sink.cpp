@@ -2,6 +2,7 @@
 #include "../vita_log.hpp"
 #include "../gfx/vita_renderer.hpp"
 #include "../gfx/vita_pipeline_key.hpp"
+#include "../gfx/vita_hash.hpp"
 
 #if defined(AURORA_VITA_UPSTREAM)
 #if defined(AURORA_VITA_UPSTREAM_STUB)
@@ -762,9 +763,19 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(gpuGeometry&&telemetry_)telemetry_->gpu_geometry(staticGeometry_->hits()!=before,gpuGeometry->vertexCount);
     }
     if(gpuGeometry){
+      // translatedGpuPipeline_ is translatedPipeline_ plus the fixed-vertex
+      // fields below (its layout and primitive are functions of them), so this
+      // identity is exact without re-hashing the ~2 KiB descriptor per draw.
+      // It only indexes DrawSink's own maps; the renderer still keys pipelines
+      // by pipeline_key() when one has to be created.
       uint64_t gpuPipelineDescKey=0;
       { gfx::ScopedTelemetryPhase keyPhase(telemetry_,gfx::TelemetryPhase::StateKey);
-        gpuPipelineDescKey=gfx::pipeline_key(translatedGpuPipeline_); }
+        const auto& gp=translatedGpuPipeline_;
+        const uint64_t fixedBits=uint64_t(gp.fixedVertexOnGpu)|(uint64_t(gp.fixedVertexIndexedPn)<<1)|
+            (uint64_t(gp.fixedPointSprite)<<2)|(uint64_t(gp.fixedLineSprite)<<3)|
+            (uint64_t(gp.fixedVertexTexMtxMask)<<8)|(uint64_t(gp.fixedPrimitiveTexcoordMask)<<16)|
+            (uint64_t(gp.primitive)<<24);
+        gpuPipelineDescKey=gfx::hash_combine(translatedPipelineKey_,fixedBits^0xf1c3d5e7a9b20461ull); }
       if(gpuGeometry->pipelineDescKey==gpuPipelineDescKey&&gpuGeometry->pipelineKey&&
          renderer_->pipelines().find(gpuGeometry->pipelineKey)) {
         fixedPipelineKey=gpuGeometry->pipelineKey;
