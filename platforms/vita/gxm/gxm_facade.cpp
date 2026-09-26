@@ -496,6 +496,9 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& d) noexcept {
   const auto* p=pipelines_.get_or_create(d,&stats_);if(!p)return 0;pipelines_.pin(p->key);return p->key;
 }
 Handle Renderer::create_texture(const TextureDesc& d) noexcept {return textures_.get_or_upload(d,frame_,&stats_);}
+bool Renderer::texture_supports_hardware_wrap(Handle texture,const SamplerDesc& sampler) const noexcept {
+  return native_ && native_->texture_supports_hardware_wrap(texture,sampler);
+}
 size_t Renderer::invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept {return textures_.invalidate_source_range(start,bytes);}
 Handle Renderer::create_vertex_buffer(const void* data,size_t bytes,bool dynamic) noexcept {return buffers_.create_vertex(data,bytes,dynamic);}
 Handle Renderer::create_index_buffer(const void* data,size_t bytes,bool dynamic) noexcept {return buffers_.create_index(data,bytes,dynamic);}

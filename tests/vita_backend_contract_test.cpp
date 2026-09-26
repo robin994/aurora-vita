@@ -112,6 +112,29 @@ void shader_operations() {
     REQUIRE(source.fragment.find("WPOS") == std::string::npos);
     REQUIRE(source.fragment.find("window_position.x<u_clip_rect") == std::string::npos);
     REQUIRE(source.fragment.find("discard") == std::string::npos);
+    // The discard-free variant shares the owner's vertex program.
+    auto clipped = d;
+    clipped.fragmentScissor = true;
+    REQUIRE(gxm::build_tev_cg(clipped).vertex == source.vertex);
+  }
+  {
+    auto d = basic();
+    d.fragmentScissor = false;
+    d.layout = gpu_vertex_layout(1u, 1u);
+    d.texgenCount = 1;
+    d.tev.stages[0].texture = 0;
+    d.tev.stages[0].texCoord = 0;
+    d.tev.stages[0].color.d = TevColorArg::TexColor;
+    const auto emulated = gxm::build_tev_cg(d);
+    REQUIRE(emulated.ok());
+    REQUIRE(emulated.fragment.find("tex2D(u_tex0,gx_wrap_uv(") != std::string::npos);
+    const auto emulatedKey = pipeline_key(d);
+    d.nativeTextureWrapMask = 1u;
+    REQUIRE(pipeline_key(d) != emulatedKey);
+    const auto native = gxm::build_tev_cg(d);
+    REQUIRE(native.ok());
+    REQUIRE(native.fragment.find("tex2D(u_tex0,gx_sample_uv(") != std::string::npos);
+    REQUIRE(native.fragment.find("u_tex_wrap[0]") == std::string::npos);
   }
   for (unsigned av = 0; av < 2; ++av) for (unsigned bv = 0; bv < 2; ++bv)
     for (unsigned op = 0; op < 4; ++op) {

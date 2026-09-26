@@ -48,6 +48,8 @@ public:
   uint64_t create_pipeline(const gfx::PipelineDesc& desc);
   void destroy_pipeline(uint64_t key);
   gfx::Handle create_buffer(const void* data, size_t bytes);
+  // Swizzled textures wrap/mirror in hardware; clamp works for every layout.
+  bool texture_supports_hardware_wrap(gfx::Handle texture, const gfx::SamplerDesc& sampler) const noexcept;
   // Return CPU-visible storage for a dynamic streaming buffer. CpuGpu blocks
   // are deliberately uncached on Vita, so callers can write packed vertices
   // and indices in place without a staging memcpy or cache maintenance.

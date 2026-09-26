@@ -541,6 +541,96 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
   }
 #endif
+  std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
+  const uint8_t textureMask = translatedTextureMask_;
+  const auto white = white_texture();
+  uint8_t nativeWrapMask = 0;
+  const bool reuseResolvedTextures=resolvedTextureBindingsValid_&&
+                                   !aurora::gx::g_gxState.stateDirty&&resolvedTextureMask_==textureMask&&
+                                   resolvedVolatileTextureMask_==0;
+  if(reuseResolvedTextures){
+    bindings=resolvedTextureBindings_;
+    nativeWrapMask=resolvedNativeWrapMask_;
+    result.fallbackTextureMask=resolvedFallbackTextureMask_;
+    result.warnings|=resolvedTextureWarnings_;
+    if(telemetry_)for(unsigned slot=0;slot<gfx::MaxTextures;++slot)if(textureMask&(1u<<slot))telemetry_->texture(true,false,0);
+  }else{ gfx::ScopedTelemetryPhase textureTimer(telemetry_, gfx::TelemetryPhase::TextureResolve);
+  uint8_t volatileTextureMask=0;
+  for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
+    if ((textureMask & (1u << slot)) == 0) continue;
+    const auto translated = translate_texture(slot);
+    if (coverage_ && translated.valid) {
+      const uint64_t texKey = (static_cast<uint64_t>(translated.texture.format) << 32) | translated.texture.width;
+      coverage_->observe(integration::FeatureClass::TextureFormat, texKey, "sampled GX texture format");
+    }
+    if (translated.dynamicCopy) {
+      // Match translate_texture(): the native frontend populates loadedTextures,
+      // not Dawn's resolved TextureBind table. Reading that table loses the
+      // guest destination identity and turns a valid EFB copy into white fallback.
+      const auto ptr = reinterpret_cast<uintptr_t>(aurora::gx::g_gxState.loadedTextures[slot].data);
+      const auto ci = copyTextures_.find(ptr);
+      if (ci != copyTextures_.end() && ci->second.handle) {
+        bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb,
+                                             ci->second.logicalFlipX,ci->second.logicalFlipY,ci->second.forceOpaque,
+                                             ci->second.sampleFormat};
+        continue;
+      }
+    }
+    if (translated.valid) {
+      if(!translated.texture.cacheable)volatileTextureMask|=static_cast<uint8_t>(1u<<slot);
+      // Only telemetry consumes these deltas; skip the struct copies otherwise.
+      gfx::FrameStats statsBeforeTexture{};
+      if (telemetry_) statsBeforeTexture = renderer_->stats();
+      const auto handle = renderer_->create_texture(translated.texture);
+      if (telemetry_) {
+        const auto statsAfterTexture = renderer_->stats();
+        const uint32_t hits = statsAfterTexture.textureHits - statsBeforeTexture.textureHits;
+        const uint32_t misses = statsAfterTexture.textureMisses - statsBeforeTexture.textureMisses;
+        const uint32_t uploads = statsAfterTexture.textureUploads - statsBeforeTexture.textureUploads;
+        for (uint32_t i = 0; i < hits; ++i) telemetry_->texture(true, false, 0);
+        for (uint32_t i = 0; i < misses; ++i) telemetry_->texture(false, uploads != 0, uploads ? translated.texture.dataSize : 0);
+      }
+      if (handle) {
+        bindings[slot] = gfx::TextureBinding{handle, translated.sampler, gfx::TextureSource::Cache};
+        continue;
+      }
+    }
+    bindings[slot].texture = white;
+    bindings[slot].source = gfx::TextureSource::Cache;
+    if (translated.valid || translated.dynamicCopy) bindings[slot].sampler = translated.sampler;
+    result.fallbackTextureMask |= static_cast<uint8_t>(1u << slot);
+    if (translated.dynamicCopy) result.warnings |= SubmitWarning::DynamicCopyFallback;
+    else result.warnings |= SubmitWarning::MissingTextureFallback;
+  }
+  for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot)
+    if ((textureMask & (1u << slot)) &&
+        renderer_->texture_supports_hardware_wrap(bindings[slot].texture, bindings[slot].sampler))
+      nativeWrapMask |= static_cast<uint8_t>(1u << slot);
+  resolvedTextureBindings_=bindings;
+  resolvedNativeWrapMask_=nativeWrapMask;
+  resolvedTextureMask_=textureMask;
+  resolvedVolatileTextureMask_=volatileTextureMask;
+  resolvedFallbackTextureMask_=result.fallbackTextureMask;
+  resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
+    (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
+  resolvedTextureBindingsValid_=true;
+  }
+  if (result.fallbackTextureMask != 0) {
+    uint32_t fallbackCount = 0;
+    for (uint8_t bits = result.fallbackTextureMask; bits; bits >>= 1) fallbackCount += bits & 1u;
+    if (telemetry_) telemetry_->fallback_texture(fallbackCount);
+    if (coverage_) coverage_->fallback(result.fallbackTextureMask, "texture fallback mask");
+    if (strictUnsupported_) strictFailed_ = true;
+  }
+
+  // Resolved before the pipeline: the samplers decide whether the generated
+  // shader may leave wrapping to the texture unit (swizzled texture, or clamp
+  // on both axes). Without the emulated wrap the fetch stays non-dependent.
+  if (translatedPipeline_.nativeTextureWrapMask != nativeWrapMask) {
+    translatedPipeline_.nativeTextureWrapMask = nativeWrapMask;
+    translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
+  }
+  if (staticGeometry_) translatedGpuPipeline_.nativeTextureWrapMask = nativeWrapMask;
   const uint64_t translatedPipelineKey = translatedPipelineKey_;
   if (pipeline.blendMode == gfx::BlendMode::Logic && pipeline.logicOp != gfx::LogicOp::Clear &&
       pipeline.logicOp != gfx::LogicOp::Copy && pipeline.logicOp != gfx::LogicOp::Noop) {
@@ -777,81 +867,6 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if(verboseGeometryDiagnostics_&&!gpuGeometry&&!useStreamed)
     log_large_draw_geometry(prepared,vertexState,pipeline,rawVertices,rawBytes,layout,vertexCount);
 #endif
-
-  std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
-  const uint8_t textureMask = translatedTextureMask_;
-  const auto white = white_texture();
-  const bool reuseResolvedTextures=resolvedTextureBindingsValid_&&
-                                   !aurora::gx::g_gxState.stateDirty&&resolvedTextureMask_==textureMask&&
-                                   resolvedVolatileTextureMask_==0;
-  if(reuseResolvedTextures){
-    bindings=resolvedTextureBindings_;
-    result.fallbackTextureMask=resolvedFallbackTextureMask_;
-    result.warnings|=resolvedTextureWarnings_;
-    if(telemetry_)for(unsigned slot=0;slot<gfx::MaxTextures;++slot)if(textureMask&(1u<<slot))telemetry_->texture(true,false,0);
-  }else{ gfx::ScopedTelemetryPhase textureTimer(telemetry_, gfx::TelemetryPhase::TextureResolve);
-  uint8_t volatileTextureMask=0;
-  for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
-    if ((textureMask & (1u << slot)) == 0) continue;
-    const auto translated = translate_texture(slot);
-    if (coverage_ && translated.valid) {
-      const uint64_t texKey = (static_cast<uint64_t>(translated.texture.format) << 32) | translated.texture.width;
-      coverage_->observe(integration::FeatureClass::TextureFormat, texKey, "sampled GX texture format");
-    }
-    if (translated.dynamicCopy) {
-      // Match translate_texture(): the native frontend populates loadedTextures,
-      // not Dawn's resolved TextureBind table. Reading that table loses the
-      // guest destination identity and turns a valid EFB copy into white fallback.
-      const auto ptr = reinterpret_cast<uintptr_t>(aurora::gx::g_gxState.loadedTextures[slot].data);
-      const auto ci = copyTextures_.find(ptr);
-      if (ci != copyTextures_.end() && ci->second.handle) {
-        bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb,
-                                             ci->second.logicalFlipX,ci->second.logicalFlipY,ci->second.forceOpaque,
-                                             ci->second.sampleFormat};
-        continue;
-      }
-    }
-    if (translated.valid) {
-      if(!translated.texture.cacheable)volatileTextureMask|=static_cast<uint8_t>(1u<<slot);
-      // Only telemetry consumes these deltas; skip the struct copies otherwise.
-      gfx::FrameStats statsBeforeTexture{};
-      if (telemetry_) statsBeforeTexture = renderer_->stats();
-      const auto handle = renderer_->create_texture(translated.texture);
-      if (telemetry_) {
-        const auto statsAfterTexture = renderer_->stats();
-        const uint32_t hits = statsAfterTexture.textureHits - statsBeforeTexture.textureHits;
-        const uint32_t misses = statsAfterTexture.textureMisses - statsBeforeTexture.textureMisses;
-        const uint32_t uploads = statsAfterTexture.textureUploads - statsBeforeTexture.textureUploads;
-        for (uint32_t i = 0; i < hits; ++i) telemetry_->texture(true, false, 0);
-        for (uint32_t i = 0; i < misses; ++i) telemetry_->texture(false, uploads != 0, uploads ? translated.texture.dataSize : 0);
-      }
-      if (handle) {
-        bindings[slot] = gfx::TextureBinding{handle, translated.sampler, gfx::TextureSource::Cache};
-        continue;
-      }
-    }
-    bindings[slot].texture = white;
-    bindings[slot].source = gfx::TextureSource::Cache;
-    if (translated.valid || translated.dynamicCopy) bindings[slot].sampler = translated.sampler;
-    result.fallbackTextureMask |= static_cast<uint8_t>(1u << slot);
-    if (translated.dynamicCopy) result.warnings |= SubmitWarning::DynamicCopyFallback;
-    else result.warnings |= SubmitWarning::MissingTextureFallback;
-  }
-  resolvedTextureBindings_=bindings;
-  resolvedTextureMask_=textureMask;
-  resolvedVolatileTextureMask_=volatileTextureMask;
-  resolvedFallbackTextureMask_=result.fallbackTextureMask;
-  resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
-    (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
-  resolvedTextureBindingsValid_=true;
-  }
-  if (result.fallbackTextureMask != 0) {
-    uint32_t fallbackCount = 0;
-    for (uint8_t bits = result.fallbackTextureMask; bits; bits >>= 1) fallbackCount += bits & 1u;
-    if (telemetry_) telemetry_->fallback_texture(fallbackCount);
-    if (coverage_) coverage_->fallback(result.fallbackTextureMask, "texture fallback mask");
-    if (strictUnsupported_) strictFailed_ = true;
-  }
 
   if (trace_) {
     trace_->record(translatedPipelineKey, integration::trace_hash_bytes(rawVertices, rawBytes),

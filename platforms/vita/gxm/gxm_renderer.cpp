@@ -890,6 +890,13 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   return key;
 }
 
+bool Renderer::texture_supports_hardware_wrap(Handle texture,const SamplerDesc& s) const noexcept {
+  const auto& d=*impl_;
+  if(s.wrapS==WrapMode::Clamp&&s.wrapT==WrapMode::Clamp) return true;
+  const auto it=d.textures.find(texture);
+  return it!=d.textures.end()&&it->second->swizzled;
+}
+
 Handle Renderer::create_buffer(const void* data, size_t bytes) {
   auto& d = *impl_;
   if (!d.initialized || !bytes || bytes > UINT32_MAX || !d.nextHandle || !d.has_budget(bytes)) {
@@ -1050,8 +1057,9 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
       s.wrapS>WrapMode::Mirror || s.wrapT>WrapMode::Mirror ||
       !std::isfinite(s.lodBias) || !std::isfinite(s.minLod) || !std::isfinite(s.maxLod) ||
       s.minLod<0 || s.maxLod<s.minLod) return d.fail("invalid native texture binding");
-  if(requireNativeWrap&&!it->second->swizzled)
-    return d.fail("native wrapping requires a swizzled texture");
+  const bool hardwareWrap=it->second->swizzled||(s.wrapS==WrapMode::Clamp&&s.wrapT==WrapMode::Clamp);
+  if(requireNativeWrap&&!hardwareWrap)
+    return d.fail("native wrapping requires a swizzled texture or clamp addressing");
   if(!d.ensure_scene()) return false;
   if((d.textureBindingValidMask&(1u<<unit))&&d.boundTextureHandles[unit]==handle&&
      same_sampler(d.boundTextureSamplers[unit],s)) {
@@ -1083,7 +1091,7 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
   if(!d.check(sceGxmSetFragmentTexture(d.context,unit,&texture),"bind fragment texture")) return false;
   d.textureBindingValidMask|=static_cast<uint8_t>(1u<<unit);
   d.boundTextureHandles[unit]=handle;d.boundTextureSamplers[unit]=s;
-  d.boundTextureObjects[unit]=&textureObject;d.boundTextureNativeWrap[unit]=textureObject.swizzled;
+  d.boundTextureObjects[unit]=&textureObject;d.boundTextureNativeWrap[unit]=hardwareWrap;
   it->second->inFlight=true;
   return true;
 }

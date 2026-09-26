@@ -150,6 +150,7 @@ private:
   uint8_t resolvedTextureMask_ = 0;
   uint8_t resolvedVolatileTextureMask_ = 0;
   uint8_t resolvedFallbackTextureMask_ = 0;
+  uint8_t resolvedNativeWrapMask_ = 0;
   SubmitWarning resolvedTextureWarnings_ = SubmitWarning::None;
   bool resolvedTextureBindingsValid_ = false;
   uint64_t queuedTranslatedPipelineKey_ = 0;

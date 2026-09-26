@@ -72,6 +72,13 @@ public:
   }
   uint64_t create_pipeline(const PipelineDesc& d) noexcept;
   Handle create_texture(const TextureDesc& d) noexcept;
+  // True when the texture unit itself can apply this sampler's wrap modes, so
+  // the generated shader need not emulate them (native GXM only).
+#if defined(AURORA_VITA_RENDERER_GXM)
+  bool texture_supports_hardware_wrap(Handle texture,const SamplerDesc& sampler) const noexcept;
+#else
+  bool texture_supports_hardware_wrap(Handle,const SamplerDesc&) const noexcept { return false; }
+#endif
   size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept;
   Handle create_vertex_buffer(const void*d,size_t n,bool dynamic=false) noexcept;
   Handle create_index_buffer(const void*d,size_t n,bool dynamic=false) noexcept;
