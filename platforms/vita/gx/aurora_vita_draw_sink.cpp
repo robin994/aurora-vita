@@ -813,7 +813,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
     if (translated.valid) {
       if(!translated.texture.cacheable)volatileTextureMask|=static_cast<uint8_t>(1u<<slot);
-      const auto statsBeforeTexture = renderer_->stats();
+      // Only telemetry consumes these deltas; skip the struct copies otherwise.
+      gfx::FrameStats statsBeforeTexture{};
+      if (telemetry_) statsBeforeTexture = renderer_->stats();
       const auto handle = renderer_->create_texture(translated.texture);
       if (telemetry_) {
         const auto statsAfterTexture = renderer_->stats();
@@ -859,7 +861,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
 
   gfx::PrepareDrawError error = gfx::PrepareDrawError::None;
-  const auto statsBeforeEnqueue = renderer_->stats();
+  gfx::FrameStats statsBeforeEnqueue{};
+  if (telemetry_) statsBeforeEnqueue = renderer_->stats();
   uint64_t resolvedPipelineKey = 0;
 #if defined(AURORA_VITA_ENABLE_EXPERIMENTAL_STREAMED)
   if(gpuGeometry){

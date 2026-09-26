@@ -379,6 +379,8 @@ struct Renderer::Impl {
   uint8_t textureBindingValidMask = 0;
   std::array<Handle,MaxTextures> boundTextureHandles{};
   std::array<SamplerDesc,MaxTextures> boundTextureSamplers{};
+  std::array<Texture*,MaxTextures> boundTextureObjects{};
+  std::array<bool,MaxTextures> boundTextureNativeWrap{};
   VertexUniformState vertexUniformState{};
   FragmentUniformState fragmentUniformState{};
   Pipeline* resolvedPipelineHint = nullptr;
@@ -474,13 +476,26 @@ struct Renderer::Impl {
     sceneDepthless = depthless;
     pendingVertexDependency = nullptr;
     pendingFragmentTransferSync = false;
-    pipelineStateValid=false;viewportValid=false;scissorValid=false;vertexStreamValid=false;
+    // Programs, vertex streams, textures and render state persist on the GXM
+    // context across scenes (libgxm Overview 6.1); keep those caches. Only the
+    // default uniform buffer reservations die with the previous scene (6.3),
+    // and BeginScene resets the region clip to the valid region (6.8).
+    scissorValid=false;
     vertexUniformState.valid=false;fragmentUniformState.valid=false;
-    textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
     inScene = true;
     return true;
   }
 
+  // Texture bindings persist across scenes; forget any unit that still refers
+  // to a texture whose descriptor is re-initialized or destroyed.
+  void invalidate_texture_binding(Handle handle) noexcept {
+    for (unsigned unit = 0; unit < MaxTextures; ++unit)
+      if (boundTextureHandles[unit] == handle) {
+        textureBindingValidMask &= static_cast<uint8_t>(~(1u << unit));
+        boundTextureHandles[unit] = 0;
+        boundTextureObjects[unit] = nullptr;
+      }
+  }
   bool fail(const char* operation, int code = 0) {
     char text[384];
     std::snprintf(text, sizeof(text), "%s (0x%08x)", operation, unsigned(code));
@@ -1021,6 +1036,14 @@ bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool
 
 bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,bool requireNativeWrap) {
   auto& d=*impl_;
+  // Fast path: the unit already holds this validated texture and sampler.
+  // The handle is still live: destroy_texture clears matching bindings.
+  if(unit<MaxTextures&&d.inScene&&(d.textureBindingValidMask&(1u<<unit))&&
+     d.boundTextureHandles[unit]==handle&&same_sampler(d.boundTextureSamplers[unit],s)&&
+     (!requireNativeWrap||d.boundTextureNativeWrap[unit])) {
+    d.boundTextureObjects[unit]->inFlight=true;
+    return true;
+  }
   const auto it=d.textures.find(handle);
   if(unit>=MaxTextures || it==d.textures.end() || handle==d.boundTarget ||
       s.minFilter>Filter::LinearMipmapLinear || s.magFilter>Filter::Linear ||
@@ -1060,6 +1083,7 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
   if(!d.check(sceGxmSetFragmentTexture(d.context,unit,&texture),"bind fragment texture")) return false;
   d.textureBindingValidMask|=static_cast<uint8_t>(1u<<unit);
   d.boundTextureHandles[unit]=handle;d.boundTextureSamplers[unit]=s;
+  d.boundTextureObjects[unit]=&textureObject;d.boundTextureNativeWrap[unit]=textureObject.swizzled;
   it->second->inFlight=true;
   return true;
 }
@@ -1489,6 +1513,10 @@ void Renderer::destroy_pipeline(uint64_t key) {
   auto it=d.pipelines.find(key);
   if(it==d.pipelines.end() || key==d.clearPipeline) return;
   if(it->second->inFlight && !finish()) return;
+  // Program state persists across scenes: a pipeline recreated later with the
+  // same key must not be mistaken for the released programs still set here.
+  d.pipelineStateValid=false;d.boundPipelineKey=0;
+  d.vertexUniformState.valid=false;d.fragmentUniformState.valid=false;
   d.destroy_pipeline(*it->second);
   d.pipelines.erase(it);
 }
@@ -1505,6 +1533,7 @@ void Renderer::destroy_texture(Handle handle) {
   if(it==d.textures.end()) return;
   if((it->second->inFlight || handle==d.boundTarget) && !finish()) return;
   if(handle==d.boundTarget) d.boundTarget=0;
+  d.invalidate_texture_binding(handle);
   d.resourceBytes-=it->second->memory.size()+it->second->depth.size();
   for(auto c=d.textureCache.begin();c!=d.textureCache.end();)
     if(c->second==handle) c=d.textureCache.erase(c); else ++c;
@@ -1647,6 +1676,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
       } else alias=d.textures.at(d.displaySource).get();
       alias->width=d.config.width;alias->height=d.config.height;alias->stride=d.stride;
       alias->mipCount=1;alias->swizzled=false;alias->descriptorSamplerValid=false;
+      d.invalidate_texture_binding(d.displaySource);
       if(!d.check(sceGxmTextureInitLinear(&alias->descriptor,d.surfaces[d.back].memory.data(),
           SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,d.config.width,d.config.height,0),
           "initialize EFB source alias"))return false;
@@ -1868,6 +1898,7 @@ bool Renderer::copy_display_region(const Scissor& source) {
   if(!d.check(sceGxmTextureInitLinear(&alias->descriptor,d.surfaces[sourceBuffer].memory.data(),
       SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,d.config.width,d.config.height,0),"initialize display source texture")) return false;
   alias->descriptorSamplerValid=false;
+  d.invalidate_texture_binding(d.displaySource);
 
   d.back=destination;
   // Same-context scene ordering is sufficient for sampling the just-finished
@@ -1970,6 +2001,10 @@ void Renderer::shutdown() noexcept {
   d.frameActive=false;d.depthValid=false;d.boundTarget=0;d.blitVertices=0;d.displaySource=0;d.copyVertices=0;
   d.pendingVertexDependency=nullptr;d.efbCopyGeometryValid=false;
   d.depthlessSceneRequested=false;d.sceneDepthless=false;
+  d.pipelineStateValid=false;d.viewportValid=false;d.scissorValid=false;d.vertexStreamValid=false;
+  d.vertexUniformState.valid=false;d.fragmentUniformState.valid=false;
+  d.textureBindingValidMask=0;d.boundPipelineKey=0;d.boundVertexBuffer=0;d.boundVertexBase=0;
+  d.boundTextureHandles={};d.boundTextureObjects={};
   d.stageMemoryHits=0;d.stageCompiles=0;d.stageCompileUs=0;d.blockedStageCompiles=0;
   d.runtimeShaderCompileEnabled=true;d.pipelineCompileBlocked=false;
   d.clearVertices = d.clearIndices = 0; d.clearPipeline = 0;
