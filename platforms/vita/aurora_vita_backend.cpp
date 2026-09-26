@@ -94,13 +94,15 @@ void emit_periodic_diagnostics() noexcept {
   const auto frameLine = g_telemetry.format_frame();
   const auto memLine = g_drawSink->memory_budget().format();
   const auto& rs=g_renderer->stats();
-  char rendererLine[768];
+  char rendererLine[1024];
   std::snprintf(rendererLine,sizeof(rendererLine),
       "[AURORA-VITA][RENDERER] frame=%llu display=%ux%u internal=%ux%u scenes=%u sampled=%u "
       "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu display_queue_us=%llu "
       "vertex_uniform_reuse=%u fragment_uniform_reuse=%u efb_copies=%u "
       "efb_end_us=%llu efb_submit_us=%llu efb_wait_us=%llu efb_fixup_us=%llu "
-      "d16=%u gpu_geometry=%u split_vertex_phases=%u",
+      "d16=%u gpu_geometry=%u split_vertex_phases=%u "
+      "depth_load_scenes=%u depth_store_scenes=%u depthless_scenes=%u finish_calls=%u "
+      "scissor_free_draws=%u",
       static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
       g_config.render_width?g_config.render_width:g_config.width,
@@ -116,7 +118,9 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(rs.nativeEfbTransferWaitUs),
       static_cast<unsigned long long>(rs.nativeEfbCpuFixupUs),
       g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u,
-      g_config.profile_split_vertex_phases?1u:0u);
+      g_config.profile_split_vertex_phases?1u:0u,
+      rs.nativeDepthLoadScenes,rs.nativeDepthStoreScenes,rs.nativeDepthlessScenes,
+      rs.nativeFinishCalls,rs.nativeScissorFreeDraws);
   if(writeConsole)
     AURORA_VITA_LOG_INFO("%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str());
   if (writeFile) {
@@ -478,6 +482,11 @@ PerformanceSnapshot performance_snapshot() noexcept {
   out.nativeEfbTransferSubmitUs=stats.nativeEfbTransferSubmitUs;
   out.nativeEfbTransferWaitUs=stats.nativeEfbTransferWaitUs;
   out.nativeEfbCpuFixupUs=stats.nativeEfbCpuFixupUs;
+  out.nativeDepthLoadScenes=stats.nativeDepthLoadScenes;
+  out.nativeDepthStoreScenes=stats.nativeDepthStoreScenes;
+  out.nativeDepthlessScenes=stats.nativeDepthlessScenes;
+  out.nativeFinishCalls=stats.nativeFinishCalls;
+  out.nativeScissorFreeDraws=stats.nativeScissorFreeDraws;
   out.shaderRuntimeCompilationEnabled=g_renderer->runtime_shader_compilation_enabled();
   out.shaderRuntimeCompiles=g_renderer->runtime_shader_compiles();
   out.shaderRuntimeCompileUs=g_renderer->runtime_shader_compile_us();

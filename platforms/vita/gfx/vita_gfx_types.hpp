@@ -530,6 +530,15 @@ struct FrameStats {
   uint64_t nativeEfbTransferSubmitUs = 0;
   uint64_t nativeEfbTransferWaitUs = 0;
   uint64_t nativeEfbCpuFixupUs = 0;
+  // Native scene memory traffic: scenes that force-load/force-store their
+  // depth surface for every tile, and scenes submitted without depth.
+  uint32_t nativeDepthLoadScenes = 0;
+  uint32_t nativeDepthStoreScenes = 0;
+  uint32_t nativeDepthlessScenes = 0;
+  // Full CPU/GPU synchronizations (sceGxmFinish) since the previous frame.
+  uint32_t nativeFinishCalls = 0;
+  // Draws that used the discard-free variant of a fragment-scissor pipeline.
+  uint32_t nativeScissorFreeDraws = 0;
 };
 
 } // namespace aurora::vita::gfx

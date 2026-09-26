@@ -315,6 +315,12 @@ struct Renderer::Impl {
     uint8_t fixedTextureUniformMask = 0;
     uint8_t lightTop = 0;
     bool inFlight = false;
+    // Variants share the owner's vertex program and only own their fragment
+    // program. A fragment-scissor pipeline owns a discard-free variant used
+    // when the draw scissor covers the complete target (the common case), so
+    // the ISP keeps the opaque pass type and hidden surface removal.
+    bool ownsVertex = true;
+    Pipeline* scissorFree = nullptr;
   };
   struct FragmentUniformState {
     GpuDrawUniforms uniforms{};
@@ -359,6 +365,11 @@ struct Renderer::Impl {
   uint32_t stride = 0, front = 0, back = 1;
   bool initialized = false, ownsGxm = false, ownsCompiler = false, inScene = false, displayed = false;
   bool frameActive = false, depthValid = false;
+  // A depthless scene is submitted without a depth/stencil surface: no tile
+  // load/store traffic and the surface memory (and depthValid) stay untouched.
+  // Requested by presentation passes that never test or write depth.
+  bool depthlessSceneRequested = false, sceneDepthless = false;
+  uint64_t finishCalls = 0, finishCallsAtFrameStart = 0;
   bool pipelineStateValid = false, viewportValid = false, scissorValid = false;
   bool vertexStreamValid = false;
   Viewport cachedViewport{};
@@ -374,8 +385,6 @@ struct Renderer::Impl {
   uint64_t resolvedPipelineHintKey = 0;
   SceGxmSyncObject* pendingVertexDependency = nullptr;
   bool pendingFragmentTransferSync = false;
-  Scissor displayCopySource{};
-  bool displayCopySourceValid = false;
   Scissor efbCopySource{};
   uint32_t efbCopySourceWidth = 0, efbCopySourceHeight = 0;
   bool efbCopyFlipX = false, efbCopyFlipY = false, efbCopyGeometryValid = false;
@@ -402,8 +411,12 @@ struct Renderer::Impl {
     inScene = false;
     // Store/load policy is specified before BeginScene. The next frame may
     // continue an offscreen target; EndFrame alone does not retire its depth.
-    if (boundTarget) textures.at(boundTarget)->depthValid = result>=0;
-    else depthValid = result>=0;
+    // A depthless scene never touched the depth memory: keep its state.
+    if (!sceneDepthless) {
+      if (boundTarget) textures.at(boundTarget)->depthValid = result>=0;
+      else depthValid = result>=0;
+    }
+    sceneDepthless = false;
     return check(result, "end native scene");
   }
   bool ensure_scene() {
@@ -421,6 +434,10 @@ struct Renderer::Impl {
       loadDepth = t.depthValid;
       t.inFlight = true;
     }
+    // BeginScene copies the surface description, so a NULL depth surface is a
+    // valid color-only scene (libgxm: same as SceGxmDepthStencilSurfaceInitDisabled).
+    const bool depthless = depthlessSceneRequested && ds;
+    if (depthless) ds = nullptr;
     if (ds) {
       // GXCopyTex and target switches can split one logical EFB frame across
       // multiple GXM scenes. Preserve Z across those boundaries for both the
@@ -450,6 +467,11 @@ struct Renderer::Impl {
       return fail("begin native scene",beginResult);
     }
     ++stats.nativeSceneCount;
+    if (ds) {
+      ++stats.nativeDepthStoreScenes;
+      if (loadDepth) ++stats.nativeDepthLoadScenes;
+    } else if (depthless) ++stats.nativeDepthlessScenes;
+    sceneDepthless = depthless;
     pendingVertexDependency = nullptr;
     pendingFragmentTransferSync = false;
     pipelineStateValid=false;viewportValid=false;scissorValid=false;vertexStreamValid=false;
@@ -476,11 +498,66 @@ struct Renderer::Impl {
         rounded <= config.resourceBudgetBytes - resourceBytes;
   }
   void destroy_pipeline(Pipeline& p) noexcept {
+    if (p.scissorFree) {
+      destroy_pipeline(*p.scissorFree);
+      delete p.scissorFree;
+      p.scissorFree = nullptr;
+    }
     if (p.fragment) sceGxmShaderPatcherReleaseFragmentProgram(patcher, p.fragment);
-    if (p.vertex) sceGxmShaderPatcherReleaseVertexProgram(patcher, p.vertex);
+    if (p.vertex && p.ownsVertex) sceGxmShaderPatcherReleaseVertexProgram(patcher, p.vertex);
     if (p.fragmentId) sceGxmShaderPatcherUnregisterProgram(patcher, p.fragmentId);
-    if (p.vertexId) sceGxmShaderPatcherUnregisterProgram(patcher, p.vertexId);
+    if (p.vertexId && p.ownsVertex) sceGxmShaderPatcherUnregisterProgram(patcher, p.vertexId);
     p.fragment = nullptr; p.vertex = nullptr; p.fragmentId = nullptr; p.vertexId = nullptr;
+  }
+  static void find_fragment_parameters(Pipeline& p, const SceGxmProgram* fp) noexcept {
+    p.kcolor = sceGxmProgramFindParameterByName(fp, "u_kcolor");
+    p.tevreg = sceGxmProgramFindParameterByName(fp, "u_tevreg");
+    p.clip = sceGxmProgramFindParameterByName(fp, "u_clip_rect");
+    p.fogColor=sceGxmProgramFindParameterByName(fp,"u_fog_color");
+    p.fogParams=sceGxmProgramFindParameterByName(fp,"u_fog_params");
+    p.fogRange=sceGxmProgramFindParameterByName(fp,"u_fog_range_k");
+    p.viewportWidth=sceGxmProgramFindParameterByName(fp,"u_render_viewport_width");
+    p.indirectMatrices=sceGxmProgramFindParameterByName(fp,"u_ind_mtx");
+    p.texcoordScale=sceGxmProgramFindParameterByName(fp,"u_texcoord_scale");
+    p.textureSizeBias=sceGxmProgramFindParameterByName(fp,"u_texture_size_bias");
+    p.textureTransform=sceGxmProgramFindParameterByName(fp,"u_tex_transform");
+    p.textureWrap=sceGxmProgramFindParameterByName(fp,"u_tex_wrap");
+    p.textureForceOpaque=sceGxmProgramFindParameterByName(fp,"u_tex_force_opaque");
+    p.textureCopyMode=sceGxmProgramFindParameterByName(fp,"u_tex_copy_mode");
+  }
+  // Best effort: a missing variant only costs the discard path, so failures
+  // (compile sealed, USSE heap) never fail the owner pipeline.
+  void create_scissor_free_variant(Pipeline& owner, const std::string& vertexSource) noexcept {
+    PipelineDesc desc = owner.desc;
+    desc.fragmentScissor = false;
+    const auto source = build_tev_cg(desc);
+    if (!source.ok() || source.discardAll || source.vertex != vertexSource) return;
+    const std::string savedError = error;
+    auto fragmentCode = compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
+    if (!fragmentCode) { error = savedError; pipelineCompileBlocked = false; return; }
+    auto* variant = new (std::nothrow) Pipeline(owner);
+    if (!variant) return;
+    variant->desc = desc;
+    variant->ownsVertex = false;
+    variant->scissorFree = nullptr;
+    variant->inFlight = false;
+    variant->fragmentCode = std::move(fragmentCode);
+    variant->fragmentId = nullptr;
+    variant->fragment = nullptr;
+    const auto* vp = reinterpret_cast<const SceGxmProgram*>(owner.vertexCode->code.data());
+    const auto* fp = reinterpret_cast<const SceGxmProgram*>(variant->fragmentCode->code.data());
+    const auto blend = blend_info(desc);
+    if (sceGxmShaderPatcherRegisterProgram(patcher, fp, &variant->fragmentId) < 0 ||
+        sceGxmShaderPatcherCreateFragmentProgram(patcher, variant->fragmentId,
+            SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4, SCE_GXM_MULTISAMPLE_NONE, &blend, vp,
+            &variant->fragment) < 0) {
+      destroy_pipeline(*variant);
+      delete variant;
+      error = savedError;
+      return;
+    }
+    find_fragment_parameters(*variant, fp);
+    owner.scissorFree = variant;
   }
   std::shared_ptr<CompiledStage> compile_stage(const std::string& source, shark_type type,
                                                ProgramStage stage) {
@@ -769,20 +846,7 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   if (!d.check(sceGxmShaderPatcherCreateFragmentProgram(d.patcher, p.fragmentId, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
       SCE_GXM_MULTISAMPLE_NONE, &blend, vp, &p.fragment), "patch fragment program")) return abort();
   p.mvp = sceGxmProgramFindParameterByName(vp, "u_mvp");
-  p.kcolor = sceGxmProgramFindParameterByName(fp, "u_kcolor");
-  p.tevreg = sceGxmProgramFindParameterByName(fp, "u_tevreg");
-  p.clip = sceGxmProgramFindParameterByName(fp, "u_clip_rect");
-  p.fogColor=sceGxmProgramFindParameterByName(fp,"u_fog_color");
-  p.fogParams=sceGxmProgramFindParameterByName(fp,"u_fog_params");
-  p.fogRange=sceGxmProgramFindParameterByName(fp,"u_fog_range_k");
-  p.viewportWidth=sceGxmProgramFindParameterByName(fp,"u_render_viewport_width");
-  p.indirectMatrices=sceGxmProgramFindParameterByName(fp,"u_ind_mtx");
-  p.texcoordScale=sceGxmProgramFindParameterByName(fp,"u_texcoord_scale");
-  p.textureSizeBias=sceGxmProgramFindParameterByName(fp,"u_texture_size_bias");
-  p.textureTransform=sceGxmProgramFindParameterByName(fp,"u_tex_transform");
-  p.textureWrap=sceGxmProgramFindParameterByName(fp,"u_tex_wrap");
-  p.textureForceOpaque=sceGxmProgramFindParameterByName(fp,"u_tex_force_opaque");
-  p.textureCopyMode=sceGxmProgramFindParameterByName(fp,"u_tex_copy_mode");
+  Impl::find_fragment_parameters(p, fp);
   p.gxPosition=sceGxmProgramFindParameterByName(vp,"u_gx_position");
   p.gxNormal=sceGxmProgramFindParameterByName(vp,"u_gx_normal");
   p.gxPositionPalette=sceGxmProgramFindParameterByName(vp,"u_gx_position_palette");
@@ -802,6 +866,8 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   }
   d.pipelines.emplace(key, std::move(pipeline));
   ++d.stats.pipelineMisses;
+  // Created eagerly so pipeline prewarm also covers it before a sealed run.
+  if (nativeDesc.fragmentScissor && !source.discardAll) d.create_scissor_free_variant(p, source.vertex);
   return key;
 }
 
@@ -925,6 +991,14 @@ bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool
   if (!d.initialized || !d.frameActive) return d.fail("clear outside a frame");
   if (!std::isfinite(depth) || depth<0.f || depth>1.f) return d.fail("invalid clear depth");
   if (!rgb && !alpha && !writeDepth) return true;
+  if (writeDepth && !d.inScene) {
+    // The clear triangle covers the whole target with depthFunc=Always, so
+    // every depth value of the next scene is overwritten before any other
+    // draw can read it. Do not force-load the old depth for every tile; the
+    // tile starts from the background depth and the clear writes the value.
+    if (d.boundTarget) d.textures.at(d.boundTarget)->depthValid = false;
+    else d.depthValid = false;
+  }
   auto desc=d.pipelines.at(d.clearPipeline)->desc;
   desc.fragmentScissor=false; // The clear always covers the complete target.
   desc.colorWrite=rgb; desc.alphaWrite=alpha; desc.depthWrite=writeDepth;
@@ -1142,11 +1216,31 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
 
 bool Renderer::draw(const DrawPacket& packet) {
   auto& d = *impl_;
-  if (!d.ensure_scene()) return false;
   const auto pi = d.pipelines.find(packet.pipelineKey);
   const auto vi = d.buffers.find(packet.vertices.buffer), ii = d.buffers.find(packet.indices.buffer);
   if (pi == d.pipelines.end() || vi == d.buffers.end() || ii == d.buffers.end()) return d.fail("unknown pipeline or buffer handle");
-  const auto& p = *pi->second;
+  {
+    const auto& desc = pi->second->desc;
+    const bool usesDepth = desc.depthTest && (desc.depthWrite || desc.depthFunc != Compare::Always);
+    // A depth-testing draw may never land in a scene opened without depth.
+    if (usesDepth && d.inScene && d.sceneDepthless && !d.end_scene()) return false;
+    const bool requested = d.depthlessSceneRequested;
+    if (usesDepth) d.depthlessSceneRequested = false;
+    const bool opened = d.ensure_scene();
+    d.depthlessSceneRequested = requested;
+    if (!opened) return false;
+  }
+  // Discard-free variant: exact whenever the scissor covers the whole target.
+  Impl::Pipeline* active = pi->second.get();
+  uint64_t activeKey = packet.pipelineKey;
+  if (active->scissorFree && packet.scissor.x <= 0 && packet.scissor.y <= 0 &&
+      int64_t(packet.scissor.x) + packet.scissor.width >= int64_t(d.width()) &&
+      int64_t(packet.scissor.y) + packet.scissor.height >= int64_t(d.height())) {
+    active = active->scissorFree;
+    activeKey = packet.pipelineKey ^ 0x5c155012f7eeull;
+    ++d.stats.nativeScissorFreeDraws;
+  }
+  const auto& p = *active;
   const auto& pipeline = p.desc;
   if (packet.instanceCount != 1 || (pipeline.fixedVertexOnGpu != (packet.fixedVertexUniforms != nullptr)) ||
       !packet.indexCount || packet.firstVertex ||
@@ -1177,8 +1271,8 @@ bool Renderer::draw(const DrawPacket& packet) {
       int64_t(packet.scissor.y)+packet.scissor.height<d.height()))
     return d.fail("full-target pipeline requires a full-target scissor");
   uint64_t profileTick = d.profileDraws ? sceKernelGetProcessTimeWide() : 0;
-  d.resolvedPipelineHint=pi->second.get();d.resolvedPipelineHintKey=packet.pipelineKey;
-  const bool pipelineBound=bind_pipeline(packet.pipelineKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures);
+  d.resolvedPipelineHint=active;d.resolvedPipelineHintKey=activeKey;
+  const bool pipelineBound=bind_pipeline(activeKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures);
   d.resolvedPipelineHint=nullptr;d.resolvedPipelineHintKey=0;
   if(!pipelineBound) return false;
   if(d.profileDraws) { const auto now=sceKernelGetProcessTimeWide(); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }
@@ -1218,7 +1312,7 @@ bool Renderer::draw(const DrawPacket& packet) {
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
   if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;
   if(d.profileDraws) d.stats.nativeDrawUs+=sceKernelGetProcessTimeWide()-profileTick;
-  pi->second->inFlight = true;
+  pi->second->inFlight = true; active->inFlight = true;
   vi->second.inFlight = true; ii->second.inFlight = true;
   ++d.stats.drawCalls;
   d.stats.triangles += pipeline.primitive == Primitive::Triangles ? packet.indexCount / 3 : packet.indexCount - 2;
@@ -1255,6 +1349,9 @@ bool Renderer::end_frame(bool present) {
       static_cast<unsigned long long>(afterQueue-afterEnd),
       static_cast<unsigned long long>(afterQueue-timingStart));
   d.stats.cpuFrameUs = sceKernelGetProcessTimeWide() - d.frameStarted;
+  // Includes synchronizations issued between frames (resource destruction).
+  d.stats.nativeFinishCalls = static_cast<uint32_t>(d.finishCalls - d.finishCallsAtFrameStart);
+  d.finishCallsAtFrameStart = d.finishCalls;
   if(present) {
     constexpr uint64_t kBackpressureThresholdUs=500;
     d.displayQueueWindowSum+=d.stats.nativeDisplayQueueAddUs;
@@ -1311,10 +1408,14 @@ bool Renderer::finish() {
     d.pendingFragmentTransferSync=false;
   }
   sceGxmFinish(d.context);
+  ++d.finishCalls;
   d.pendingVertexDependency=nullptr;
   for(auto& [_,b]:d.buffers) b.inFlight=false;
   for(auto& [_,t]:d.textures) t->inFlight=false;
-  for(auto& [_,p]:d.pipelines) p->inFlight=false;
+  for(auto& [_,p]:d.pipelines) {
+    p->inFlight=false;
+    if(p->scissorFree) p->scissorFree->inFlight=false;
+  }
   return true;
 }
 
@@ -1702,7 +1803,12 @@ bool Renderer::blit_to_default(Handle handle,const Scissor* source) {
   packet.textures[0].uvScaleY=float(src.height)/float(texture.height);
   packet.textures[0].uvBiasX=float(src.x)/float(texture.width);
   packet.textures[0].uvBiasY=float(src.y)/float(texture.height);
-  return draw(packet);
+  // Presentation never tests or writes depth: if this opens a new scene,
+  // submit it without the depth surface instead of loading/storing it.
+  d.depthlessSceneRequested=true;
+  const bool ok=draw(packet);
+  d.depthlessSceneRequested=false;
+  return ok;
 }
 
 bool Renderer::copy_display_region(const Scissor& source) {
@@ -1773,23 +1879,18 @@ bool Renderer::copy_display_region(const Scissor& source) {
   p.tev.stages[0].color.d=TevColorArg::TexColor;p.tev.stages[0].alpha.d=TevAlphaArg::TexAlpha;
   const auto key=create_pipeline(p);
   if(!key) return false;
-  const float u0=float(source.x)/float(d.config.width);
-  const float u1=(float(source.x)+float(source.width))/float(d.config.width);
-  const float v0=float(source.y)/float(d.config.height);
-  const float v1=(float(source.y)+float(source.height))/float(d.config.height);
-  const float du=u1-u0,dv=v1-v0;
-  // GXM's viewport uses negative Y scale, so bottom clip vertices take the
-  // source rectangle's bottom V. This preserves the top-left GX image origin.
-  const float vertices[]{-1,-1,-.5f,1, u0,v1,1,
-                          3,-1,-.5f,1, u0+2*du,v1,1,
-                         -1, 3,-.5f,1, u0,v1-2*dv,1};
-  if(!d.blitVertices) d.blitVertices=create_buffer(vertices,sizeof(vertices));
-  else if(!d.displayCopySourceValid || source.x!=d.displayCopySource.x || source.y!=d.displayCopySource.y ||
-          source.width!=d.displayCopySource.width || source.height!=d.displayCopySource.height) {
-    if(!update_buffer(d.blitVertices,vertices,sizeof(vertices),0,false)) return false;
+  // Static full-screen triangle whose base UVs follow the top-left EFB
+  // convention (clip-space bottom -> V=1). The crop is applied through the
+  // per-texture UV transform instead of rewriting a vertex buffer that the
+  // previous frame may still be reading: that update forced sceGxmFinish on
+  // every source change and clobbered blit_to_default's own triangle.
+  if(!d.copyVertices) {
+    const float vertices[]{-1,-1,-.5f,1, 0,1,1,
+                            3,-1,-.5f,1, 2,1,1,
+                           -1, 3,-.5f,1, 0,-1,1};
+    d.copyVertices=create_buffer(vertices,sizeof(vertices));
   }
-  if(!d.blitVertices) return false;
-  d.displayCopySource=source;d.displayCopySourceValid=true;
+  if(!d.copyVertices) return false;
   uint32_t presentX=0,presentY=0,presentWidth=d.config.width,presentHeight=d.config.height;
   if(requestedAspect>panelAspect) {
     presentHeight=std::max(1u,static_cast<uint32_t>(std::lround(float(d.config.width)/requestedAspect)));
@@ -1800,9 +1901,13 @@ bool Renderer::copy_display_region(const Scissor& source) {
     presentWidth=std::min(presentWidth,d.config.width);
     presentX=(d.config.width-presentWidth)/2u;
   }
-  if(needsPresentationFit && !clear({0.f,0.f,0.f,1.f},1.f,true,true,false))return false;
+  d.depthlessSceneRequested=true;
+  if(needsPresentationFit && !clear({0.f,0.f,0.f,1.f},1.f,true,true,false)) {
+    d.depthlessSceneRequested=false;
+    return false;
+  }
   DrawPacket packet{};packet.pipelineKey=key;
-  packet.vertices={d.blitVertices,0,84};packet.indices={d.clearIndices,0,6};
+  packet.vertices={d.copyVertices,0,84};packet.indices={d.clearIndices,0,6};
   packet.vertexCount=packet.indexCount=3;
   packet.viewport.x=float(presentX);packet.viewport.y=float(presentY);
   packet.viewport.width=float(presentWidth);packet.viewport.height=float(presentHeight);
@@ -1811,8 +1916,13 @@ bool Renderer::copy_display_region(const Scissor& source) {
   packet.textures[0].texture=d.displaySource;
   packet.textures[0].sampler.wrapS=packet.textures[0].sampler.wrapT=WrapMode::Clamp;
   packet.textures[0].sampler.minFilter=packet.textures[0].sampler.magFilter=Filter::Linear;
+  packet.textures[0].uvScaleX=float(source.width)/float(d.config.width);
+  packet.textures[0].uvScaleY=float(source.height)/float(d.config.height);
+  packet.textures[0].uvBiasX=float(source.x)/float(d.config.width);
+  packet.textures[0].uvBiasY=float(source.y)/float(d.config.height);
   const uint64_t beforeDraw=sceKernelGetProcessTimeWide();
   const bool ok=draw(packet);
+  d.depthlessSceneRequested=false;
   const uint64_t afterDraw=sceKernelGetProcessTimeWide();
   static uint64_t displayCopyCount=0;
   const uint64_t count=++displayCopyCount;
@@ -1854,7 +1964,8 @@ void Renderer::shutdown() noexcept {
   if (d.ownsGxm) { sceGxmTerminate(); d.ownsGxm = false; }
   d.initialized = false; d.displayed = false; d.resourceBytes = 0;
   d.frameActive=false;d.depthValid=false;d.boundTarget=0;d.blitVertices=0;d.displaySource=0;d.copyVertices=0;
-  d.pendingVertexDependency=nullptr;d.displayCopySourceValid=false;d.efbCopyGeometryValid=false;
+  d.pendingVertexDependency=nullptr;d.efbCopyGeometryValid=false;
+  d.depthlessSceneRequested=false;d.sceneDepthless=false;
   d.stageMemoryHits=0;d.stageCompiles=0;d.stageCompileUs=0;d.blockedStageCompiles=0;
   d.runtimeShaderCompileEnabled=true;d.pipelineCompileBlocked=false;
   d.clearVertices = d.clearIndices = 0; d.clearPipeline = 0;

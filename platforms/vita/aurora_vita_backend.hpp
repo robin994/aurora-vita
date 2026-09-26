@@ -37,6 +37,11 @@ struct PerformanceSnapshot {
   uint64_t nativeEfbTransferSubmitUs=0;
   uint64_t nativeEfbTransferWaitUs=0;
   uint64_t nativeEfbCpuFixupUs=0;
+  uint32_t nativeDepthLoadScenes=0;
+  uint32_t nativeDepthStoreScenes=0;
+  uint32_t nativeDepthlessScenes=0;
+  uint32_t nativeFinishCalls=0;
+  uint32_t nativeScissorFreeDraws=0;
   uint64_t staticGeometryHits=0;
   uint64_t staticGeometryMisses=0;
   uint64_t staticGeometryLookupFallbacks=0;

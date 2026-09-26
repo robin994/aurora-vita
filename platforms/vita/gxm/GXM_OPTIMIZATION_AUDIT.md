@@ -6,6 +6,23 @@ la facade `gxm_facade.cpp` e le parti condivise che lo alimentano per ogni draw
 (`gx/aurora_vita_draw_sink.cpp`, `gfx/vita_draw_adapter.cpp`, `gfx/vita_streaming_arena.cpp`,
 `gfx/vita_static_geometry.hpp`, `gfx/vita_pipeline_key.cpp`). vitaGL è fuori ambito.
 
+## Stato sul branch
+
+Base riallineata a `experiment/vita-native-gxm` @ `f96d00b` (la revisione usata da Strikers).
+I riferimenti di riga sono stati presi su `c7e57c3`: in `gxm_renderer.cpp` le righe dopo la
+~190 sono spostate di ~+30. Rispetto a `c7e57c3` la base contiene già **M4** (opt-in
+`AURORA_VITA_GXM_DIRECT_STREAM_WRITE`, attivo nella build Strikers) e il parameter buffer
+configurabile (**G4**, `nativeParameterBufferBytes`).
+
+| Voce | Stato |
+|---|---|
+| Fase 0 | Contatori per frame: `depth_load_scenes`, `depth_store_scenes`, `depthless_scenes`, `finish_calls`, `scissor_free_draws` (riga RENDERER e `PerformanceSnapshot`) |
+| G1/G3 | Implementato: un clear depth prima della prima draw della scena azzera `depthValid` → nessun force-load |
+| G2 | Implementato: `blit_to_default` e `copy_display_region` aprono scene senza depth surface; una draw che usa il depth chiude la scena depthless |
+| S1 fase 1 | Implementato: variante senza discard creata insieme alla pipeline (coperta dal prewarm), usata solo con scissor a pieno target |
+| M2 | Implementato: display copy con triangolo statico + `u_tex_transform`; nessun `update_buffer`/`finish`, `blitVertices` non più condiviso |
+| Altre | Da fare |
+
 ## Metodo e regole
 
 - Analisi statica del codice confrontata con la documentazione SDK ufficiale della GPU
