@@ -218,6 +218,7 @@ bool initialize(const BackendConfig& c) noexcept {
   gfx::configure_program_binary_cache(g_programCachePath.empty()?nullptr:g_programCachePath.c_str());
 #endif
   g_telemetryEnabled=c.diagnostics||c.telemetry_log_path;
+  gfx::set_fifo_profile_enabled(g_telemetryEnabled);
   g_coverageEnabled=c.diagnostics||c.coverage_log_path;
   g_traceEnabled=c.diagnostics||c.trace_log_path;
   g_diagnosticsEnabled=g_telemetryEnabled||g_coverageEnabled||g_traceEnabled;
@@ -465,6 +466,7 @@ void shutdown() noexcept {
   g_trace.reset();
   g_diagnosticsEnabled=false;
   g_telemetryEnabled=false;
+  gfx::set_fifo_profile_enabled(false);
   g_coverageEnabled=false;
   g_traceEnabled=false;
   g_initialized=false;

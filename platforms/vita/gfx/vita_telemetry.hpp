@@ -99,8 +99,8 @@ private:
 uint64_t telemetry_now_us() noexcept;
 const char* telemetry_phase_name(TelemetryPhase phase) noexcept;
 
-// Per-frame profile of the GX FIFO command processor (diagnostic builds with
-// runtime logging only). Times are exclusive per command class: a display
+// Per-frame profile of the GX FIFO command processor, collected only while
+// set_fifo_profile_enabled(true) (the backend enables it with telemetry). Times are exclusive per command class: a display
 // list call does not include the commands executed inside it.
 enum class FifoCommandClass : uint8_t { Bp, Cp, Xf, Indexed, CallList, Draw, Aurora, Other, Count };
 struct FifoProfile {
@@ -110,6 +110,8 @@ struct FifoProfile {
   uint32_t count[static_cast<size_t>(FifoCommandClass::Count)]{};
 };
 FifoProfile& fifo_profile_accumulator() noexcept;
+extern bool g_fifoProfileEnabled;
+inline void set_fifo_profile_enabled(bool enabled) noexcept { g_fifoProfileEnabled = enabled; }
 // Returns the accumulated profile and clears the accumulator.
 FifoProfile fifo_profile_take() noexcept;
 
