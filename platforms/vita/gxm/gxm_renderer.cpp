@@ -533,8 +533,12 @@ struct Renderer::Impl {
     const auto source = build_tev_cg(desc);
     if (!source.ok() || source.discardAll || source.vertex != vertexSource) return;
     const std::string savedError = error;
+    const uint64_t savedBlocked = blockedStageCompiles;
     auto fragmentCode = compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
-    if (!fragmentCode) { error = savedError; pipelineCompileBlocked = false; return; }
+    // A sealed run may lack the variant binary; that is not a gameplay miss.
+    blockedStageCompiles = savedBlocked;
+    pipelineCompileBlocked = false;
+    if (!fragmentCode) { error = savedError; return; }
     auto* variant = new (std::nothrow) Pipeline(owner);
     if (!variant) return;
     variant->desc = desc;
