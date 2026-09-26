@@ -283,6 +283,17 @@ static inline void mark_pipeline_state_dirty() noexcept {
   g_gxState.pipelineStateGeneration = next_gx_state_epoch();
 }
 
+// Indexed-array bindings change for almost every mesh. On Vita they only
+// affect the vertex decode layout; elsewhere they stay part of the pipeline.
+static inline void mark_array_state_dirty() noexcept {
+#if defined(MKW_TARGET_VITA)
+  g_gxState.stateDirty = true;
+  g_gxState.layoutStateGeneration = next_gx_state_epoch();
+#else
+  mark_pipeline_state_dirty();
+#endif
+}
+
 // Rejects a malformed XF write in release builds.
 #define XF_REQUIRE(cond, msg, ...)                                                                                     \
   do {                                                                                                                 \
@@ -1616,7 +1627,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
         const auto newStride = static_cast<u8>(value);
         if (array.stride != newStride) {
           array.stride = newStride;
-          mark_pipeline_state_dirty();
+          mark_array_state_dirty();
         }
       }
     }
@@ -2491,7 +2502,7 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       array.le = le;
       // Only drop the cached upload when the backing array actually changes.
       array.cachedRange = {};
-      mark_pipeline_state_dirty();
+      mark_array_state_dirty();
     }
   } else if (subCmd == GX_LOAD_AURORA_TEXOBJ) {
     CHECK(pos + 35 <= size, "GX_LOAD_AURORA_TEXOBJ read overrun");

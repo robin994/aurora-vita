@@ -492,8 +492,18 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     coverage_->observe(integration::FeatureClass::VertexFormat, fmt, "GX vertex format");
   }
   const uint32_t stateGeneration = aurora::gx::g_gxState.pipelineStateGeneration;
+  const uint32_t layoutGeneration = aurora::gx::g_gxState.layoutStateGeneration;
   const bool translatedCacheHit = translatedStateValid_ && translatedStateGeneration_ == stateGeneration &&
                                   translatedPrimitive_ == primitive && translatedFmt_ == fmt;
+  if (translatedCacheHit && translatedLayoutGeneration_ != layoutGeneration) {
+    // Only indexed-array bindings changed: the pipeline, its key and every
+    // flag derived from it stay valid; rebuild the decode layout alone.
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
+    gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateLayout);
+    if (telemetry_) telemetry_->count_layout_translation();
+    translatedLayout_ = translate_current_vertex_layout(fmt);
+    translatedLayoutGeneration_ = layoutGeneration;
+  }
   if (!translatedCacheHit) {
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     if (telemetry_) telemetry_->count_pipeline_translation();
@@ -526,6 +536,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
     for(const auto&c:translatedPipeline_.colorChannels)translatedLit_=translatedLit_||c.lightingEnabled;
     translatedStateGeneration_ = stateGeneration;
+    translatedLayoutGeneration_ = layoutGeneration;
     translatedPrimitive_ = primitive;
     translatedFmt_ = fmt;
     translatedStateValid_ = true;

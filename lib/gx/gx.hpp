@@ -474,6 +474,10 @@ struct GXState {
   bool stateDirty = true;
   // Bumped by the decoded register writes that feed populate_pipeline_config, and by nothing else.
   u32 pipelineStateGeneration = next_gx_state_epoch();
+  // Vita: bumped by indexed-array base/size/stride changes. Those feed only the
+  // vertex decode layout, not the translated pipeline, so the Vita DrawSink
+  // rebuilds the layout without retranslating the whole pipeline.
+  u32 layoutStateGeneration = next_gx_state_epoch();
   std::array<u32, 0x100> bpRegCache = [] {
     std::array<u32, 0x100> regs{};
     regs[0xFE] = 0x00FFFFFF;

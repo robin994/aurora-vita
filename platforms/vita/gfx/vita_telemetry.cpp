@@ -109,7 +109,8 @@ std::string Telemetry::format_frame() const {
       << " pipeline_translations=" << frame_.counters.pipelineTranslations
       << " vertex_translations=" << frame_.counters.vertexTranslations
       << " texture_resolves=" << frame_.counters.textureResolves
-      << " translation_memo_hits=" << frame_.counters.translationMemoHits;
+      << " translation_memo_hits=" << frame_.counters.translationMemoHits
+      << " layout_translations=" << frame_.counters.layoutTranslations;
   for (size_t i = 0; i < frame_.phaseUs.size(); ++i) {
     out << ' ' << telemetry_phase_name(static_cast<TelemetryPhase>(i)) << "_us=" << frame_.phaseUs[i];
   }

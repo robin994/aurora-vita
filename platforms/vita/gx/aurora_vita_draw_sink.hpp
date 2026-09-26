@@ -136,6 +136,7 @@ private:
   gfx::Handle whiteTexture_ = gfx::InvalidHandle;
 #if defined(AURORA_VITA_UPSTREAM)
   uint32_t translatedStateGeneration_ = 0;
+  uint32_t translatedLayoutGeneration_ = 0;
   uint8_t translatedPrimitive_ = 0;
   uint8_t translatedFmt_ = 0;
   gfx::PipelineDesc translatedPipeline_{};
