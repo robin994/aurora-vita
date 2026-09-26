@@ -4,6 +4,7 @@
 #include "vita_byte_compare.hpp"
 #include "vita_hash_map.hpp"
 #include "vita_memory_revision.hpp"
+#include <algorithm>
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -12,8 +13,10 @@ namespace aurora::vita::gfx {
 
 // Verified object-space geometry, immutable for its entire GPU lifetime. A
 // source which changes at the same key becomes volatile and takes the CPU path;
-// it is never overwritten while queued or in flight. This first bounded cache
-// intentionally does not evict during rendering.
+// it is never overwritten while queued or in flight. When the budget is full,
+// least-recently-used entries not referenced by the current frame are evicted;
+// their GPU buffers are released only after RetireFrames further frames, when
+// the display queue has retired every draw that could read them (no finish).
 class StaticGeometryCache {
 public:
   struct Snapshot {
@@ -36,8 +39,11 @@ public:
     size_t stableSourceBytes=0;
     uint64_t stableSourceRevision=0;
     uint64_t validationEpoch=0;
+    uint64_t lastUseFrame=0;
+    size_t accountedBytes=0;
     bool volatileSource=false;
   };
+  static constexpr uint64_t RetireFrames=4;
 
   explicit StaticGeometryCache(Renderer& renderer,size_t budget) : renderer_(renderer),budget_(budget) {}
   ~StaticGeometryCache() { clear(); }
@@ -49,6 +55,22 @@ public:
   uint64_t hits() const noexcept { return hits_; }
   uint64_t misses() const noexcept { return misses_; }
   uint64_t lookup_fallbacks() const noexcept { return lookupFallbacks_; }
+  uint64_t evictions() const noexcept { return evictions_; }
+
+  // Called once per frame before any lookup: releases buffers of entries
+  // evicted at least RetireFrames frames ago.
+  void begin_frame(uint64_t frame) noexcept {
+    frame_=frame;
+    size_t kept=0;
+    for(size_t i=0;i<retired_.size();++i) {
+      auto& r=retired_[i];
+      if(frame_>=r.frame+RetireFrames) {
+        renderer_.buffers().destroy_retired(r.vertices);
+        renderer_.buffers().destroy_retired(r.indices);
+      } else retired_[kept++]=r;
+    }
+    retired_.resize(kept);
+  }
 
   Entry* get(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
              const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
@@ -114,9 +136,11 @@ public:
         }
       }
       ++hits_;
+      e.lastUseFrame=frame_;
       return &e;
     }
     ++misses_;
+    if(entries_.size()>=1024||bytes_>=budget_)evict_for(budget_/8u);
     if(entries_.size()>=1024||bytes_>=budget_)return nullptr;
     auto entry=std::make_unique<Entry>();
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
@@ -191,7 +215,10 @@ public:
     const size_t stride=gpuLayout.attributes[0].stride;
     const size_t vertexBytes=scratch_.vertices.size()*stride;
     const size_t indexBytes=scratch_.indices.size()*sizeof(uint16_t);
-    if(vertexBytes+indexBytes>budget_-bytes_-storedBytes)return nullptr;
+    if(vertexBytes+indexBytes>budget_-bytes_-storedBytes) {
+      evict_for(storedBytes+vertexBytes+indexBytes);
+      if(storedBytes>budget_-bytes_||vertexBytes+indexBytes>budget_-bytes_-storedBytes)return nullptr;
+    }
     packed_.resize(vertexBytes);
     for(size_t i=0;i<scratch_.vertices.size();++i)
       pack_gpu_vertex_bytes(packed_.data()+i*stride,scratch_.vertices[i],gpuLayout);
@@ -205,12 +232,19 @@ public:
     entry->indexCount=static_cast<uint32_t>(scratch_.indices.size());
     if(!stableSource)entry->raw.assign(raw,raw+bytes);
     bytes_+=storedBytes+vertexBytes+indexBytes;
+    entry->accountedBytes=storedBytes+vertexBytes+indexBytes;
+    entry->lastUseFrame=frame_;
     auto* result=entry.get();
     entries_.emplace(key,std::move(entry));
     return result;
   }
 
   void clear() noexcept {
+    for(const auto& r:retired_) {
+      renderer_.buffers().destroy(r.vertices);
+      renderer_.buffers().destroy(r.indices);
+    }
+    retired_.clear();
     for(auto& pair:entries_) {
       renderer_.buffers().destroy(pair.second->vertices.buffer);
       renderer_.buffers().destroy(pair.second->indices.buffer);
@@ -338,6 +372,32 @@ private:
   size_t budget_=0,bytes_=0;
   uint64_t hits_=0,misses_=0,lookupFallbacks_=0;
   FlatHashMap<uint64_t,std::unique_ptr<Entry>> entries_{};
+  struct Retired { Handle vertices=InvalidHandle,indices=InvalidHandle; uint64_t frame=0; };
+  std::vector<Retired> retired_{};
+  uint64_t frame_=0,evictions_=0;
+
+  // Free at least `required` bytes (and one entry slot) by evicting the least
+  // recently used entries. Entries used in the current frame may still be
+  // referenced by queued draw packets and are never evicted.
+  void evict_for(size_t required) noexcept {
+    std::vector<std::pair<uint64_t,uint64_t>> order;
+    order.reserve(entries_.size());
+    for(const auto& [key,e]:entries_)
+      if(e->lastUseFrame<frame_)order.emplace_back(e->volatileSource?0:e->lastUseFrame,key);
+    std::sort(order.begin(),order.end());
+    size_t freed=0;
+    for(const auto& [_,key]:order) {
+      if(freed>=required&&bytes_<budget_&&entries_.size()<1024)break;
+      const auto it=entries_.find(key);
+      if(it==entries_.end())continue;
+      auto& e=*it->second;
+      retired_.push_back(Retired{e.vertices.buffer,e.indices.buffer,frame_});
+      freed+=e.accountedBytes;
+      bytes_=e.accountedBytes<=bytes_?bytes_-e.accountedBytes:0;
+      entries_.erase(it);
+      ++evictions_;
+    }
+  }
   PreparedDraw scratch_{};
   std::vector<uint8_t> packed_{};
 };

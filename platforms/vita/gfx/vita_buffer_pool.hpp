@@ -16,6 +16,9 @@ public:
   // storage only for buffers created as dynamic; other backends return null.
   void* writable(Handle h,size_t bytes,size_t offset=0) noexcept;
   void destroy(Handle h) noexcept;void clear() noexcept;
+  // Destroy storage whose last GPU use is known to be retired (the caller
+  // waited more frames than the display queue can hold). Never synchronizes.
+  void destroy_retired(Handle h) noexcept;
   // Complete submitted reads before the streaming allocator reuses storage.
   void wait_idle() noexcept;
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)

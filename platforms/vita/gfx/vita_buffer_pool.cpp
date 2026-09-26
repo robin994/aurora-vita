@@ -39,6 +39,7 @@ bool BufferPool::update(Handle h,const void* data,size_t bytes,size_t offset) no
 #endif
   return true;}
 void* BufferPool::writable(Handle,size_t,size_t) noexcept {return nullptr;}
+void BufferPool::destroy_retired(Handle h) noexcept {destroy(h);}
 void BufferPool::destroy(Handle h) noexcept {auto it=map_.find(h);if(it==map_.end())return;
 #if defined(__vita__)
   GLuint id=it->second.id;glDeleteBuffers(1,&id);

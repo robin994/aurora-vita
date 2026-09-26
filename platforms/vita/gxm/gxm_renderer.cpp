@@ -1507,11 +1507,12 @@ bool Renderer::update_texture(Handle handle,const TextureDesc& desc,bool storage
   return true;
 }
 
-void Renderer::destroy_buffer(Handle handle) {
+void Renderer::destroy_buffer(Handle handle,bool storageRetired) {
   auto& d=*impl_;
   auto it=d.buffers.find(handle);
   if(it==d.buffers.end()) return;
-  if(it->second.inFlight && !finish()) return;
+  if(it->second.inFlight && !storageRetired && !finish()) return;
+  if(d.boundVertexBuffer==handle){d.vertexStreamValid=false;d.boundVertexBuffer=0;}
   d.resourceBytes-=it->second.memory.size();
   d.buffers.erase(it);
 }

@@ -28,6 +28,7 @@ gfx::MemoryBudgetSnapshot DrawSink::memory_budget() const noexcept {
     result.staticGeometryBytes=staticGeometry_->bytes();result.staticGeometryEntries=staticGeometry_->size();
     result.staticGeometryHits=staticGeometry_->hits();result.staticGeometryMisses=staticGeometry_->misses();
     result.staticGeometryLookupFallbacks=staticGeometry_->lookup_fallbacks();
+    result.staticGeometryEvictions=staticGeometry_->evictions();
   }
   return result;
 }
@@ -157,6 +158,7 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
   resolvedTextureBindingsValid_=false;
 #endif
   { gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StreamWait); arena_->begin_frame(frame); }
+  if (staticGeometry_) staticGeometry_->begin_frame(frame);
   if (trace_) trace_->begin_frame(frame);
 }
 

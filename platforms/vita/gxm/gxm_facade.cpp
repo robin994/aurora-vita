@@ -46,6 +46,9 @@ void* BufferPool::writable(Handle h,size_t bytes,size_t offset) noexcept {
   return native_->writable_buffer(h,bytes,offset);
 }
 void BufferPool::wait_idle() noexcept { if(native_) native_->finish(); }
+void BufferPool::destroy_retired(Handle h) noexcept {
+  if(map_.erase(h) && native_) native_->destroy_buffer(h,true);
+}
 void BufferPool::destroy(Handle h) noexcept {
   if(map_.erase(h) && native_) native_->destroy_buffer(h);
 }

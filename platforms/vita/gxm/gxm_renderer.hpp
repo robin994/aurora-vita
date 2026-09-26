@@ -58,7 +58,9 @@ public:
   // observed the configured frames-in-flight retirement interval.
   bool update_buffer(gfx::Handle handle, const void* data, size_t bytes, size_t offset=0,
                      bool storageRetired=false);
-  void destroy_buffer(gfx::Handle handle);
+  // storageRetired: the caller guarantees the GPU finished every use (for
+  // example after more frames than the display queue holds); no finish().
+  void destroy_buffer(gfx::Handle handle, bool storageRetired=false);
   gfx::Handle create_texture(const gfx::TextureDesc& desc);
   // Update a texture whose storage/layout is unchanged. `storageRetired` is
   // used by the facade's small volatile-texture ring after enough display

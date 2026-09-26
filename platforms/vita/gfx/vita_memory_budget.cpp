@@ -29,7 +29,8 @@ std::string MemoryBudgetSnapshot::format() const {
   out << " static_geometry=" << staticGeometryBytes << " static_geometry_entries=" << staticGeometryEntries
       << " static_geometry_hit=" << staticGeometryHits
       << " static_geometry_miss=" << staticGeometryMisses
-      << " static_geometry_lookup_fallback=" << staticGeometryLookupFallbacks;
+      << " static_geometry_lookup_fallback=" << staticGeometryLookupFallbacks
+      << " static_geometry_evictions=" << staticGeometryEvictions;
   return out.str();
 }
 
