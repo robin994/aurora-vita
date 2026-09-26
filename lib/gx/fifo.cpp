@@ -1,6 +1,9 @@
 #include "fifo.hpp"
 #include "fifo.hpp"
 #include "command_processor.hpp"
+#if defined(MKW_TARGET_VITA)
+#include "../../platforms/vita/gfx/vita_telemetry.hpp"
+#endif
 #include "../internal.hpp"
 
 #include <chrono>
@@ -330,6 +333,22 @@ void write_stable_data_from(const void* bytes, const void* stableSource, uint32_
     return;
   }
   if (bytes == nullptr || stableSource == nullptr || length == 0) return;
+#if defined(MKW_TARGET_VITA)
+  const bool profile = aurora::vita::gfx::g_fifoProfileEnabled;
+  const uint64_t profileStart = profile ? aurora::vita::gfx::telemetry_now_us() : 0;
+  struct ProfileScope {
+    bool on; uint64_t start; const void* src; uint32_t len;
+    ~ProfileScope() {
+      if (!on) return;
+      auto& p = aurora::vita::gfx::fifo_profile_accumulator();
+      p.dlBytes += len; ++p.dlCalls;
+      p.dlCopyUs += aurora::vita::gfx::telemetry_now_us() - start;
+      // CDRAM user mappings live in the 0x6xxxxxxx range on Vita.
+      const uintptr_t a = reinterpret_cast<uintptr_t>(src);
+      if (a >= 0x60000000u && a < 0x70000000u) p.dlCdramBytes += len;
+    }
+  } profileScope{profile, profileStart, bytes, length};
+#endif
 
   // Keep batches bounded so producer/consumer overlap stays responsive while
   // avoiding the previous one-job-per-display-list serialization.

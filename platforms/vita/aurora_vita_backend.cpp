@@ -130,7 +130,7 @@ void emit_periodic_diagnostics() noexcept {
   const auto frameLine = g_telemetry.format_frame();
   const auto memLine = g_drawSink->memory_budget().format();
   const auto& rs=g_renderer->stats();
-  char rendererLine[1536];
+  char rendererLine[2048];
   std::snprintf(rendererLine,sizeof(rendererLine),
       "[AURORA-VITA][RENDERER] frame=%llu display=%ux%u internal=%ux%u scenes=%u sampled=%u "
       "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu display_queue_us=%llu "
@@ -141,7 +141,8 @@ void emit_periodic_diagnostics() noexcept {
       "scissor_free_draws=%u fifo_us=%llu fifo_bytes=%llu "
       "fifo_bp_us=%llu fifo_bp=%u fifo_cp_us=%llu fifo_cp=%u fifo_xf_us=%llu fifo_xf=%u "
       "fifo_indx_us=%llu fifo_indx=%u fifo_calldl_us=%llu fifo_calldl=%u "
-      "fifo_draw_us=%llu fifo_draw=%u fifo_aurora_us=%llu fifo_aurora=%u fifo_other_us=%llu fifo_other=%u",
+      "fifo_draw_us=%llu fifo_draw=%u fifo_aurora_us=%llu fifo_aurora=%u fifo_other_us=%llu fifo_other=%u "
+      "dl_calls=%u dl_bytes=%llu dl_cdram_bytes=%llu dl_copy_us=%llu",
       static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
       g_config.render_width?g_config.render_width:g_config.width,
@@ -169,7 +170,10 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(g_lastFifoProfile.us[4]),g_lastFifoProfile.count[4],
       static_cast<unsigned long long>(g_lastFifoProfile.us[5]),g_lastFifoProfile.count[5],
       static_cast<unsigned long long>(g_lastFifoProfile.us[6]),g_lastFifoProfile.count[6],
-      static_cast<unsigned long long>(g_lastFifoProfile.us[7]),g_lastFifoProfile.count[7]);
+      static_cast<unsigned long long>(g_lastFifoProfile.us[7]),g_lastFifoProfile.count[7],
+      g_lastFifoProfile.dlCalls,static_cast<unsigned long long>(g_lastFifoProfile.dlBytes),
+      static_cast<unsigned long long>(g_lastFifoProfile.dlCdramBytes),
+      static_cast<unsigned long long>(g_lastFifoProfile.dlCopyUs));
   const std::string invalidationLine="[AURORA-VITA][INVALIDATE] frame="+std::to_string(g_telemetry.frame().frame)+g_lastInvalidations;
   if(writeConsole)
     AURORA_VITA_LOG_INFO("%s\n%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str(),invalidationLine.c_str());
