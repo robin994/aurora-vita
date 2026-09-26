@@ -167,6 +167,28 @@ TEST(VitaFixedVertex, CacheReusesRawGeometryAcrossCameraChanges) {
   ASSERT_NE(second,nullptr);EXPECT_EQ(second->vertices.buffer,buffer);EXPECT_EQ(cache.hits(),1u);
 }
 
+TEST(VitaFixedVertex, StableCacheInvalidatesAfterTrackedSourceWrite) {
+  IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache cache(renderer,1024*1024);
+  note_memory_write(f.raw.data(),f.raw.size());
+  note_memory_write(f.positions.data(),sizeof(f.positions));
+  auto* first=cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                        f.layout,f.pipeline,f.state,nullptr,f.raw.data());
+  ASSERT_NE(first,nullptr);
+  const auto buffer=first->vertices.buffer;
+  auto* second=cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                         f.layout,f.pipeline,f.state,nullptr,f.raw.data());
+  ASSERT_NE(second,nullptr);
+  EXPECT_EQ(second->vertices.buffer,buffer);
+  EXPECT_EQ(cache.hits(),1u);
+
+  f.positions[4]+=1.f;
+  note_memory_write(f.positions.data(),sizeof(f.positions));
+  EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr,f.raw.data()),nullptr);
+  EXPECT_EQ(cache.hits(),1u);
+}
+
 TEST(VitaFixedVertex, PersistentCacheAcceptsExplicitTriangleIndices) {
   IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
   StaticGeometryCache cache(renderer,1024*1024);

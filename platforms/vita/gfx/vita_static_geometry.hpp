@@ -35,6 +35,7 @@ public:
     const uint8_t* stableSource=nullptr;
     size_t stableSourceBytes=0;
     uint64_t stableSourceRevision=0;
+    uint64_t validationEpoch=0;
     bool volatileSource=false;
   };
 
@@ -79,19 +80,37 @@ public:
          (sourceIndexCount&&!byte_spans_equal(sourceIndices,e.sourceIndices.data(),
                                               size_t(sourceIndexCount)*sizeof(uint16_t))))return nullptr;
       if(stableSource) {
-        if(e.stableSource!=stableSource||e.stableSourceBytes!=bytes||
-           memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
+        if(e.stableSource!=stableSource||e.stableSourceBytes!=bytes) {
           e.volatileSource=true;
           return nullptr;
         }
-      } else if(e.raw.size()!=bytes||!byte_spans_equal(raw,e.raw.data(),bytes)) return nullptr;
-      for(const auto& s:e.snapshots) {
-        const bool changed=s.revisionTracked?
-          memory_range_revision(s.source,s.size)!=s.revision:
-          !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
-        if(changed) {
-          e.volatileSource=true;
-          return nullptr;
+        const uint64_t epoch=memory_write_epoch();
+        if(epoch!=e.validationEpoch) {
+          if(memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
+            e.volatileSource=true;
+            return nullptr;
+          }
+          for(const auto& s:e.snapshots) {
+            const bool changed=s.revisionTracked?
+              memory_range_revision(s.source,s.size)!=s.revision:
+              !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
+            if(changed) {
+              e.volatileSource=true;
+              return nullptr;
+            }
+          }
+          e.validationEpoch=epoch;
+        }
+      } else {
+        if(e.raw.size()!=bytes||!byte_spans_equal(raw,e.raw.data(),bytes))return nullptr;
+        for(const auto& s:e.snapshots) {
+          const bool changed=s.revisionTracked?
+            memory_range_revision(s.source,s.size)!=s.revision:
+            !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
+          if(changed) {
+            e.volatileSource=true;
+            return nullptr;
+          }
         }
       }
       ++hits_;
@@ -102,8 +121,13 @@ public:
     auto entry=std::make_unique<Entry>();
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
     entry->stableSource=stableSource;entry->stableSourceBytes=stableSource?bytes:0;
+    const uint64_t validationEpochBefore=stableSource?memory_write_epoch():0;
     entry->stableSourceRevision=stableSource?memory_range_revision(stableSource,bytes):0;
     if(!snapshot_sources(raw,bytes,count,layout,used,entry->snapshots,stableSource!=nullptr))return nullptr;
+    if(stableSource) {
+      const uint64_t validationEpochAfter=memory_write_epoch();
+      entry->validationEpoch=validationEpochBefore==validationEpochAfter?validationEpochAfter:0;
+    }
     size_t storedBytes=stableSource?0:bytes;
     for(const auto& s:entry->snapshots)storedBytes+=s.revisionTracked?0:s.bytes.size();
     if(sourceIndexCount){

@@ -1,6 +1,7 @@
 #include "vita_memory_revision.hpp"
 #include "vita_hash_map.hpp"
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 
 namespace aurora::vita::gfx {
@@ -8,7 +9,7 @@ namespace {
 constexpr uintptr_t PageBytes=64u*1024u;
 std::mutex g_mutex;
 FlatHashMap<uintptr_t,uint64_t> g_pages;
-uint64_t g_epoch=1;
+std::atomic<uint64_t> g_epoch{1};
 }
 
 void note_memory_write(const void* address,size_t bytes) noexcept {
@@ -18,11 +19,19 @@ void note_memory_write(const void* address,size_t bytes) noexcept {
   const uintptr_t firstPage=start&~(PageBytes-1u);
   const uintptr_t lastPage=last&~(PageBytes-1u);
   std::lock_guard<std::mutex> lock(g_mutex);
-  const uint64_t revision=++g_epoch;
+  const uint64_t revision=g_epoch.load(std::memory_order_relaxed)+1u;
   for(uintptr_t page=firstPage;;page+=PageBytes) {
     g_pages[page]=revision;
     if(page==lastPage||page>UINTPTR_MAX-PageBytes)break;
   }
+  // Publish the epoch only after every affected page carries the new revision.
+  // Stable-geometry cache hits can then avoid taking g_mutex entirely while no
+  // GX-visible memory has changed since their previous validation.
+  g_epoch.store(revision,std::memory_order_release);
+}
+
+uint64_t memory_write_epoch() noexcept {
+  return g_epoch.load(std::memory_order_acquire);
 }
 
 uint64_t memory_range_revision(const void* address,size_t bytes) noexcept {

@@ -9,6 +9,7 @@ namespace aurora::vita::gfx {
 // arrays, so static geometry can use the resulting revision as a cheap validity
 // proof instead of hashing and comparing every byte every frame.
 void note_memory_write(const void* address,size_t bytes) noexcept;
+uint64_t memory_write_epoch() noexcept;
 uint64_t memory_range_revision(const void* address,size_t bytes) noexcept;
 
 } // namespace aurora::vita::gfx
