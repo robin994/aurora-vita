@@ -3,6 +3,8 @@
 #include "command_processor.hpp"
 #if defined(MKW_TARGET_VITA)
 #include "../../platforms/vita/gfx/vita_telemetry.hpp"
+#include "../../platforms/vita/gfx/vita_memory_revision.hpp"
+#include "../../platforms/vita/gfx/vita_hash_map.hpp"
 #endif
 #include "../internal.hpp"
 
@@ -364,7 +366,57 @@ void write_stable_data_from(const void* bytes, const void* stableSource, uint32_
   write_data(bytes, length);
 }
 
+#if defined(MKW_TARGET_VITA)
+namespace {
+// Strikers keeps its permanent display lists in CDRAM, which the CPU reads
+// uncached: re-reading ~800 KiB of them every frame dominated the GX frontend.
+// Keep a cached-RAM shadow per list and reuse it while the guest has not
+// written the list again. Guest writes are observed through DCFlush/DCStore
+// (note_memory_write), the same contract the static geometry cache relies on.
+struct DisplayListShadow {
+  std::vector<uint8_t> bytes;
+  uint64_t revision = 0;
+};
+constexpr size_t DisplayListShadowBudget = 8u * 1024u * 1024u;
+aurora::vita::gfx::FlatHashMap<uintptr_t, DisplayListShadow> sDisplayListShadows;
+size_t sDisplayListShadowBytes = 0;
+
+const uint8_t* display_list_shadow(const void* data, uint32_t length) {
+  const uintptr_t address = reinterpret_cast<uintptr_t>(data);
+  // Only CDRAM (uncached CPU mapping) benefits; cached RAM is read directly.
+  if (address < 0x60000000u || address >= 0x70000000u) return nullptr;
+  const uint64_t revision = aurora::vita::gfx::memory_range_revision(data, length);
+  auto it = sDisplayListShadows.find(address);
+  if (it != sDisplayListShadows.end()) {
+    auto& shadow = it->second;
+    if (shadow.bytes.size() == length && shadow.revision == revision) return shadow.bytes.data();
+    sDisplayListShadowBytes -= shadow.bytes.size();
+    sDisplayListShadows.erase(it);
+  }
+  if (length > DisplayListShadowBudget) return nullptr;
+  if (sDisplayListShadowBytes + length > DisplayListShadowBudget) {
+    sDisplayListShadows.clear();
+    sDisplayListShadowBytes = 0;
+  }
+  auto& shadow = sDisplayListShadows[address];
+  shadow.bytes.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + length);
+  shadow.revision = revision;
+  sDisplayListShadowBytes += length;
+  return shadow.bytes.data();
+}
+} // namespace
+#endif
+
 void write_stable_data(const void* data, uint32_t length) {
+#if defined(MKW_TARGET_VITA)
+  // The span keeps the guest address as its stable source identity.
+  if (!detail::sInDisplayList && data != nullptr && length != 0) {
+    if (const uint8_t* shadow = display_list_shadow(data, length)) {
+      write_stable_data_from(shadow, data, length);
+      return;
+    }
+  }
+#endif
   write_stable_data_from(data, data, length);
 }
 
@@ -391,6 +443,12 @@ uint32_t end_display_list() {
   while (detail::sDlWritePos < padded && detail::sDlWritePos < detail::sDlSize) {
     detail::sDlBuffer[detail::sDlWritePos++] = 0;
   }
+#if defined(MKW_TARGET_VITA)
+  // Recorded lists are written here, not through DCFlush: publish the write so
+  // cached shadows (and stable-geometry revisions) of this buffer are dropped.
+  if (detail::sDlBuffer != nullptr && detail::sDlWritePos != 0)
+    aurora::vita::gfx::note_memory_write(detail::sDlBuffer, detail::sDlWritePos);
+#endif
   detail::sDlBuffer = nullptr;
   detail::sDlSize = 0;
   detail::sDlWritePos = 0;
