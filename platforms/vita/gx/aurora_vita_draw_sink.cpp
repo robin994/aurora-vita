@@ -499,8 +499,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (telemetry_) telemetry_->count_pipeline_translation();
     {
       gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StatePipeline);
-      translatedPipeline_ = translate_current_pipeline(primitive, fmt);
-      translatedLayout_ = translate_current_vertex_layout(fmt);
+      translate_current_pipeline_and_layout(primitive, fmt, translatedPipeline_, translatedLayout_);
     }
     {
       gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateKey);

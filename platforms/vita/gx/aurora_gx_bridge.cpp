@@ -193,6 +193,22 @@ gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noe
   return out;
 }
 
+void translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
+                                           gfx::VertexDecodeLayout& layout) noexcept {
+  const auto& g=aurora::gx::g_gxState;
+  aurora::gx::PipelineConfig pc{};
+  pc.shaderConfig=build_current_shader_config(static_cast<GXVtxFmt>(fmt),translate_line_mode(primitive));
+  pc.depthFunc=g.depthFunc;pc.cullMode=g.cullMode;pc.blendMode=g.blendMode;
+  pc.blendFacSrc=g.blendFacSrc;pc.blendFacDst=g.blendFacDst;pc.blendOp=g.blendOp;
+  pc.dstAlpha=g.dstAlpha;pc.depthCompare=g.depthCompare;pc.depthUpdate=g.depthUpdate;
+  pc.colorUpdate=g.colorUpdate;pc.alphaUpdate=g.alphaUpdate;
+  pipeline=translate_pipeline(pc);
+  for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)
+    pipeline.colorChannels[ch].lightMask=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
+  // The vertex layout does not depend on the line mode used for the pipeline.
+  layout=translate_vertex_layout(pc.shaderConfig);
+}
+
 gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept {
   const auto sc = build_current_shader_config(static_cast<GXVtxFmt>(fmt), 0);
   return translate_vertex_layout(sc);
