@@ -85,7 +85,7 @@ public:
   void shutdown() noexcept;
   void begin_frame(uint64_t frame) noexcept;
   void flush() noexcept;
-  void reset_commands() noexcept { stream_.reset(); fixedVertexUniforms_.clear(); reset_pipeline_run_cache(); }
+  void reset_commands() noexcept { stream_.reset(); fixedVertexUniforms_.clear(); lastFixedUniforms_ = nullptr; reset_pipeline_run_cache(); }
   void invalidate_texture_resolve_cache() noexcept {
 #if defined(AURORA_VITA_UPSTREAM)
     resolvedTextureBindingsValid_ = false;
@@ -127,6 +127,10 @@ private:
   gfx::PreparedDraw preparedScratch_{};
   std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
   std::deque<gfx::FixedVertexUniforms> fixedVertexUniforms_{};
+  // Snapshot reuse across consecutive GPU-geometry draws (see submit()).
+  gfx::FixedVertexUniforms* lastFixedUniforms_ = nullptr;
+  uint64_t vertexStateVersion_ = 0, lastFixedVertexVersion_ = 0, lastFixedPipelineKey_ = 0;
+  uint64_t fixedUniformRevision_ = 0;
   gfx::PipelineDesc translatedGpuPipeline_{};
   gfx::FlatHashMap<uint64_t,uint64_t> fixedPipelineKeys_{};
   gfx::VertexTransformState translatedVertexState_{};

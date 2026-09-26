@@ -118,7 +118,7 @@ void DrawSink::shutdown() noexcept {
   if (!initialized_ && !arena_) return;
   stream_.reset();
   preparedScratch_=gfx::PreparedDraw{};
-  fixedVertexUniforms_.clear();staticGeometry_.reset();fixedPipelineKeys_.clear();
+  fixedVertexUniforms_.clear();lastFixedUniforms_=nullptr;staticGeometry_.reset();fixedPipelineKeys_.clear();
   translatedVertexStateValid_=false;
   translatedVertexStateLightweight_=false;
 #if defined(AURORA_VITA_UPSTREAM)
@@ -153,7 +153,7 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
   if (!initialized_ || !arena_) return;
   stream_.reset();
   frameDrawIndex_ = 0;
-  fixedVertexUniforms_.clear();
+  fixedVertexUniforms_.clear();lastFixedUniforms_=nullptr;
   reset_pipeline_run_cache();
 #if defined(AURORA_VITA_UPSTREAM)
   resolvedTextureBindingsValid_=false;
@@ -171,7 +171,7 @@ void DrawSink::flush() noexcept {
     if (telemetry_) telemetry_->arena_overflow();
     if (strictUnsupported_) strictFailed_ = true;
     stream_.reset();
-    fixedVertexUniforms_.clear();
+    fixedVertexUniforms_.clear();lastFixedUniforms_=nullptr;
     reset_pipeline_run_cache();
     return;
   }
@@ -186,7 +186,7 @@ void DrawSink::flush() noexcept {
   }
   if(arena_->vertex_used()||arena_->index_used())arena_->mark_current_submitted();
   stream_.reset();
-  fixedVertexUniforms_.clear();
+  fixedVertexUniforms_.clear();lastFixedUniforms_=nullptr;
   reset_pipeline_run_cache();
 }
 
@@ -746,6 +746,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateVertex);
     if (telemetry_) telemetry_->count_vertex_translation();
+    ++vertexStateVersion_;
     if(fixedCandidate) {
       translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_);
       translatedVertexStateLightweight_=true;
@@ -818,6 +819,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
     translatedVertexStateLightweight_=false;
+    ++vertexStateVersion_;
   }
   const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
   const auto& streamedPipeline=pipeline;
@@ -990,9 +992,19 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   bool enqueued=false;
   if(gpuGeometry){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
-    fixedVertexUniforms_.push_back(gfx::fixed_vertex_uniforms(translatedGpuPipeline_,vertexState));
-    auto& fixed=fixedVertexUniforms_.back();
-    if(translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite){
+    // Consecutive draws with the same vertex state and GPU pipeline share one
+    // immutable snapshot; the renderer recognises it by revision.
+    const bool spriteExpand=translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite;
+    const bool reuseFixed=!spriteExpand&&lastFixedUniforms_&&lastFixedVertexVersion_==vertexStateVersion_&&
+                          lastFixedPipelineKey_==resolvedPipelineKey;
+    gfx::FixedVertexUniforms& fixed=reuseFixed?*lastFixedUniforms_:fixedVertexUniforms_.emplace_back();
+    if(!reuseFixed){
+      gfx::fixed_vertex_uniforms_into(fixed,translatedGpuPipeline_,vertexState);
+      fixed.revision=++fixedUniformRevision_;
+      lastFixedUniforms_=spriteExpand?nullptr:&fixed;
+      lastFixedVertexVersion_=vertexStateVersion_;lastFixedPipelineKey_=resolvedPipelineKey;
+    }
+    if(spriteExpand){
       fixed.primitiveExpand={{
         std::max(expansion.viewportWidth,1.f),std::max(expansion.viewportHeight,1.f),
         translatedGpuPipeline_.fixedPointSprite?expansion.pointSizePixels:expansion.lineWidthPixels,

@@ -129,9 +129,9 @@ inline VertexLayout effective_gpu_vertex_layout(const PipelineDesc& pipeline) no
       gpu_vertex_layout(pipeline_texcoord_mask(pipeline),pipeline_raster_color_mask(pipeline));
 }
 
-inline FixedVertexUniforms fixed_vertex_uniforms(const PipelineDesc& pipeline,
-                                                const VertexTransformState& state) noexcept {
-  FixedVertexUniforms result{};
+inline void fixed_vertex_uniforms_into(FixedVertexUniforms& result,const PipelineDesc& pipeline,
+                                       const VertexTransformState& state) noexcept {
+  result=FixedVertexUniforms{};
   if(state.currentPnMatrix<state.postexMatrices.size())result.position=state.postexMatrices[state.currentPnMatrix].v;
   if(!state.normalMatrices.empty())result.normal=state.normalMatrices[std::min<unsigned>(state.currentPnMatrix,state.normalMatrices.size()-1)].v;
   if(pipeline.fixedVertexIndexedPn||pipeline.fixedVertexTexMtxMask)for(unsigned i=0;i<10;++i){
@@ -168,6 +168,11 @@ inline FixedVertexUniforms fixed_vertex_uniforms(const PipelineDesc& pipeline,
     if(t.postMatrix>=0&&static_cast<unsigned>(t.postMatrix)<state.postMatrices.size())
       result.post[i]=state.postMatrices[static_cast<unsigned>(t.postMatrix)].v;
   }
+}
+inline FixedVertexUniforms fixed_vertex_uniforms(const PipelineDesc& pipeline,
+                                                const VertexTransformState& state) noexcept {
+  FixedVertexUniforms result;
+  fixed_vertex_uniforms_into(result,pipeline,state);
   return result;
 }
 

@@ -334,6 +334,7 @@ struct Renderer::Impl {
   struct VertexUniformState {
     std::array<float,16> mvp{};
     FixedVertexUniforms fixed{};
+    uint64_t fixedRevision = 0;
     uint64_t pipelineKey = 0;
     bool fixedValid = false;
     bool valid = false;
@@ -1127,8 +1128,11 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   const bool needsVertexUniforms=p.mvp || (pipeline.fixedVertexOnGpu && fixedVertex);
   const auto& cachedVertex=d.vertexUniformState;
   const bool sameMvp=!p.mvp||std::memcmp(cachedVertex.mvp.data(),u.mvp.data(),sizeof(u.mvp))==0;
+  // Revisioned snapshots are immutable: equal revision means equal contents.
   const bool sameFixed=!pipeline.fixedVertexOnGpu||
-      (fixedVertex&&cachedVertex.fixedValid&&std::memcmp(&cachedVertex.fixed,fixedVertex,sizeof(*fixedVertex))==0);
+      (fixedVertex&&cachedVertex.fixedValid&&
+       (fixedVertex->revision?fixedVertex->revision==cachedVertex.fixedRevision:
+        std::memcmp(&cachedVertex.fixed,fixedVertex,sizeof(*fixedVertex))==0));
   const bool reuseVertex=needsVertexUniforms&&cachedVertex.valid&&cachedVertex.pipelineKey==key&&sameMvp&&sameFixed;
   if(needsVertexUniforms&&!reuseVertex &&
      !d.check(sceGxmReserveVertexDefaultUniformBuffer(d.context,&vertex),"reserve vertex uniforms")) return false;
@@ -1165,7 +1169,8 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     else {
       auto& next=d.vertexUniformState;
       next.mvp=u.mvp;next.pipelineKey=key;next.fixedValid=fixedVertex!=nullptr;
-      if(fixedVertex)next.fixed=*fixedVertex;
+      next.fixedRevision=fixedVertex?fixedVertex->revision:0;
+      if(fixedVertex&&!fixedVertex->revision)next.fixed=*fixedVertex;
       next.valid=true;
     }
   }

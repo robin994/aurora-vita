@@ -444,6 +444,9 @@ struct FixedVertexUniforms {
   std::array<std::array<float,4>,MaxLights*5> light{};
   // viewport width, viewport height, point/line size in pixels, texcoord offset.
   std::array<float,4> primitiveExpand{{960.f,544.f,1.f,0.f}};
+  // Non-zero identity of an immutable snapshot: equal revisions mean equal
+  // contents, so consumers can skip comparing/copying the 3 KiB payload.
+  uint64_t revision=0;
 };
 struct DrawUniforms {
   std::array<float, 16> mvp{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
