@@ -202,11 +202,13 @@ struct TranslationInputs {
   aurora::gx::PipelineConfig pc{};
   std::array<uint8_t,4> lightMasks{};
 };
+// Only the PipelineDesc and its key are memoized. The vertex decode layout
+// also depends on the live indexed-array bases/sizes (g_gxState.arrays), which
+// are not part of these inputs, so it is always rebuilt.
 struct TranslationMemoEntry {
   bool valid=false;
   TranslationInputs inputs{};
   gfx::PipelineDesc pipeline{};
-  gfx::VertexDecodeLayout layout{};
   uint64_t key=0;
 };
 constexpr size_t TranslationMemoSize=32;
@@ -240,18 +242,18 @@ bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::
   static std::unique_ptr<TranslationMemoEntry[]> memo(new (std::nothrow) TranslationMemoEntry[TranslationMemoSize]);
   const uint64_t h=hash_translation_inputs(in);
   TranslationMemoEntry* slot=memo?&memo[h%TranslationMemoSize]:nullptr;
+  // The vertex layout does not depend on the line mode used for the pipeline.
+  layout=translate_vertex_layout(pc.shaderConfig);
   if(slot&&slot->valid&&std::memcmp(&slot->inputs,&in,sizeof(in))==0){
-    pipeline=slot->pipeline;layout=slot->layout;key=slot->key;
+    pipeline=slot->pipeline;key=slot->key;
     return true;
   }
   pipeline=translate_pipeline(pc);
   for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)pipeline.colorChannels[ch].lightMask=in.lightMasks[ch];
-  // The vertex layout does not depend on the line mode used for the pipeline.
-  layout=translate_vertex_layout(pc.shaderConfig);
   key=gfx::pipeline_key(pipeline);
   if(slot){
     std::memcpy(static_cast<void*>(&slot->inputs),&in,sizeof(in));
-    slot->pipeline=pipeline;slot->layout=layout;slot->key=key;slot->valid=true;
+    slot->pipeline=pipeline;slot->key=key;slot->valid=true;
   }
   return false;
 }
