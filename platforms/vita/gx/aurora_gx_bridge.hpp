@@ -36,9 +36,8 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
 gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noexcept;
 gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept;
 // Both results from one snapshot of the GX state (one ShaderConfig build),
-// plus pipeline_key(pipeline). Identical GX inputs (compared byte for byte)
-// are served from a small memo without re-translating or re-hashing.
-// Returns true on a memo hit.
+// plus pipeline_key(pipeline). Returns true when served from a cache (never,
+// currently: an exact memo cost more than it saved on hardware).
 bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
                                            gfx::VertexDecodeLayout& layout, uint64_t& key,
                                            gfx::Telemetry* telemetry = nullptr) noexcept;

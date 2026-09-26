@@ -197,74 +197,30 @@ gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noe
   return out;
 }
 
-namespace {
-struct TranslationInputs {
-  aurora::gx::PipelineConfig pc{};
-  std::array<uint8_t,4> lightMasks{};
-};
-// Only the PipelineDesc and its key are memoized. The vertex decode layout
-// also depends on the live indexed-array bases/sizes (g_gxState.arrays), which
-// are not part of these inputs, so it is always rebuilt.
-struct TranslationMemoEntry {
-  bool valid=false;
-  TranslationInputs inputs{};
-  gfx::PipelineDesc pipeline{};
-  uint64_t key=0;
-};
-constexpr size_t TranslationMemoSize=32;
-uint32_t hash_translation_inputs(const TranslationInputs& in) noexcept {
-  // 32-bit multiply/rotate per word: a single-cycle multiply on Cortex-A9,
-  // unlike 64-bit FNV. Only selects the slot; a hit is confirmed by memcmp.
-  static_assert(sizeof(TranslationInputs)%4==0);
-  const auto* p=reinterpret_cast<const uint8_t*>(&in);
-  uint32_t h=0x811c9dc5u;
-  for(size_t i=0;i<sizeof(in);i+=4){
-    uint32_t w;std::memcpy(&w,p+i,4);
-    h=((h<<5)|(h>>27))^w;h*=0x9e3779b1u;
-  }
-  return h^(h>>16);
-}
-} // namespace
-
 bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
                                            gfx::VertexDecodeLayout& layout, uint64_t& key,
                                            gfx::Telemetry* telemetry) noexcept {
+  // A byte-exact memo of these inputs was measured on hardware to cost more
+  // (~21 us per lookup for ~2.5 KiB of hash/compare/copy) than it saved, so
+  // translate directly from one ShaderConfig snapshot.
   const auto& g=aurora::gx::g_gxState;
-  // Zero-filled so padding compares equal for identical field values; a
-  // non-deterministic padding byte could only cause a memo miss, never a hit.
-  static TranslationInputs in;
-  std::memset(static_cast<void*>(&in),0,sizeof(in));
-  auto& pc=in.pc;
+  aurora::gx::PipelineConfig pc{};
   pc.shaderConfig=build_current_shader_config(static_cast<GXVtxFmt>(fmt),translate_line_mode(primitive));
   pc.depthFunc=g.depthFunc;pc.cullMode=g.cullMode;pc.blendMode=g.blendMode;
   pc.blendFacSrc=g.blendFacSrc;pc.blendFacDst=g.blendFacDst;pc.blendOp=g.blendOp;
   pc.dstAlpha=g.dstAlpha;pc.depthCompare=g.depthCompare;pc.depthUpdate=g.depthUpdate;
   pc.colorUpdate=g.colorUpdate;pc.alphaUpdate=g.alphaUpdate;
-  for(unsigned ch=0;ch<in.lightMasks.size();++ch)
-    in.lightMasks[ch]=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
-
-  static std::unique_ptr<TranslationMemoEntry[]> memo(new (std::nothrow) TranslationMemoEntry[TranslationMemoSize]);
-  uint32_t h=0;
-  { gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateMemo); h=hash_translation_inputs(in); }
-  TranslationMemoEntry* slot=memo?&memo[h%TranslationMemoSize]:nullptr;
+  pipeline=translate_pipeline(pc);
+  for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)
+    pipeline.colorChannels[ch].lightMask=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
   {
     // The vertex layout does not depend on the line mode used for the pipeline.
     gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateLayout);
     layout=translate_vertex_layout(pc.shaderConfig);
   }
   {
-    gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateMemo);
-    if(slot&&slot->valid&&std::memcmp(&slot->inputs,&in,sizeof(in))==0){
-      pipeline=slot->pipeline;key=slot->key;
-      return true;
-    }
-  }
-  pipeline=translate_pipeline(pc);
-  for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)pipeline.colorChannels[ch].lightMask=in.lightMasks[ch];
-  key=gfx::pipeline_key(pipeline);
-  if(slot){
-    std::memcpy(static_cast<void*>(&slot->inputs),&in,sizeof(in));
-    slot->pipeline=pipeline;slot->key=key;slot->valid=true;
+    gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateKey);
+    key=gfx::pipeline_key(pipeline);
   }
   return false;
 }
