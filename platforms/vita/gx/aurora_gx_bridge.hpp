@@ -40,7 +40,8 @@ gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept;
 // are served from a small memo without re-translating or re-hashing.
 // Returns true on a memo hit.
 bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
-                                           gfx::VertexDecodeLayout& layout, uint64_t& key) noexcept;
+                                           gfx::VertexDecodeLayout& layout, uint64_t& key,
+                                           gfx::Telemetry* telemetry = nullptr) noexcept;
 gfx::SourcePrimitive translate_source_primitive(uint8_t primitive) noexcept;
 uint8_t translate_line_mode(uint8_t primitive) noexcept;
 void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms,

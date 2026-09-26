@@ -212,19 +212,23 @@ struct TranslationMemoEntry {
   uint64_t key=0;
 };
 constexpr size_t TranslationMemoSize=32;
-uint64_t hash_translation_inputs(const TranslationInputs& in) noexcept {
-  // Word-wise FNV-1a over the snapshot; a hit is still confirmed by memcmp.
+uint32_t hash_translation_inputs(const TranslationInputs& in) noexcept {
+  // 32-bit multiply/rotate per word: a single-cycle multiply on Cortex-A9,
+  // unlike 64-bit FNV. Only selects the slot; a hit is confirmed by memcmp.
+  static_assert(sizeof(TranslationInputs)%4==0);
   const auto* p=reinterpret_cast<const uint8_t*>(&in);
-  uint64_t h=0xcbf29ce484222325ull;
-  size_t i=0;
-  for(;i+4<=sizeof(in);i+=4){uint32_t w;std::memcpy(&w,p+i,4);h=(h^w)*0x100000001b3ull;}
-  for(;i<sizeof(in);++i)h=(h^p[i])*0x100000001b3ull;
-  return h;
+  uint32_t h=0x811c9dc5u;
+  for(size_t i=0;i<sizeof(in);i+=4){
+    uint32_t w;std::memcpy(&w,p+i,4);
+    h=((h<<5)|(h>>27))^w;h*=0x9e3779b1u;
+  }
+  return h^(h>>16);
 }
 } // namespace
 
 bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
-                                           gfx::VertexDecodeLayout& layout, uint64_t& key) noexcept {
+                                           gfx::VertexDecodeLayout& layout, uint64_t& key,
+                                           gfx::Telemetry* telemetry) noexcept {
   const auto& g=aurora::gx::g_gxState;
   // Zero-filled so padding compares equal for identical field values; a
   // non-deterministic padding byte could only cause a memo miss, never a hit.
@@ -240,13 +244,20 @@ bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::
     in.lightMasks[ch]=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
 
   static std::unique_ptr<TranslationMemoEntry[]> memo(new (std::nothrow) TranslationMemoEntry[TranslationMemoSize]);
-  const uint64_t h=hash_translation_inputs(in);
+  uint32_t h=0;
+  { gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateMemo); h=hash_translation_inputs(in); }
   TranslationMemoEntry* slot=memo?&memo[h%TranslationMemoSize]:nullptr;
-  // The vertex layout does not depend on the line mode used for the pipeline.
-  layout=translate_vertex_layout(pc.shaderConfig);
-  if(slot&&slot->valid&&std::memcmp(&slot->inputs,&in,sizeof(in))==0){
-    pipeline=slot->pipeline;key=slot->key;
-    return true;
+  {
+    // The vertex layout does not depend on the line mode used for the pipeline.
+    gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateLayout);
+    layout=translate_vertex_layout(pc.shaderConfig);
+  }
+  {
+    gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateMemo);
+    if(slot&&slot->valid&&std::memcmp(&slot->inputs,&in,sizeof(in))==0){
+      pipeline=slot->pipeline;key=slot->key;
+      return true;
+    }
   }
   pipeline=translate_pipeline(pc);
   for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)pipeline.colorChannels[ch].lightMask=in.lightMasks[ch];

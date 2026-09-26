@@ -500,7 +500,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     {
       gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StatePipeline);
       const bool memoHit=translate_current_pipeline_and_layout(primitive, fmt, translatedPipeline_,
-                                                               translatedLayout_, translatedBaseKey_);
+                                                               translatedLayout_, translatedBaseKey_, telemetry_);
       if (telemetry_ && memoHit) telemetry_->count_translation_memo_hit();
     }
     translatedPipelineKey_ = translatedBaseKey_;

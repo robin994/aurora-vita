@@ -37,6 +37,8 @@ const char* telemetry_phase_name(TelemetryPhase phase) noexcept {
     case TelemetryPhase::StatePipeline: return "state_pipeline";
     case TelemetryPhase::StateKey: return "state_key";
     case TelemetryPhase::StateVertex: return "state_vertex";
+    case TelemetryPhase::StateMemo: return "state_memo";
+    case TelemetryPhase::StateLayout: return "state_layout";
     case TelemetryPhase::Count: break;
   }
   return "unknown";

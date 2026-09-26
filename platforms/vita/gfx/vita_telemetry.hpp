@@ -26,6 +26,8 @@ enum class TelemetryPhase : uint8_t {
   StatePipeline,   // GX -> PipelineDesc/vertex layout translation (subset of StateTranslate)
   StateKey,        // pipeline_key hashing during state translation
   StateVertex,     // matrices, lights, projection and uniform translation
+  StateMemo,       // translation memo: snapshot hash, compare and copy (subset of StatePipeline)
+  StateLayout,     // vertex decode layout build (subset of StatePipeline)
   Count,
 };
 
