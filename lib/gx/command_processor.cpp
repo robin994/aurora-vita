@@ -1,8 +1,5 @@
 #include "command_processor.hpp"
 
-#include <cstring>
-#include <type_traits>
-
 #include "../dolphin/gx/__gx.h"
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
@@ -291,23 +288,6 @@ static inline void mark_pipeline_state_dirty_at(unsigned line) noexcept {
   g_gxState.pipelineStateGeneration = next_gx_state_epoch();
 }
 #define mark_pipeline_state_dirty() mark_pipeline_state_dirty_at(__LINE__)
-
-// Byte snapshot of decoded state taken before a register write is applied.
-// Many writes re-store values that decode to the same pipeline fields, or
-// only touch fields outside the translated pipeline; those only need
-// stateDirty (uniforms/matrices), not a pipeline retranslation.
-template <class T>
-struct DecodedSnapshot {
-  alignas(T) unsigned char before[sizeof(T)];
-  const T& live;
-  explicit DecodedSnapshot(const T& v) noexcept : live(v) { std::memcpy(before, &v, sizeof(T)); }
-  bool changed() const noexcept { return std::memcmp(before, &live, sizeof(T)) != 0; }
-};
-#define mark_pipeline_state_dirty_if(cond)                                                                           \
-  do {                                                                                                               \
-    if (cond) mark_pipeline_state_dirty_at(__LINE__);                                                                \
-    else g_gxState.stateDirty = true;                                                                                \
-  } while (0)
 
 // Indexed-array bindings change for almost every mesh. On Vita they only
 // affect the vertex decode layout; elsewhere they stay part of the pipeline.
@@ -752,7 +732,6 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 stage = (regId - 0xC0) / 2;
     if (stage < MaxTevStages) {
       auto& s = g_gxState.tevStages[stage];
-      const DecodedSnapshot<std::remove_reference_t<decltype(s)>> snap(s);
       s.colorPass.d = static_cast<GXTevColorArg>(bp_get(value, 4, 0));
       s.colorPass.c = static_cast<GXTevColorArg>(bp_get(value, 4, 4));
       s.colorPass.b = static_cast<GXTevColorArg>(bp_get(value, 4, 8));
@@ -771,9 +750,7 @@ static void handle_bp(u32 value, bool bigEndian) {
         s.colorOp.bias = static_cast<GXTevBias>(bp_get(value, 2, 16));
         s.colorOp.scale = static_cast<GXTevScale>(bp_get(value, 2, 20));
       }
-      // Stages past numTevStages are not translated; a genMode change that
-      // activates them bumps the generation itself.
-      mark_pipeline_state_dirty_if(stage < g_gxState.numTevStages && snap.changed());
+      mark_pipeline_state_dirty();
     }
     return;
   }
@@ -783,7 +760,6 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 stage = (regId - 0xC1) / 2;
     if (stage < MaxTevStages) {
       auto& s = g_gxState.tevStages[stage];
-      const DecodedSnapshot<std::remove_reference_t<decltype(s)>> snap(s);
       s.tevSwapRas = static_cast<GXTevSwapSel>(bp_get(value, 2, 0));
       s.tevSwapTex = static_cast<GXTevSwapSel>(bp_get(value, 2, 2));
       s.alphaPass.d = static_cast<GXTevAlphaArg>(bp_get(value, 3, 4));
@@ -802,7 +778,7 @@ static void handle_bp(u32 value, bool bigEndian) {
         s.alphaOp.bias = static_cast<GXTevBias>(bp_get(value, 2, 16));
         s.alphaOp.scale = static_cast<GXTevScale>(bp_get(value, 2, 20));
       }
-      mark_pipeline_state_dirty_if(stage < g_gxState.numTevStages && snap.changed());
+      mark_pipeline_state_dirty();
     }
     return;
   }
@@ -962,7 +938,6 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 idx = regId - 0x28;
     u32 stage0 = idx * 2;
     u32 stage1 = idx * 2 + 1;
-    const DecodedSnapshot<decltype(g_gxState.tevStages)> snap(g_gxState.tevStages);
 
     // Channel ID reverse mapping from hardware to GX
     static const GXChannelID r2c[] = {GX_COLOR0A0, GX_COLOR1A1,   GX_COLOR0A0,    GX_COLOR1A1,
@@ -989,7 +964,7 @@ static void handle_bp(u32 value, bool bigEndian) {
       u32 chanHw = bp_get(value, 3, 19);
       s.channelId = (chanHw < 8) ? r2c[chanHw] : GX_COLOR_NULL;
     }
-    mark_pipeline_state_dirty_if(stage0 < g_gxState.numTevStages && snap.changed());
+    mark_pipeline_state_dirty();
     break;
   }
 
@@ -1179,7 +1154,6 @@ static void handle_bp(u32 value, bool bigEndian) {
     const u32 fogFunc = bp_get(value, 3, 21);
     const u32 fogProj = bp_get(value, 1, 20);
     GXFogType fogType = static_cast<GXFogType>(fogFunc | (fogProj << 3));
-    const bool fogTypeChanged = g_gxState.fog.type != fogType;
     g_gxState.fog.type = fogType;
     // Decode C parameter (same partial float encoding as A)
     u32 c_mant = bp_get(value, 11, 0);
@@ -1187,8 +1161,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 c_sign = bp_get(value, 1, 19);
     u32 c_bits = (c_sign << 31) | (c_exp << 23) | (c_mant << 12);
     std::memcpy(&g_gxState.fog.c, &c_bits, sizeof(g_gxState.fog.c));
-    // C is a uniform; only the fog type selects a different pipeline.
-    mark_pipeline_state_dirty_if(fogTypeChanged);
+    mark_pipeline_state_dirty();
     break;
   }
 
@@ -1560,7 +1533,6 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
 
   // Matrix index A (0x30)
   case 0x30: {
-    const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
     g_gxState.currentPnMtx = bp_get(value, 6, 0) / 3;
     for (u32 i = 0; i < 4 && i < MaxTexCoord; i++) {
       auto texMtx = static_cast<GXTexMtx>(bp_get(value, 6, 6 + i * 6));
@@ -1569,14 +1541,12 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     }
     // Same matrix indices as XF 0x18, written from a different bank.
     g_gxState.invalidateXfReg(0x18);
-    // currentPnMtx is vertex state, not pipeline state.
-    mark_pipeline_state_dirty_if(snap.changed());
+    mark_pipeline_state_dirty();
     break;
   }
 
   // Matrix index B (0x40)
   case 0x40: {
-    const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
     for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
       auto texMtx = static_cast<GXTexMtx>(bp_get(value, 6, i * 6));
       assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
@@ -1584,7 +1554,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     }
     // Same matrix indices as XF 0x19, written from a different bank.
     g_gxState.invalidateXfReg(0x19);
-    mark_pipeline_state_dirty_if(snap.changed());
+    mark_pipeline_state_dirty();
     break;
   }
 
@@ -1756,8 +1726,6 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
         u32 chanId = reg - 0x0E;
         if (chanId < MaxColorChannels) {
           auto& chan = g_gxState.colorChannelConfig[chanId];
-          const DecodedSnapshot<std::remove_reference_t<decltype(chan)>> snap(chan);
-          const auto oldLightMask = g_gxState.colorChannelState[chanId].lightMask;
           chan.matSrc = static_cast<GXColorSrc>(bp_get(val, 1, 0));
           chan.lightingEnabled = bp_get(val, 1, 1) != 0;
           u32 lightsLo = bp_get(val, 4, 2);
@@ -1779,7 +1747,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           }
           u32 lightMask = lightsLo | (lightsHi << 4);
           g_gxState.colorChannelState[chanId].lightMask = GX::LightMask{lightMask};
-          mark_pipeline_state_dirty_if(snap.changed() || oldLightMask != g_gxState.colorChannelState[chanId].lightMask);
+          mark_pipeline_state_dirty();
         }
         break;
       }
@@ -1789,23 +1757,21 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
         break;
       case 0x18: {
         // Matrix index A: PnMtx + TexCoord0-3 matrix indices
-        const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
         g_gxState.currentPnMtx = bp_get(val, 6, 0) / 3;
         for (u32 i = 0; i < 4 && i < MaxTexCoord; i++) {
           auto texMtx = static_cast<GXTexMtx>(bp_get(val, 6, 6 + i * 6));
           assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
           g_gxState.tcgs[i].mtx = texMtx;
         }
-        mark_pipeline_state_dirty_if(snap.changed());
+        mark_pipeline_state_dirty();
         break;
       }
       case 0x19: {
         // Matrix index B: TexCoord4-7 matrix indices
-        const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
         for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
           g_gxState.tcgs[i + 4].mtx = static_cast<GXTexMtx>(bp_get(val, 6, i * 6));
         }
-        mark_pipeline_state_dirty_if(snap.changed());
+        mark_pipeline_state_dirty();
         break;
       }
       case 0x1A:
@@ -1848,7 +1814,6 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           u32 tcIdx = reg - 0x40;
           if (tcIdx < MaxTexCoord) {
             auto& tcg = g_gxState.tcgs[tcIdx];
-            const DecodedSnapshot<std::remove_reference_t<decltype(tcg)>> snap(tcg);
             bool proj = bp_get(val, 1, 1) != 0;
             u32 form = bp_get(val, 1, 2);
             u32 tgType = bp_get(val, 3, 4);
@@ -1871,17 +1836,14 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
             if (srcRow < 13) {
               tcg.src = rowToSrc[srcRow];
             }
-            // Texgens past numTexGens are not translated; XF 0x3F/genMode
-            // changes to that count bump the generation themselves.
-            mark_pipeline_state_dirty_if(tcIdx < g_gxState.numTexGens && snap.changed());
+            mark_pipeline_state_dirty();
           }
         } else if (reg >= 0x50 && reg <= 0x5F) {
           u32 tcIdx = reg - 0x50;
           if (tcIdx < MaxTexCoord) {
-            const DecodedSnapshot<std::remove_reference_t<decltype(g_gxState.tcgs[tcIdx])>> snap(g_gxState.tcgs[tcIdx]);
             g_gxState.tcgs[tcIdx].postMtx = static_cast<GXPTTexMtx>(bp_get(val, 6, 0) + 64);
             g_gxState.tcgs[tcIdx].normalize = bp_get(val, 1, 8) != 0;
-            mark_pipeline_state_dirty_if(tcIdx < g_gxState.numTexGens && snap.changed());
+            mark_pipeline_state_dirty();
           }
         } else {
 #ifndef NDEBUG
