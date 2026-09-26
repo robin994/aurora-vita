@@ -51,6 +51,7 @@ struct TelemetryCounters {
   uint64_t pipelineTranslations = 0;
   uint64_t vertexTranslations = 0;
   uint64_t textureResolves = 0;
+  uint64_t translationMemoHits = 0;
 };
 
 struct FrameTelemetry {
@@ -69,6 +70,7 @@ public:
   void count_pipeline_translation() noexcept { ++frame_.counters.pipelineTranslations; }
   void count_vertex_translation() noexcept { ++frame_.counters.vertexTranslations; }
   void count_texture_resolve() noexcept { ++frame_.counters.textureResolves; }
+  void count_translation_memo_hit() noexcept { ++frame_.counters.translationMemoHits; }
   void add_draw(uint32_t vertices, uint32_t indices, uint32_t triangles) noexcept;
   void vertex_dedup(uint32_t inputVertices,uint32_t uniqueVertices) noexcept;
   void gpu_geometry(bool hit,uint32_t vertices) noexcept;

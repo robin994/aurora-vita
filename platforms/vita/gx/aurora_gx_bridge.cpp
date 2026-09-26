@@ -10,6 +10,10 @@
 #include "../gfx/vita_vertex_pipeline.hpp"
 #include "../gfx/vita_draw_adapter.hpp"
 #include "../gfx/vita_texture_decode.hpp"
+#include "../gfx/vita_pipeline_key.hpp"
+#include <cstring>
+#include <memory>
+#include <new>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -193,20 +197,63 @@ gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noe
   return out;
 }
 
-void translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
-                                           gfx::VertexDecodeLayout& layout) noexcept {
-  const auto& g=aurora::gx::g_gxState;
+namespace {
+struct TranslationInputs {
   aurora::gx::PipelineConfig pc{};
+  std::array<uint8_t,4> lightMasks{};
+};
+struct TranslationMemoEntry {
+  bool valid=false;
+  TranslationInputs inputs{};
+  gfx::PipelineDesc pipeline{};
+  gfx::VertexDecodeLayout layout{};
+  uint64_t key=0;
+};
+constexpr size_t TranslationMemoSize=32;
+uint64_t hash_translation_inputs(const TranslationInputs& in) noexcept {
+  // Word-wise FNV-1a over the snapshot; a hit is still confirmed by memcmp.
+  const auto* p=reinterpret_cast<const uint8_t*>(&in);
+  uint64_t h=0xcbf29ce484222325ull;
+  size_t i=0;
+  for(;i+4<=sizeof(in);i+=4){uint32_t w;std::memcpy(&w,p+i,4);h=(h^w)*0x100000001b3ull;}
+  for(;i<sizeof(in);++i)h=(h^p[i])*0x100000001b3ull;
+  return h;
+}
+} // namespace
+
+bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
+                                           gfx::VertexDecodeLayout& layout, uint64_t& key) noexcept {
+  const auto& g=aurora::gx::g_gxState;
+  // Zero-filled so padding compares equal for identical field values; a
+  // non-deterministic padding byte could only cause a memo miss, never a hit.
+  static TranslationInputs in;
+  std::memset(static_cast<void*>(&in),0,sizeof(in));
+  auto& pc=in.pc;
   pc.shaderConfig=build_current_shader_config(static_cast<GXVtxFmt>(fmt),translate_line_mode(primitive));
   pc.depthFunc=g.depthFunc;pc.cullMode=g.cullMode;pc.blendMode=g.blendMode;
   pc.blendFacSrc=g.blendFacSrc;pc.blendFacDst=g.blendFacDst;pc.blendOp=g.blendOp;
   pc.dstAlpha=g.dstAlpha;pc.depthCompare=g.depthCompare;pc.depthUpdate=g.depthUpdate;
   pc.colorUpdate=g.colorUpdate;pc.alphaUpdate=g.alphaUpdate;
+  for(unsigned ch=0;ch<in.lightMasks.size();++ch)
+    in.lightMasks[ch]=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
+
+  static std::unique_ptr<TranslationMemoEntry[]> memo(new (std::nothrow) TranslationMemoEntry[TranslationMemoSize]);
+  const uint64_t h=hash_translation_inputs(in);
+  TranslationMemoEntry* slot=memo?&memo[h%TranslationMemoSize]:nullptr;
+  if(slot&&slot->valid&&std::memcmp(&slot->inputs,&in,sizeof(in))==0){
+    pipeline=slot->pipeline;layout=slot->layout;key=slot->key;
+    return true;
+  }
   pipeline=translate_pipeline(pc);
-  for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)
-    pipeline.colorChannels[ch].lightMask=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
+  for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)pipeline.colorChannels[ch].lightMask=in.lightMasks[ch];
   // The vertex layout does not depend on the line mode used for the pipeline.
   layout=translate_vertex_layout(pc.shaderConfig);
+  key=gfx::pipeline_key(pipeline);
+  if(slot){
+    std::memcpy(static_cast<void*>(&slot->inputs),&in,sizeof(in));
+    slot->pipeline=pipeline;slot->layout=layout;slot->key=key;slot->valid=true;
+  }
+  return false;
 }
 
 gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept {

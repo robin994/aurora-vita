@@ -499,12 +499,11 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (telemetry_) telemetry_->count_pipeline_translation();
     {
       gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StatePipeline);
-      translate_current_pipeline_and_layout(primitive, fmt, translatedPipeline_, translatedLayout_);
+      const bool memoHit=translate_current_pipeline_and_layout(primitive, fmt, translatedPipeline_,
+                                                               translatedLayout_, translatedBaseKey_);
+      if (telemetry_ && memoHit) telemetry_->count_translation_memo_hit();
     }
-    {
-      gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateKey);
-      translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
-    }
+    translatedPipelineKey_ = translatedBaseKey_;
     // Streamed fixed-vertex draws need their own translated GPU pipeline too.
     // Leaving this stale meant dynamic draws could inherit layout/indexed-PN
     // flags from an unrelated earlier static draw and eventually poison the
@@ -654,8 +653,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     translatedPipeline_.nativeTextureWrapMask = nativeWrapMask;
     translatedPipeline_.textureForceOpaqueMask = forceOpaqueMask;
     translatedPipeline_.textureCopyModeBits = copyModeBits;
-    gfx::ScopedTelemetryPhase keyPhase(telemetry_,gfx::TelemetryPhase::StateKey);
-    translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
+    // DrawSink-internal identity: the base translation key plus the texture
+    // bits. The renderer still keys pipelines by pipeline_key() on creation.
+    const uint64_t textureBits = uint64_t(nativeWrapMask) | (uint64_t(forceOpaqueMask) << 8) |
+                                 (uint64_t(copyModeBits) << 16);
+    translatedPipelineKey_ = textureBits ?
+        gfx::hash_combine(translatedBaseKey_, textureBits ^ 0x7e3a9c51d2b64f08ull) : translatedBaseKey_;
   }
   if (staticGeometry_) {
     translatedGpuPipeline_.nativeTextureWrapMask = nativeWrapMask;

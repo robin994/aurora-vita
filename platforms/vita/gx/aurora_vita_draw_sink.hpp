@@ -141,6 +141,7 @@ private:
   gfx::PipelineDesc translatedPipeline_{};
   gfx::VertexDecodeLayout translatedLayout_{};
   uint64_t translatedPipelineKey_ = 0;
+  uint64_t translatedBaseKey_ = 0;
   uint8_t translatedTextureMask_ = 0;
   bool translatedUsesOrigLod_ = false;
   bool translatedHasIndirect_ = false;

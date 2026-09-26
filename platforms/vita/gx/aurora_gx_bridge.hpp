@@ -35,9 +35,12 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
 // Dawn-free path: derive the same shader/pipeline inputs directly from Aurora GX state.
 gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noexcept;
 gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept;
-// Both results from one snapshot of the GX state (one ShaderConfig build).
-void translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
-                                           gfx::VertexDecodeLayout& layout) noexcept;
+// Both results from one snapshot of the GX state (one ShaderConfig build),
+// plus pipeline_key(pipeline). Identical GX inputs (compared byte for byte)
+// are served from a small memo without re-translating or re-hashing.
+// Returns true on a memo hit.
+bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
+                                           gfx::VertexDecodeLayout& layout, uint64_t& key) noexcept;
 gfx::SourcePrimitive translate_source_primitive(uint8_t primitive) noexcept;
 uint8_t translate_line_mode(uint8_t primitive) noexcept;
 void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms,
