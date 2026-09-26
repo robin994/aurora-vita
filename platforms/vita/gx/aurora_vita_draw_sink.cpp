@@ -495,9 +495,16 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
                                   translatedPrimitive_ == primitive && translatedFmt_ == fmt;
   if (!translatedCacheHit) {
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
-    translatedPipeline_ = translate_current_pipeline(primitive, fmt);
-    translatedLayout_ = translate_current_vertex_layout(fmt);
-    translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
+    if (telemetry_) telemetry_->count_pipeline_translation();
+    {
+      gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StatePipeline);
+      translatedPipeline_ = translate_current_pipeline(primitive, fmt);
+      translatedLayout_ = translate_current_vertex_layout(fmt);
+    }
+    {
+      gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateKey);
+      translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
+    }
     // Streamed fixed-vertex draws need their own translated GPU pipeline too.
     // Leaving this stale meant dynamic draws could inherit layout/indexed-PN
     // flags from an unrelated earlier static draw and eventually poison the
@@ -557,6 +564,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     result.warnings|=resolvedTextureWarnings_;
     if(telemetry_)for(unsigned slot=0;slot<gfx::MaxTextures;++slot)if(textureMask&(1u<<slot))telemetry_->texture(true,false,0);
   }else{ gfx::ScopedTelemetryPhase textureTimer(telemetry_, gfx::TelemetryPhase::TextureResolve);
+  if (telemetry_) telemetry_->count_texture_resolve();
   uint8_t volatileTextureMask=0;
   for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
     if ((textureMask & (1u << slot)) == 0) continue;
@@ -646,6 +654,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     translatedPipeline_.nativeTextureWrapMask = nativeWrapMask;
     translatedPipeline_.textureForceOpaqueMask = forceOpaqueMask;
     translatedPipeline_.textureCopyModeBits = copyModeBits;
+    gfx::ScopedTelemetryPhase keyPhase(telemetry_,gfx::TelemetryPhase::StateKey);
     translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
   }
   if (staticGeometry_) {
@@ -721,6 +730,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty||
      (translatedVertexStateLightweight_&&!fixedCandidate)){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
+    gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateVertex);
+    if (telemetry_) telemetry_->count_vertex_translation();
     if(fixedCandidate) {
       translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_);
       translatedVertexStateLightweight_=true;
@@ -751,7 +762,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(gpuGeometry&&telemetry_)telemetry_->gpu_geometry(staticGeometry_->hits()!=before,gpuGeometry->vertexCount);
     }
     if(gpuGeometry){
-      const uint64_t gpuPipelineDescKey=gfx::pipeline_key(translatedGpuPipeline_);
+      uint64_t gpuPipelineDescKey=0;
+      { gfx::ScopedTelemetryPhase keyPhase(telemetry_,gfx::TelemetryPhase::StateKey);
+        gpuPipelineDescKey=gfx::pipeline_key(translatedGpuPipeline_); }
       if(gpuGeometry->pipelineDescKey==gpuPipelineDescKey&&gpuGeometry->pipelineKey&&
          renderer_->pipelines().find(gpuGeometry->pipelineKey)) {
         fixedPipelineKey=gpuGeometry->pipelineKey;

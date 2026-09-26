@@ -34,6 +34,9 @@ const char* telemetry_phase_name(TelemetryPhase phase) noexcept {
     case TelemetryPhase::StateTranslate: return "state_translate";
     case TelemetryPhase::GeometryKey: return "geometry_key";
     case TelemetryPhase::GeometryValidate: return "geometry_validate";
+    case TelemetryPhase::StatePipeline: return "state_pipeline";
+    case TelemetryPhase::StateKey: return "state_key";
+    case TelemetryPhase::StateVertex: return "state_vertex";
     case TelemetryPhase::Count: break;
   }
   return "unknown";
@@ -100,7 +103,10 @@ std::string Telemetry::format_frame() const {
       << " fallback_tex=" << frame_.counters.fallbackTextures
       << " efb_copy=" << frame_.counters.efbCopies
       << " arena_overflow=" << frame_.counters.arenaOverflows
-      << " unsupported=" << frame_.counters.unsupportedFeatures;
+      << " unsupported=" << frame_.counters.unsupportedFeatures
+      << " pipeline_translations=" << frame_.counters.pipelineTranslations
+      << " vertex_translations=" << frame_.counters.vertexTranslations
+      << " texture_resolves=" << frame_.counters.textureResolves;
   for (size_t i = 0; i < frame_.phaseUs.size(); ++i) {
     out << ' ' << telemetry_phase_name(static_cast<TelemetryPhase>(i)) << "_us=" << frame_.phaseUs[i];
   }

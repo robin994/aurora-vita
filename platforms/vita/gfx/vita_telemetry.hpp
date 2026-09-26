@@ -23,6 +23,9 @@ enum class TelemetryPhase : uint8_t {
   StateTranslate,
   GeometryKey,
   GeometryValidate,
+  StatePipeline,   // GX -> PipelineDesc/vertex layout translation (subset of StateTranslate)
+  StateKey,        // pipeline_key hashing during state translation
+  StateVertex,     // matrices, lights, projection and uniform translation
   Count,
 };
 
@@ -45,6 +48,9 @@ struct TelemetryCounters {
   uint64_t efbCopies = 0;
   uint64_t arenaOverflows = 0;
   uint64_t unsupportedFeatures = 0;
+  uint64_t pipelineTranslations = 0;
+  uint64_t vertexTranslations = 0;
+  uint64_t textureResolves = 0;
 };
 
 struct FrameTelemetry {
@@ -60,6 +66,9 @@ public:
   void begin_frame(uint64_t frame) noexcept;
   void end_frame(uint64_t totalUs) noexcept;
   void add_time(TelemetryPhase phase, uint64_t us) noexcept;
+  void count_pipeline_translation() noexcept { ++frame_.counters.pipelineTranslations; }
+  void count_vertex_translation() noexcept { ++frame_.counters.vertexTranslations; }
+  void count_texture_resolve() noexcept { ++frame_.counters.textureResolves; }
   void add_draw(uint32_t vertices, uint32_t indices, uint32_t triangles) noexcept;
   void vertex_dedup(uint32_t inputVertices,uint32_t uniqueVertices) noexcept;
   void gpu_geometry(bool hit,uint32_t vertices) noexcept;
