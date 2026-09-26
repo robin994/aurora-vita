@@ -42,6 +42,10 @@ GXFifoObj* GXInit(void* base, u32 size) {
 
   // Initialize FIFO subsystem
   aurora::gx::fifo::init();
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_ASYNC_GX) && AURORA_VITA_ASYNC_GX
+  // GX decode, translation and GXM submission move to the worker on core 1.
+  (void)aurora::gx::fifo::start_worker();
+#endif
   GXInitFifoBase(&sFifoObj, base, size);
   GXSetCPUFifo(&sFifoObj);
   GXSetGPFifo(&sFifoObj);
@@ -273,9 +277,18 @@ GXFifoObj* GXInit(void* base, u32 size) {
   return &sFifoObj;
 }
 
+#if defined(MKW_TARGET_VITA)
+// GX draw-done token. On GameCube GXSetDrawDone only inserts the token and the
+// CPU keeps running; GXWaitDrawDone blocks until the GPU reaches it. With the
+// Vita GX worker the same split lets the next frame's game logic overlap the
+// current frame's translation/submission. Without the worker both reduce to
+// the previous synchronous drain.
+static uint64_t sVitaDrawDoneSerial = 0;
+#endif
+
 void GXDrawDone() {
 #if defined(MKW_TARGET_VITA)
-  aurora::gx::fifo::drain_sync();
+  aurora::gx::fifo::wait_marker(aurora::gx::fifo::submit_marker());
 #else
   aurora::gx::fifo::drain();
 #endif
@@ -285,13 +298,26 @@ void GXDrawDone() {
 
 void GXSetDrawDone() {
 #if defined(MKW_TARGET_VITA)
-  aurora::gx::fifo::drain_sync();
+  sVitaDrawDoneSerial = aurora::gx::fifo::submit_marker();
+  if (aurora::gx::fifo::worker_running()) return; // callback fires on GXVitaWaitDrawDone
 #else
   aurora::gx::fifo::drain();
 #endif
   if (DrawDoneCB != nullptr)
     DrawDoneCB();
 }
+
+#if defined(MKW_TARGET_VITA)
+void GXVitaWaitDrawDone() {
+  if (!aurora::gx::fifo::worker_running()) {
+    GXDrawDone();
+    return;
+  }
+  aurora::gx::fifo::wait_marker(sVitaDrawDoneSerial);
+  if (DrawDoneCB != nullptr)
+    DrawDoneCB();
+}
+#endif
 
 GXDrawDoneCallback GXSetDrawDoneCallback(GXDrawDoneCallback cb) {
   GXDrawDoneCallback old = DrawDoneCB;

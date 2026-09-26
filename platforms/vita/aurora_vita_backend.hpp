@@ -159,6 +159,9 @@ bool initialize(const BackendConfig& config={}) noexcept;
 InitFailure last_init_failure() noexcept;
 const char* last_init_failure_detail() noexcept;
 bool begin_frame() noexcept;void end_frame() noexcept;void shutdown() noexcept;
+// Block until the GX worker (if running) has processed every queued command,
+// before reading renderer state or the framebuffer from the game thread.
+void wait_for_render_idle() noexcept;
 void set_presentation_aspect(float aspect) noexcept;
 // GameCube glDiscardFrame means that the completed EFB must not become the
 // visible XFB.  The Vita host loop owns vglSwapBuffers(), so the GX layer uses

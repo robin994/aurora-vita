@@ -11,6 +11,8 @@ option(AURORA_VITA_NATIVE_CMPR "Experimental GXM CMPR/BC1 uploads; requires hard
 option(AURORA_VITA_NATIVE_GX_TEXTURES "Experimental GXM I/I+A/RGB565 uploads; requires hardware image comparison" OFF)
 option(AURORA_VITA_GXM_DIRECT_STREAM_WRITE
     "Write streamed vertices/indices directly into CpuGpu GXM ring pages" OFF)
+option(AURORA_VITA_ASYNC_GX
+    "Run GX decode, translation and GXM submission on a worker thread (core 1)" OFF)
 option(AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT
     "Submit streamed GXM draws directly instead of routing through CommandStream" OFF)
 add_library(aurora_vita_gxm_backend STATIC
@@ -23,7 +25,8 @@ aurora_vita_attach_frontend(aurora_vita_gxm_backend)
 add_library(aurora::vita_backend ALIAS aurora_vita_gxm_backend)
 add_library(aurora::vita_gxm_backend ALIAS aurora_vita_gxm_backend)
 target_compile_features(aurora_vita_gxm_backend PUBLIC cxx_std_20)
-target_compile_definitions(aurora_vita_gxm_backend PUBLIC AURORA_VITA_RENDERER_GXM=1)
+target_compile_definitions(aurora_vita_gxm_backend PUBLIC AURORA_VITA_RENDERER_GXM=1
+    AURORA_VITA_ASYNC_GX=$<BOOL:${AURORA_VITA_ASYNC_GX}>)
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE AURORA_VITA_DIRECT_STREAM_WRITE=0)
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE
     AURORA_VITA_NATIVE_CMPR=$<BOOL:${AURORA_VITA_NATIVE_CMPR}>

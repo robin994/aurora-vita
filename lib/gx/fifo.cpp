@@ -58,6 +58,8 @@ struct VitaJob {
   uint32_t stableSourceSpanCount = 0;
   VitaWorkerTask task = nullptr;
   void* context = nullptr;
+  // Owned copy of an asynchronous task's arguments (run_async).
+  alignas(8) std::array<uint8_t, 128> inlineContext{};
   uint64_t serial = 0;
 };
 
@@ -140,7 +142,8 @@ int vita_worker_main(SceSize, void*) {
 uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
                      const uint8_t* bytes, uint32_t byteCount,
                      const StableSourceSpan* stableSpans, uint32_t stableSpanCount,
-                     bool bigEndian = true) {
+                     bool bigEndian = true, const void* ownedContext = nullptr,
+                     size_t ownedContextBytes = 0) {
   if (!sVitaWorker.running.load(std::memory_order_acquire)) return 0;
   while (sceKernelWaitSema(sVitaWorker.space, 1, nullptr) < 0) sceKernelDelayThread(100);
 
@@ -149,6 +152,10 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
   job.bigEndian = bigEndian;
   job.task = task;
   job.context = context;
+  if (ownedContext != nullptr && ownedContextBytes != 0) {
+    std::memcpy(job.inlineContext.data(), ownedContext, ownedContextBytes);
+    job.context = job.inlineContext.data();
+  }
   job.stableSourceSpanCount = std::min(stableSpanCount, StableSourceSpanCapacity);
   if (job.stableSourceSpanCount != 0 && stableSpans != nullptr) {
     std::copy_n(stableSpans, job.stableSourceSpanCount, job.stableSourceSpans.begin());
@@ -197,7 +204,7 @@ bool start_worker() {
   }
   sVitaWorker.thread = sceKernelCreateThread("melee_gx_frontend", vita_worker_main, 0x10000100,
                                              VitaWorkerStackBytes, 0,
-                                             SCE_KERNEL_CPU_MASK_USER_2, nullptr);
+                                             SCE_KERNEL_CPU_MASK_USER_1, nullptr);
   if (sVitaWorker.thread < 0) {
     destroy_worker_primitives();
     return false;
@@ -243,6 +250,35 @@ void run_sync(VitaWorkerTask task, void* context) {
   }
   enqueue_current_fifo();
   wait_serial(enqueue_job(VitaJobType::Callback, task, context, nullptr, 0, nullptr, 0));
+}
+
+uint64_t run_async(VitaWorkerTask task, const void* context, size_t contextBytes) {
+  if (on_worker_thread()) {
+    if (task) task(const_cast<void*>(context));
+    return 0;
+  }
+  if (!worker_running() || contextBytes > 128) {
+    drain_sync();
+    if (task) task(const_cast<void*>(context));
+    return 0;
+  }
+  enqueue_current_fifo();
+  return enqueue_job(VitaJobType::Callback, task, nullptr, nullptr, 0, nullptr, 0, true,
+                     context, contextBytes);
+}
+
+uint64_t submit_marker() {
+  if (on_worker_thread()) return 0;
+  if (!worker_running()) {
+    drain_sync();
+    return 0;
+  }
+  return enqueue_current_fifo();
+}
+
+void wait_marker(uint64_t serial) {
+  if (on_worker_thread() || !worker_running()) return;
+  wait_serial(serial);
 }
 
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian) {

@@ -10,7 +10,12 @@
 #endif
 #include "gx/aurora_vita_draw_sink.hpp"
 #include "../../lib/vita/render_size.hpp"
+#if defined(MKW_TARGET_VITA)
+#include "../../lib/gx/fifo.hpp"
+#endif
+#include <atomic>
 #include <cstdio>
+#include <type_traits>
 #include <cstring>
 #include <memory>
 #ifndef AURORA_VITA_NATIVE_CMPR
@@ -85,6 +90,34 @@ void ensure_parent_dir(const char*) noexcept {}
 #endif
 
 gfx::FifoProfile g_lastFifoProfile{};
+
+// With the asynchronous GX worker the renderer, DrawSink and their frame state
+// are owned by the worker thread. Game-thread entry points queue their work
+// behind the pending FIFO instead of touching that state concurrently.
+bool gx_worker_active() noexcept {
+#if defined(MKW_TARGET_VITA)
+  return aurora::gx::fifo::worker_running();
+#else
+  return false;
+#endif
+}
+template <class Args>
+void queue_on_gx_worker(void (*task)(void*), const Args& args) noexcept {
+#if defined(MKW_TARGET_VITA)
+  static_assert(sizeof(Args) <= 128 && std::is_trivially_copyable_v<Args>);
+  aurora::gx::fifo::run_async(task, &args, sizeof(args));
+#else
+  (void)task; (void)args;
+#endif
+}
+// Last renderer failure observed by the worker, reported by the next begin_frame.
+std::atomic<bool> g_workerFrameFailed{false};
+// Game-thread view of discard_present() for the frame being built.
+bool g_mainDiscardPresent=false;
+struct RuntimeFlagsArgs { uint32_t flags=0; };
+void set_runtime_flags_task(void* p) {
+  if(g_drawSink)g_drawSink->set_runtime_feature_flags(static_cast<const RuntimeFlagsArgs*>(p)->flags);
+}
 
 void emit_periodic_diagnostics() noexcept {
   if (!g_telemetryEnabled || !g_drawSink) return;
@@ -167,6 +200,7 @@ extern "C" uint32_t aurora_vita_debug_runtime_capabilities(void) noexcept {
 }
 
 extern "C" void aurora_vita_debug_set_runtime_flags(uint32_t flags) noexcept {
+  if(gx_worker_active()) { queue_on_gx_worker(set_runtime_flags_task,RuntimeFlagsArgs{flags}); return; }
   if(g_drawSink)g_drawSink->set_runtime_feature_flags(flags);
 }
 
@@ -391,8 +425,8 @@ bool initialize(const BackendConfig& c) noexcept {
 InitFailure last_init_failure() noexcept{return g_initFailure;}
 const char* last_init_failure_detail() noexcept{return g_initFailureDetail;}
 
-bool begin_frame() noexcept {
-  if(!g_initialized) return false;
+namespace {
+bool begin_frame_now() noexcept {
   g_discardPresent=false;
   g_start=now_us();
   if (g_telemetryEnabled) g_telemetry.begin_frame(g_frame);
@@ -407,6 +441,21 @@ bool begin_frame() noexcept {
   g_drawSink->begin_frame(g_frame);
   return true;
 }
+struct NoArgs { uint8_t unused=0; };
+void begin_frame_task(void*) { g_workerFrameFailed.store(!begin_frame_now(),std::memory_order_relaxed); }
+} // namespace
+
+bool begin_frame() noexcept {
+  if(!g_initialized) return false;
+  g_mainDiscardPresent=false;
+  if(gx_worker_active()) {
+    // A failure is reported one frame late; the worker skips the failed frame's
+    // draws through the renderer's own failed() state meanwhile.
+    queue_on_gx_worker(begin_frame_task,NoArgs{});
+    return !g_workerFrameFailed.load(std::memory_order_relaxed);
+  }
+  return begin_frame_now();
+}
 
 void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept {
   g_pendingDisplayClear.pending=true;
@@ -418,21 +467,35 @@ void schedule_display_clear(float r,float g,float b,float a,float depth,bool cle
   g_pendingDisplayClear.clearDepth=clearDepth;
 }
 
-void discard_present() noexcept {
-  if(!g_initialized) return;
+namespace {
+void discard_present_now() noexcept {
   g_discardPresent=true;
   // begin_frame() may already have consumed the clear that belongs to this
   // backbuffer.  Because a discarded frame does not rotate buffers, re-arm it
   // so the same draw buffer is clean before the next real frame is built.
   if(g_displayClearValid) g_pendingDisplayClear.pending=true;
 }
+void discard_present_task(void*) { discard_present_now(); }
+struct AspectArgs { float aspect=0.f; };
+void set_presentation_aspect_task(void* p) {
+  if(g_renderer)g_renderer->set_presentation_aspect(static_cast<const AspectArgs*>(p)->aspect);
+}
+} // namespace
+
+void discard_present() noexcept {
+  if(!g_initialized) return;
+  g_mainDiscardPresent=true;
+  if(gx_worker_active()) { queue_on_gx_worker(discard_present_task,NoArgs{}); return; }
+  discard_present_now();
+}
 
 void set_presentation_aspect(float aspect) noexcept {
+  if(gx_worker_active()) { queue_on_gx_worker(set_presentation_aspect_task,AspectArgs{aspect}); return; }
   if(g_renderer)g_renderer->set_presentation_aspect(aspect);
 }
 
-void end_frame() noexcept {
-  if(!g_initialized) return;
+namespace {
+void end_frame_now() noexcept {
   g_drawSink->flush();
   g_renderer->end_frame();
   const uint64_t presentStart = now_us();
@@ -455,9 +518,41 @@ void end_frame() noexcept {
   g_lastFifoProfile=gfx::fifo_profile_take();
   emit_periodic_diagnostics();
 }
+void end_frame_task(void*) {
+  end_frame_now();
+  g_workerFrameFailed.store(g_renderer->failed(),std::memory_order_relaxed);
+}
+struct ShaderCompileArgs { bool enabled=false; };
+void set_shader_compile_task(void* p) {
+  if(g_renderer)g_renderer->set_runtime_shader_compilation_enabled(static_cast<const ShaderCompileArgs*>(p)->enabled);
+}
+struct InvalidateArgs { uint64_t start=0; size_t bytes=0; };
+void invalidate_texture_task(void* p) {
+  const auto& a=*static_cast<const InvalidateArgs*>(p);
+  if(!g_renderer)return;
+  if(g_renderer->invalidate_texture_source_range(a.start,a.bytes)&&g_drawSink)
+    g_drawSink->invalidate_texture_resolve_cache();
+}
+} // namespace
+
+void end_frame() noexcept {
+  if(!g_initialized) return;
+  if(gx_worker_active()) { queue_on_gx_worker(end_frame_task,NoArgs{}); return; }
+  end_frame_now();
+}
+
+void wait_for_render_idle() noexcept {
+#if defined(MKW_TARGET_VITA)
+  if(gx_worker_active()) aurora::gx::fifo::drain_sync();
+#endif
+}
 
 void shutdown() noexcept {
   if(!g_initialized) return;
+#if defined(MKW_TARGET_VITA)
+  // Drain and stop the GX worker before tearing down what it renders with.
+  if(gx_worker_active()) aurora::gx::fifo::shutdown_worker();
+#endif
   if (g_coverageEnabled && g_config.coverage_log_path) g_coverage.write_report(g_config.coverage_log_path);
   if (g_traceEnabled && g_config.trace_log_path && g_trace) g_trace->write_report(g_config.trace_log_path, 2048);
   if(g_drawSink){g_drawSink->shutdown();g_drawSink.reset();}
@@ -522,6 +617,7 @@ PerformanceSnapshot performance_snapshot() noexcept {
   return out;
 }
 void set_runtime_shader_compilation_enabled(bool enabled) noexcept {
+  if(gx_worker_active()) { queue_on_gx_worker(set_shader_compile_task,ShaderCompileArgs{enabled}); return; }
   if(g_renderer)g_renderer->set_runtime_shader_compilation_enabled(enabled);
 }
 bool runtime_shader_compilation_enabled() noexcept {
@@ -535,6 +631,8 @@ integration::FrameTrace& frame_trace() noexcept{return *g_trace;}
 gfx::MemoryBudgetSnapshot memory_budget() noexcept{return g_drawSink ? g_drawSink->memory_budget() : gfx::MemoryBudgetSnapshot{};}
 size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept{
   if(!g_renderer)return 0;
+  // Queued behind earlier draws; the count is unknown to the caller then.
+  if(gx_worker_active()) { queue_on_gx_worker(invalidate_texture_task,InvalidateArgs{start,bytes}); return 0; }
   const size_t invalidated=g_renderer->invalidate_texture_source_range(start,bytes);
   if(invalidated&&g_drawSink)g_drawSink->invalidate_texture_resolve_cache();
   return invalidated;

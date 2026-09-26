@@ -621,7 +621,7 @@ void GXCopyDisp(void* dest, GXBool clear) {
   (void)dest;
 #if defined(MKW_TARGET_VITA)
   VitaCopyDispArgs args{clear != GX_FALSE};
-  aurora::gx::fifo::run_sync(vita_copy_disp_task, &args);
+  aurora::gx::fifo::run_async(vita_copy_disp_task, &args, sizeof(args));
   return;
 #else
   // Finish queued commands before this copy reads live EFB state.
@@ -660,7 +660,7 @@ void GXCopyDisp(void* dest, GXBool clear) {
 void GXCopyTex(void* dest, GXBool clear) {
 #if defined(MKW_TARGET_VITA)
   VitaCopyTexArgs args{dest, clear != GX_FALSE};
-  aurora::gx::fifo::run_sync(vita_copy_tex_task, &args);
+  aurora::gx::fifo::run_async(vita_copy_tex_task, &args, sizeof(args));
   return;
 #else
   // Texture copies must see all earlier draws and state changes.
@@ -757,7 +757,7 @@ void GXCopyTex(void* dest, GXBool clear) {
 
 #if defined(MKW_TARGET_VITA)
 void GXVitaClearEfb(void) {
-  aurora::gx::fifo::run_sync(vita_clear_efb_task, nullptr);
+  aurora::gx::fifo::run_async(vita_clear_efb_task, nullptr, 0);
 }
 #endif
 

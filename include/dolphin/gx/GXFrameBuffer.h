@@ -52,6 +52,9 @@ void GXCopyTex(void* dest, GXBool clear);
 // Vita-only fast path for GameCube code that uses GXCopyTex(..., true) solely
 // as an EFB clear and never samples the copied scratch image.
 void GXVitaClearEfb(void);
+// Block until the GX worker has processed everything before the last
+// GXSetDrawDone (GameCube GXWaitDrawDone semantics).
+void GXVitaWaitDrawDone(void);
 #endif
 void GXClearBoundingBox(void);
 void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom);

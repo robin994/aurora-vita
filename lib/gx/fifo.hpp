@@ -44,6 +44,13 @@ bool worker_running();
 void drain_sync();
 void wait_idle();
 void run_sync(VitaWorkerTask task, void* context);
+// Queue `task` after the pending FIFO with a copy of `contextBytes` (<= 128)
+// bytes of arguments and return without waiting. Returns the job serial.
+uint64_t run_async(VitaWorkerTask task, const void* context, size_t contextBytes);
+// Seal the pending FIFO and return a serial that wait_marker() can wait on:
+// the GX draw-done token without the CPU blocking at the point it is set.
+uint64_t submit_marker();
+void wait_marker(uint64_t serial);
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian);
 #endif
 
