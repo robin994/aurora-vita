@@ -8,6 +8,10 @@
 #if defined(MKW_TARGET_VITA)
 #include "../../platforms/vita/aurora_vita_backend.hpp"
 #include "../../platforms/vita/gx/aurora_vita_draw_sink.hpp"
+#include "../../platforms/vita/gfx/vita_telemetry.hpp"
+#if defined(AURORA_VITA_RUNTIME_LOGGING) && AURORA_VITA_RUNTIME_LOGGING
+#define AURORA_VITA_FIFO_PROFILE 1
+#endif
 #define ZoneScoped ((void)0)
 #define ZoneScopedN(name) ((void)0)
 #else
@@ -472,8 +476,55 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
 static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian);
 static bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
+#if defined(AURORA_VITA_FIFO_PROFILE)
+namespace {
+using FifoClass = aurora::vita::gfx::FifoCommandClass;
+uint32_t sProfileDepth = 0;
+uint64_t sProfileNestedUs = 0; // time spent in nested process() calls
+FifoClass fifo_command_class(u8 opcode, u8 cmd) noexcept {
+  switch (opcode) {
+  case CP_CMD_LOAD_BP_REG: return FifoClass::Bp;
+  case CP_CMD_LOAD_CP_REG: return FifoClass::Cp;
+  case CP_CMD_LOAD_XF_REG: return FifoClass::Xf;
+  case CP_CMD_LOAD_INDX_A: case CP_CMD_LOAD_INDX_B:
+  case CP_CMD_LOAD_INDX_C: case CP_CMD_LOAD_INDX_D: return FifoClass::Indexed;
+  case CP_CMD_CALL_DL: return FifoClass::CallList;
+  case GX_LOAD_AURORA: return FifoClass::Aurora;
+  default: return is_draw_cmd(cmd) ? FifoClass::Draw : FifoClass::Other;
+  }
+}
+struct FifoProcessScope {
+  uint64_t start = aurora::vita::gfx::telemetry_now_us();
+  uint64_t nestedBefore = sProfileNestedUs;
+  FifoProcessScope() noexcept { ++sProfileDepth; }
+  ~FifoProcessScope() {
+    const uint64_t elapsed = aurora::vita::gfx::telemetry_now_us() - start;
+    if (--sProfileDepth == 0) aurora::vita::gfx::fifo_profile_accumulator().processUs += elapsed;
+    else sProfileNestedUs = nestedBefore + elapsed;
+  }
+};
+struct FifoCommandScope {
+  FifoClass cls;
+  uint64_t start = aurora::vita::gfx::telemetry_now_us();
+  uint64_t nestedBefore = sProfileNestedUs;
+  explicit FifoCommandScope(FifoClass c) noexcept : cls(c) {}
+  ~FifoCommandScope() {
+    const uint64_t nested = sProfileNestedUs - nestedBefore;
+    const uint64_t elapsed = aurora::vita::gfx::telemetry_now_us() - start;
+    auto& p = aurora::vita::gfx::fifo_profile_accumulator();
+    p.us[static_cast<size_t>(cls)] += elapsed > nested ? elapsed - nested : 0;
+    ++p.count[static_cast<size_t>(cls)];
+  }
+};
+} // namespace
+#endif
+
 void process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
+#if defined(AURORA_VITA_FIFO_PROFILE)
+  FifoProcessScope processScope;
+  if (sProfileDepth == 1) aurora::vita::gfx::fifo_profile_accumulator().bytes += size;
+#endif
 #if !defined(MKW_TARGET_VITA)
   // Everything decoded here mutates renderer state (GX state, the recorded command lists and the mapped staging buffers), so take the renderer GPU mutex once for the whole drain rather than once per draw command.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
@@ -483,6 +534,9 @@ void process(const u8* data, u32 size, bool bigEndian) {
   while (pos < size) {
     u8 cmd = data[pos++];
     u8 opcode = cmd & CP_OPCODE_MASK;
+#if defined(AURORA_VITA_FIFO_PROFILE)
+    FifoCommandScope commandScope(fifo_command_class(opcode, cmd));
+#endif
     // Log.warn("Processing opcode {:02x} at pos {} (size {})", opcode, pos - 1, size);
 
     switch (opcode) {

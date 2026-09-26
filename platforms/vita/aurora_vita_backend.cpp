@@ -84,6 +84,8 @@ void ensure_parent_dir(const char* path) noexcept {
 void ensure_parent_dir(const char*) noexcept {}
 #endif
 
+gfx::FifoProfile g_lastFifoProfile{};
+
 void emit_periodic_diagnostics() noexcept {
   if (!g_telemetryEnabled || !g_drawSink) return;
   const uint32_t period = g_config.diagnostics_period_frames;
@@ -94,7 +96,7 @@ void emit_periodic_diagnostics() noexcept {
   const auto frameLine = g_telemetry.format_frame();
   const auto memLine = g_drawSink->memory_budget().format();
   const auto& rs=g_renderer->stats();
-  char rendererLine[1024];
+  char rendererLine[1536];
   std::snprintf(rendererLine,sizeof(rendererLine),
       "[AURORA-VITA][RENDERER] frame=%llu display=%ux%u internal=%ux%u scenes=%u sampled=%u "
       "submit_pipeline_us=%llu submit_texture_us=%llu submit_draw_us=%llu display_queue_us=%llu "
@@ -102,7 +104,10 @@ void emit_periodic_diagnostics() noexcept {
       "efb_end_us=%llu efb_submit_us=%llu efb_wait_us=%llu efb_fixup_us=%llu "
       "d16=%u gpu_geometry=%u split_vertex_phases=%u "
       "depth_load_scenes=%u depth_store_scenes=%u depthless_scenes=%u finish_calls=%u "
-      "scissor_free_draws=%u",
+      "scissor_free_draws=%u fifo_us=%llu fifo_bytes=%llu "
+      "fifo_bp_us=%llu fifo_bp=%u fifo_cp_us=%llu fifo_cp=%u fifo_xf_us=%llu fifo_xf=%u "
+      "fifo_indx_us=%llu fifo_indx=%u fifo_calldl_us=%llu fifo_calldl=%u "
+      "fifo_draw_us=%llu fifo_draw=%u fifo_aurora_us=%llu fifo_aurora=%u fifo_other_us=%llu fifo_other=%u",
       static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
       g_config.render_width?g_config.render_width:g_config.width,
@@ -120,7 +125,17 @@ void emit_periodic_diagnostics() noexcept {
       g_config.gxm_d16_depth?1u:0u,g_config.static_geometry_budget?1u:0u,
       g_config.profile_split_vertex_phases?1u:0u,
       rs.nativeDepthLoadScenes,rs.nativeDepthStoreScenes,rs.nativeDepthlessScenes,
-      rs.nativeFinishCalls,rs.nativeScissorFreeDraws);
+      rs.nativeFinishCalls,rs.nativeScissorFreeDraws,
+      static_cast<unsigned long long>(g_lastFifoProfile.processUs),
+      static_cast<unsigned long long>(g_lastFifoProfile.bytes),
+      static_cast<unsigned long long>(g_lastFifoProfile.us[0]),g_lastFifoProfile.count[0],
+      static_cast<unsigned long long>(g_lastFifoProfile.us[1]),g_lastFifoProfile.count[1],
+      static_cast<unsigned long long>(g_lastFifoProfile.us[2]),g_lastFifoProfile.count[2],
+      static_cast<unsigned long long>(g_lastFifoProfile.us[3]),g_lastFifoProfile.count[3],
+      static_cast<unsigned long long>(g_lastFifoProfile.us[4]),g_lastFifoProfile.count[4],
+      static_cast<unsigned long long>(g_lastFifoProfile.us[5]),g_lastFifoProfile.count[5],
+      static_cast<unsigned long long>(g_lastFifoProfile.us[6]),g_lastFifoProfile.count[6],
+      static_cast<unsigned long long>(g_lastFifoProfile.us[7]),g_lastFifoProfile.count[7]);
   if(writeConsole)
     AURORA_VITA_LOG_INFO("%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str());
   if (writeFile) {
@@ -436,6 +451,7 @@ void end_frame() noexcept {
     g_telemetry.end_frame(g_last);
   }
   ++g_frame;
+  g_lastFifoProfile=gfx::fifo_profile_take();
   emit_periodic_diagnostics();
 }
 

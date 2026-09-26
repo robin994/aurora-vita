@@ -137,4 +137,15 @@ ScopedTelemetryPhase::~ScopedTelemetryPhase() {
   if (telemetry_) telemetry_->add_time(phase_, telemetry_now_us() - startUs_);
 }
 
+FifoProfile& fifo_profile_accumulator() noexcept {
+  static FifoProfile profile{};
+  return profile;
+}
+FifoProfile fifo_profile_take() noexcept {
+  auto& profile = fifo_profile_accumulator();
+  const FifoProfile out = profile;
+  profile = FifoProfile{};
+  return out;
+}
+
 } // namespace aurora::vita::gfx
