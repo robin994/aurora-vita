@@ -21,7 +21,13 @@ configurabile (**G4**, `nativeParameterBufferBytes`).
 | G2 | Implementato: `blit_to_default` e `copy_display_region` aprono scene senza depth surface; una draw che usa il depth chiude la scena depthless |
 | S1 fase 1 | Implementato: variante senza discard creata insieme alla pipeline (coperta dal prewarm), usata solo con scissor a pieno target |
 | M2 | Implementato: display copy con triangolo statico + `u_tex_transform`; nessun `update_buffer`/`finish`, `blitVertices` non più condiviso |
-| Altre | Da fare |
+| C1 | Implementato: `BeginScene` invalida solo reservation uniform e region clip; binding texture/programma invalidati esplicitamente su reinit/distruzione |
+| C2 | Implementato: fast path del binding texture prima di lookup e validazioni |
+| C8 | Implementato: copie di `FrameStats` in DrawSink solo con telemetria |
+| S2 | Implementato: `nativeTextureWrapMask` = texture swizzled o clamp su entrambi gli assi (solo GXM) |
+| S4 | Implementato: copy mode R4/A8 e opacità RGB565 come bit `PipelineDesc`; nessun branch su uniform. Cambia `sizeof(PipelineDesc)`: il manifest hot viene ricostruito una volta |
+| Banco di prova | strikersVita, branch `experiment/gxm-optimization-testbed`, `GXM_TESTBED.md` |
+| Altre | Da fare (in attesa dei risultati hardware delle fasi 1-3) |
 
 ## Metodo e regole
 
