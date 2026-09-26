@@ -140,9 +140,9 @@ void indirect(std::ostringstream& fs,const PipelineDesc& d,const TevStage& s) {
   fs<<"float2 ind_uv="<<coordinate(d,itc)<<"*max(u_texcoord_scale["<<itc<<"].xy,float2(1.0))*float2("
     <<(1.f/float(1u<<ind.scaleSShift))<<","<<(1.f/float(1u<<ind.scaleTShift))
     <<")/max(u_texture_size_bias["<<itex<<"].xy,float2(1.0));\n"
-      "float4 ind_sample=tex2D(u_tex"<<itex<<",gx_sample_uv(ind_uv,u_tex_transform["<<itex<<"]));\n"
-      "ind_sample.a=lerp(ind_sample.a,1.0,u_tex_force_opaque["<<itex<<"]);\n"
-      "float3 ind_raw=ind_sample.abg*255.0;\nfloat3 indv=floor(ind_raw/"<<divisors[unsigned(s.indirectFormat)]<<".0);\n";
+      "float4 ind_sample=tex2D(u_tex"<<itex<<",gx_sample_uv(ind_uv,u_tex_transform["<<itex<<"]));\n";
+  if(d.textureForceOpaqueMask&(1u<<itex))fs<<"ind_sample.a=1.0;\n";
+  fs<<"float3 ind_raw=ind_sample.abg*255.0;\nfloat3 indv=floor(ind_raw/"<<divisors[unsigned(s.indirectFormat)]<<".0);\n";
   const unsigned bias=unsigned(s.indirectBias);
   const char* biasValue=s.indirectFormat==IndirectFormat::Bits8?"-128.0":"1.0";
   if(bias&1u)fs<<"indv.x+="<<biasValue<<";\n";
@@ -348,8 +348,7 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   std::vector<std::string> fp{"uniform float4 u_clip_rect",
       "uniform float4 u_kcolor[4]", "uniform float4 u_tevreg[4]",
       "uniform float4 u_ind_mtx[6]", "uniform float4 u_texcoord_scale[8]", "uniform float4 u_texture_size_bias[8]",
-      "uniform float4 u_tex_transform[8]", "uniform float4 u_tex_wrap[8]", "uniform float u_tex_force_opaque[8]",
-      "uniform float u_tex_copy_mode[8]",
+      "uniform float4 u_tex_transform[8]", "uniform float4 u_tex_wrap[8]",
       "uniform float4 u_fog_color", "uniform float4 u_fog_params", "uniform float u_fog_range_k[10]",
       "uniform float u_render_viewport_width"};
   if (d.fragmentScissor || d.fogMode != FogMode::None)
@@ -554,11 +553,12 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
       if(!nativeWrap) fs << "gx_wrap_uv(";
       fs << "gx_sample_uv(tev_uv,u_tex_transform[" << unsigned(s.texture) << "])";
       if(!nativeWrap) fs << ",u_tex_wrap[" << unsigned(s.texture) << "].xy)";
-      fs << ");\nif(u_tex_copy_mode[" << unsigned(s.texture)
-         << "]>1.5){float a=raw_tex.a;raw_tex=float4(a,a,a,a);}\n"
-         << "else if(u_tex_copy_mode[" << unsigned(s.texture)
-         << "]>0.5){float q=min(floor(raw_tex.r*16.0)/15.0,1.0);raw_tex=float4(q,q,q,q);}\n"
-         << "raw_tex.a=lerp(raw_tex.a,1.0,u_tex_force_opaque[" << unsigned(s.texture) << "]);\n";
+      fs << ");\n";
+      // Copy mode and forced opacity are pipeline state: no per-fetch branch.
+      const unsigned copyMode=(d.textureCopyModeBits>>(2u*s.texture))&3u;
+      if(copyMode==2u) fs << "raw_tex=raw_tex.aaaa;\n";
+      else if(copyMode==1u) fs << "raw_tex=float4(min(floor(raw_tex.r*16.0)/15.0,1.0));\n";
+      if(d.textureForceOpaqueMask&(1u<<s.texture)) fs << "raw_tex.a=1.0;\n";
     } else fs << "float4(1.0);\n";
     fs << "float4 texc=" << swizzle("raw_tex", d.tev.swapTable[s.texSwap]) << ";\nfloat4 raw_ras=";
     if (!tev_stage_uses_raster(s) || s.rasterSource == RasterSource::Zero) fs << "float4(0.0)";

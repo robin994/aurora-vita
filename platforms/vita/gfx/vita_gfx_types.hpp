@@ -211,6 +211,11 @@ struct PipelineDesc {
   bool positionIsClipSpace = false; // CPU-expanded GX lines/points already contain clip-space xyzw.
   bool fragmentScissor = true; // Native GXM may omit clipping only for the complete target.
   uint8_t nativeTextureWrapMask = 0; // Swizzled samplers perform wrapping/filtering at seams.
+  // Per texture unit, baked into the native shader instead of uniform branches
+  // in every fetch: force alpha to 1 (RGB565 EFB copies) and the EFB copy
+  // sample mode (efb_copy_sample_mode, 2 bits per unit: 0 color, 1 R4, 2 A8).
+  uint8_t textureForceOpaqueMask = 0;
+  uint16_t textureCopyModeBits = 0;
   bool fixedVertexOnGpu = false; // Raw object-space inputs; GX vertex processing runs in the shader.
   bool fixedVertexIndexedPn = false; // Per-vertex GX PNMTXIDX selects the 10-entry position/normal palette.
   // Per-vertex GX texture-matrix selectors consumed by the native fixed-vertex

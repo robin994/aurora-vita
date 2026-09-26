@@ -626,11 +626,31 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // Resolved before the pipeline: the samplers decide whether the generated
   // shader may leave wrapping to the texture unit (swizzled texture, or clamp
   // on both axes). Without the emulated wrap the fetch stays non-dependent.
-  if (translatedPipeline_.nativeTextureWrapMask != nativeWrapMask) {
+  uint8_t forceOpaqueMask = 0;
+  uint16_t copyModeBits = 0;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  // The native shader bakes EFB copy sampling (RGB565 opacity, R4/A8
+  // expansion) per unit instead of branching on uniforms in every fetch.
+  for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
+    if (!(textureMask & (1u << slot))) continue;
+    if (bindings[slot].forceOpaque) forceOpaqueMask |= static_cast<uint8_t>(1u << slot);
+    copyModeBits |= static_cast<uint16_t>(
+        gfx::efb_copy_sample_mode(bindings[slot].sampleFormat) << (2u * slot));
+  }
+#endif
+  if (translatedPipeline_.nativeTextureWrapMask != nativeWrapMask ||
+      translatedPipeline_.textureForceOpaqueMask != forceOpaqueMask ||
+      translatedPipeline_.textureCopyModeBits != copyModeBits) {
     translatedPipeline_.nativeTextureWrapMask = nativeWrapMask;
+    translatedPipeline_.textureForceOpaqueMask = forceOpaqueMask;
+    translatedPipeline_.textureCopyModeBits = copyModeBits;
     translatedPipelineKey_ = gfx::pipeline_key(translatedPipeline_);
   }
-  if (staticGeometry_) translatedGpuPipeline_.nativeTextureWrapMask = nativeWrapMask;
+  if (staticGeometry_) {
+    translatedGpuPipeline_.nativeTextureWrapMask = nativeWrapMask;
+    translatedGpuPipeline_.textureForceOpaqueMask = forceOpaqueMask;
+    translatedGpuPipeline_.textureCopyModeBits = copyModeBits;
+  }
   const uint64_t translatedPipelineKey = translatedPipelineKey_;
   if (pipeline.blendMode == gfx::BlendMode::Logic && pipeline.logicOp != gfx::LogicOp::Clear &&
       pipeline.logicOp != gfx::LogicOp::Copy && pipeline.logicOp != gfx::LogicOp::Noop) {

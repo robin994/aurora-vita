@@ -135,6 +135,20 @@ void shader_operations() {
     REQUIRE(native.ok());
     REQUIRE(native.fragment.find("tex2D(u_tex0,gx_sample_uv(") != std::string::npos);
     REQUIRE(native.fragment.find("u_tex_wrap[0]") == std::string::npos);
+    // Ordinary textures carry no EFB copy branches at all.
+    REQUIRE(native.fragment.find("u_tex_copy_mode") == std::string::npos);
+    REQUIRE(native.fragment.find("u_tex_force_opaque") == std::string::npos);
+    REQUIRE(native.fragment.find("raw_tex.a=1.0") == std::string::npos);
+    const auto plainKey = pipeline_key(d);
+    d.textureCopyModeBits = 2u;
+    d.textureForceOpaqueMask = 1u;
+    REQUIRE(pipeline_key(d) != plainKey);
+    const auto copy = gxm::build_tev_cg(d);
+    REQUIRE(copy.ok());
+    REQUIRE(copy.fragment.find("raw_tex=raw_tex.aaaa;") != std::string::npos);
+    REQUIRE(copy.fragment.find("raw_tex.a=1.0;") != std::string::npos);
+    d.textureCopyModeBits = 1u;
+    REQUIRE(gxm::build_tev_cg(d).fragment.find("floor(raw_tex.r*16.0)/15.0") != std::string::npos);
   }
   for (unsigned av = 0; av < 2; ++av) for (unsigned bv = 0; bv < 2; ++bv)
     for (unsigned op = 0; op < 4; ++op) {

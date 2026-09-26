@@ -12,6 +12,7 @@ uint64_t pipeline_key(const PipelineDesc& d) noexcept {
   add(h,d.fixedPointSprite);add(h,d.fixedLineSprite);add(h,d.fixedPrimitiveTexcoordMask);
   add(h,d.fragmentScissor);
   add(h,d.nativeTextureWrapMask);
+  add(h,d.textureForceOpaqueMask);add(h,d.textureCopyModeBits);
   for(const auto&c:d.colorChannels){add(h,c.materialSource);add(h,c.ambientSource);add(h,c.diffuse);add(h,c.attenuation);add(h,c.lightingEnabled);add(h,c.lightMask);}
   add(h,d.tev.stageCount);add(h,d.tev.texCoordCount);add(h,d.tev.rasterColorCount);add(h,d.tev.indirectStageCount);
   for(const auto&s:d.tev.swapTable){add(h,s.r);add(h,s.g);add(h,s.b);add(h,s.a);}

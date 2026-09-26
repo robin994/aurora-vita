@@ -1704,6 +1704,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     p.layout.attributes[1]={3,3,VertexScalar::F32,false,28,16};
     p.tev.stages[0].texture=0;p.tev.stages[0].texCoord=0;
     p.tev.stages[0].color.d=TevColorArg::TexColor;p.tev.stages[0].alpha.d=TevAlphaArg::TexAlpha;
+    p.textureForceOpaqueMask=format==EfbCopyFormat::RGB565?1u:0u;
     const auto key=create_pipeline(p);
     if(!key)return false;
     if(!d.copyVertices) {
