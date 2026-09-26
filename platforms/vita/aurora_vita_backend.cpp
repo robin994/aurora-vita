@@ -410,6 +410,7 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.staticGeometryStableOnly=c.static_geometry_stable_only;
   dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
   dc.allowStreamedFixedVertexGpu=c.gxm_streamed_fixed_vertex_gpu;
+  dc.displayListPipelineFastPath=c.gxm_dl_pipeline_fast_path;
   dc.allowDynamicTexMatrixGpu=c.gxm_dynamic_tex_matrix_gpu;
   dc.allowBumpFixedVertexGpu=c.gxm_bump_fixed_vertex_gpu;
   dc.allowPrimitiveExpansionGpu=c.gxm_primitive_expand_gpu;

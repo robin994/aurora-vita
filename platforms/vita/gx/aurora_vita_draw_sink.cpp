@@ -9,6 +9,7 @@
 #include "../../../tests/upstream_gx_stub.hpp"
 #else
 #include "../../../lib/gx/gx.hpp"
+#include "../../../lib/gx/command_processor.hpp"
 #endif
 #endif
 #include <array>
@@ -53,6 +54,7 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   strictUnsupported_ = config.strictUnsupported;
   allowLitFixedVertexGpu_ = config.allowLitFixedVertexGpu;
   allowStreamedFixedVertexGpu_ = config.allowStreamedFixedVertexGpu;
+  displayListPipelineFastPath_ = config.displayListPipelineFastPath;
   allowDynamicTexMatrixGpu_ = config.allowDynamicTexMatrixGpu;
   allowBumpFixedVertexGpu_ = config.allowBumpFixedVertexGpu;
   allowPrimitiveExpansionGpu_ = config.allowPrimitiveExpansionGpu;
@@ -119,6 +121,7 @@ void DrawSink::shutdown() noexcept {
   stream_.reset();
   preparedScratch_=gfx::PreparedDraw{};
   fixedVertexUniforms_.clear();staticGeometry_.reset();fixedPipelineKeys_.clear();
+  dlPipelineSites_.clear();
   translatedVertexStateValid_=false;
   translatedVertexStateLightweight_=false;
 #if defined(AURORA_VITA_UPSTREAM)
@@ -469,6 +472,44 @@ void DrawSink::clear_copy_textures() noexcept {
   resolvedTextureBindingsValid_=false;
 }
 
+void DrawSink::build_dl_fingerprint(std::array<uint32_t, DlFingerprintWords>& out, uint8_t primitive,
+                                    uint8_t fmt) noexcept {
+  // Every GX input of translate_current_pipeline, read from the raw register
+  // caches (cheap, stable) plus decoded values for state that two banks can
+  // write (texgen/stage counts, texgen matrix ids) or that carries unrelated
+  // bits (fog C parameter, PN matrix index).
+  const auto& g = aurora::gx::g_gxState;
+  size_t n = 0;
+  const auto bp = [&](unsigned reg, uint32_t mask = 0x00FFFFFFu) { out[n++] = g.bpRegCache[reg] & mask; };
+  bp(0x00);                                           // genMode: counts, cull
+  for (unsigned r = 0x10; r <= 0x1F; ++r) bp(r);      // indirect TEV stages
+  for (unsigned r = 0x25; r <= 0x2F; ++r) bp(r);      // ind scale/ref, TEV order
+  for (unsigned r = 0x40; r <= 0x43; ++r) bp(r);      // z, blend, dst alpha, pe ctrl
+  for (unsigned r = 0xC0; r <= 0xDF; ++r) bp(r);      // TEV color/alpha combiners
+  bp(0xF1, 0x00F00000u);                              // fog type only
+  bp(0xF3);                                           // alpha compare
+  for (unsigned r = 0xF6; r <= 0xFD; ++r) bp(r);      // konst sel, swap table
+  for (unsigned r = 0x0E; r <= 0x12; ++r) out[n++] = g.xfRegCache[r];  // channels, dual tex
+  for (unsigned r = 0x40; r <= 0x5F; ++r) out[n++] = g.xfRegCache[r];  // texgens, post tex
+  namespace cp = aurora::gx::fifo;
+  out[n++] = cp::cp_register_value(0x50);
+  out[n++] = cp::cp_register_value(0x60);
+  out[n++] = cp::cp_register_value(static_cast<uint8_t>(0x70 + (fmt & 7)));
+  out[n++] = cp::cp_register_value(static_cast<uint8_t>(0x80 + (fmt & 7)));
+  out[n++] = cp::cp_register_value(static_cast<uint8_t>(0x90 + (fmt & 7)));
+  out[n++] = g.numTexGens | (uint32_t(g.numChans) << 8) | (uint32_t(g.numTevStages) << 16) |
+             (uint32_t(primitive) << 24);
+  uint32_t mtx0 = 0, mtx1 = 0;
+  for (unsigned i = 0; i < 4; ++i) {
+    mtx0 |= (static_cast<uint32_t>(g.tcgs[i].mtx) & 0xFFu) << (i * 8);
+    mtx1 |= (static_cast<uint32_t>(g.tcgs[i + 4].mtx) & 0xFFu) << (i * 8);
+  }
+  out[n++] = mtx0;
+  out[n++] = mtx1;
+  out[n++] = fmt;
+  while (n < out.size()) out[n++] = 0;
+}
+
 SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* rawVertices,
                               size_t rawBytes, uint32_t vertexCount,
                               const uint16_t* rawIndices, uint32_t indexCount,
@@ -509,9 +550,41 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (telemetry_) telemetry_->count_pipeline_translation();
     {
       gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StatePipeline);
-      const bool memoHit=translate_current_pipeline_and_layout(primitive, fmt, translatedPipeline_,
-                                                               translatedLayout_, translatedBaseKey_, telemetry_);
-      if (telemetry_ && memoHit) telemetry_->count_translation_memo_hit();
+      DlPipelineSite* site = nullptr;
+      bool siteHit = false;
+      std::array<uint32_t, DlFingerprintWords> fingerprint;
+      if (displayListPipelineFastPath_ && stableSource != nullptr) {
+        gfx::ScopedTelemetryPhase memo(telemetry_,gfx::TelemetryPhase::StateMemo);
+        build_dl_fingerprint(fingerprint, primitive, fmt);
+        const auto it = dlPipelineSites_.find(reinterpret_cast<uintptr_t>(stableSource));
+        if (it != dlPipelineSites_.end()) {
+          site = it->second.get();
+          siteHit = site->fingerprint == fingerprint;
+        }
+      }
+      if (siteHit) {
+        // Same draw site, same pipeline inputs: only the decode layout (array
+        // bases) can differ, and it is rebuilt.
+        translatedPipeline_ = site->pipeline;
+        translatedBaseKey_ = site->key;
+        gfx::ScopedTelemetryPhase layoutPhase(telemetry_,gfx::TelemetryPhase::StateLayout);
+        translatedLayout_ = translate_current_vertex_layout(fmt);
+        if (telemetry_) telemetry_->count_translation_memo_hit();
+      } else {
+        (void)translate_current_pipeline_and_layout(primitive, fmt, translatedPipeline_,
+                                                    translatedLayout_, translatedBaseKey_, telemetry_);
+        if (displayListPipelineFastPath_ && stableSource != nullptr) {
+          if (!site) {
+            if (dlPipelineSites_.size() >= 4096) dlPipelineSites_.clear();
+            auto owned = std::make_unique<DlPipelineSite>();
+            site = owned.get();
+            dlPipelineSites_.emplace(reinterpret_cast<uintptr_t>(stableSource), std::move(owned));
+          }
+          site->fingerprint = fingerprint;
+          site->pipeline = translatedPipeline_;
+          site->key = translatedBaseKey_;
+        }
+      }
     }
     translatedPipelineKey_ = translatedBaseKey_;
     // Streamed fixed-vertex draws need their own translated GPU pipeline too.

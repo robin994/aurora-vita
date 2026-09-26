@@ -1470,6 +1470,8 @@ void reset_cp_register_cache() {
   s_cpRegisterCacheValid.fill(false);
 }
 
+uint32_t cp_register_value(uint8_t addr) { return s_cpRegisterCache[addr]; }
+
 static bool cp_register_write_unchanged(u8 addr, u32 value) {
   if (!cacheable_cp_register(addr)) return false;
 

@@ -115,11 +115,15 @@ struct BackendConfig {
 #if defined(AURORA_VITA_RENDERER_GXM)
   bool gxm_lit_fixed_vertex_gpu=true;
   bool gxm_streamed_fixed_vertex_gpu=false;
+  // Reuse translated pipelines per display-list draw site while the GX registers
+  // feeding translation are unchanged (validated by an exact register fingerprint).
+  bool gxm_dl_pipeline_fast_path=false;
   size_t static_geometry_budget=8*1024*1024;
   bool static_geometry_stable_only=false;
 #else
   bool gxm_lit_fixed_vertex_gpu=false;
   bool gxm_streamed_fixed_vertex_gpu=false;
+  bool gxm_dl_pipeline_fast_path=false;
   size_t static_geometry_budget=0;
   bool static_geometry_stable_only=false;
 #endif

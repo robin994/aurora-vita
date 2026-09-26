@@ -7,6 +7,9 @@ namespace aurora::gx::fifo {
 
 // Reset the CP write-deduplication state whenever the GX shadow state is reinitialized.
 void reset_cp_register_cache();
+// Last raw value written to a deduplicated CP register (VCD, VAT, matrix
+// index); 0 before the first write.
+uint32_t cp_register_value(uint8_t addr);
 
 // Process a buffer of GX FIFO commands
 void process(const uint8_t* data, uint32_t size, bool bigEndian);

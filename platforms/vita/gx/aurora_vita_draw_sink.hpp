@@ -58,6 +58,9 @@ struct DrawSinkConfig {
   bool staticGeometryStableOnly = false;
   bool allowLitFixedVertexGpu = false;
   bool allowStreamedFixedVertexGpu = false;
+  // Reuse the translated pipeline of a display-list draw site while the raw
+  // GX registers feeding pipeline translation are unchanged.
+  bool displayListPipelineFastPath = false;
   bool allowDynamicTexMatrixGpu = false;
   bool allowBumpFixedVertexGpu = false;
   bool allowPrimitiveExpansionGpu = false;
@@ -170,6 +173,18 @@ private:
   bool strictFailed_ = false;
   bool allowLitFixedVertexGpu_ = false;
   bool allowStreamedFixedVertexGpu_ = false;
+  bool displayListPipelineFastPath_ = false;
+  // Fingerprint of every raw register/decoded count that feeds
+  // translate_current_pipeline for one vertex format (see draw_sink.cpp).
+  static constexpr size_t DlFingerprintWords = 136;
+  struct DlPipelineSite {
+    std::array<uint32_t, DlFingerprintWords> fingerprint{};
+    gfx::PipelineDesc pipeline{};
+    uint64_t key = 0;
+  };
+  gfx::FlatHashMap<uintptr_t, std::unique_ptr<DlPipelineSite>> dlPipelineSites_{};
+  static void build_dl_fingerprint(std::array<uint32_t, DlFingerprintWords>& out, uint8_t primitive,
+                                   uint8_t fmt) noexcept;
   bool allowDynamicTexMatrixGpu_ = false;
   bool allowBumpFixedVertexGpu_ = false;
   bool allowPrimitiveExpansionGpu_ = false;
