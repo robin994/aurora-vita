@@ -1121,6 +1121,9 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(!d.pipelineStateValid||d.boundPipelineKey!=key) {
     sceGxmSetVertexProgram(d.context,p.vertex);
     sceGxmSetFragmentProgram(d.context,p.fragment);
+    // Setting a program ends that pipeline's default uniform reservation
+    // (libgxm Overview 6.3): never reuse a reservation across a program change.
+    d.vertexUniformState.valid=false;d.fragmentUniformState.valid=false;
     const auto compare=pipeline.depthTest?depth_func(pipeline.depthFunc):SCE_GXM_DEPTH_FUNC_ALWAYS;
     const auto write=pipeline.depthTest&&pipeline.depthWrite?SCE_GXM_DEPTH_WRITE_ENABLED:SCE_GXM_DEPTH_WRITE_DISABLED;
     sceGxmSetFrontDepthFunc(d.context,compare);sceGxmSetBackDepthFunc(d.context,compare);

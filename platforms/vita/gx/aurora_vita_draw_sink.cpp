@@ -12,6 +12,8 @@
 #endif
 #endif
 #include <array>
+#include <cstddef>
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -996,17 +998,22 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     // Consecutive draws with the same vertex state and GPU pipeline share one
     // immutable snapshot; the renderer recognises it by revision.
     const bool spriteExpand=translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite;
-    const bool reuseFixed=!spriteExpand&&!gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot)&&lastFixedUniforms_&&lastFixedVertexVersion_==vertexStateVersion_&&
-                          lastFixedPipelineKey_==resolvedPipelineKey;
-    gfx::FixedVertexUniforms& fixed=reuseFixed?*lastFixedUniforms_:fixedVertexUniforms_.emplace_back();
-    if(!reuseFixed){
-      gfx::fixed_vertex_uniforms_into(fixed,translatedGpuPipeline_,vertexState);
+    // Build the snapshot, then share the previous one when the contents are
+    // byte-identical (exact: hardware bisection showed version/key-based
+    // sharing could reuse a snapshot whose inputs had changed).
+    gfx::FixedVertexUniforms& fixed=fixedVertexUniforms_.emplace_back();
+    gfx::fixed_vertex_uniforms_into(fixed,translatedGpuPipeline_,vertexState);
+    const bool reuseFixed=!spriteExpand&&!gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot)&&lastFixedUniforms_&&
+        std::memcmp(lastFixedUniforms_,&fixed,offsetof(gfx::FixedVertexUniforms,revision))==0;
+    if(reuseFixed){
+      fixedVertexUniforms_.pop_back();
+    }else{
       fixed.revision=++fixedUniformRevision_;
       lastFixedUniforms_=spriteExpand?nullptr:&fixed;
-      lastFixedVertexVersion_=vertexStateVersion_;lastFixedPipelineKey_=resolvedPipelineKey;
     }
+    gfx::FixedVertexUniforms& shared=reuseFixed?*lastFixedUniforms_:fixed;
     if(spriteExpand){
-      fixed.primitiveExpand={{
+      shared.primitiveExpand={{
         std::max(expansion.viewportWidth,1.f),std::max(expansion.viewportHeight,1.f),
         translatedGpuPipeline_.fixedPointSprite?expansion.pointSizePixels:expansion.lineWidthPixels,
         translatedGpuPipeline_.fixedPointSprite?expansion.pointTexOffset:expansion.lineTexOffset
@@ -1017,7 +1024,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
     packet.textures=bindings;packet.uniforms=uniforms;packet.uniformRevision=vertexStateVersion_;
     packet.viewport=translate_viewport();packet.scissor=translate_scissor();
-    packet.fixedVertexUniforms=&fixed;
+    packet.fixedVertexUniforms=&shared;
     enqueued=true;
     queuedPipelineValid_=false;
   }else if(useStreamed) {

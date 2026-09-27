@@ -129,7 +129,7 @@ private:
   std::deque<gfx::FixedVertexUniforms> fixedVertexUniforms_{};
   // Snapshot reuse across consecutive GPU-geometry draws (see submit()).
   gfx::FixedVertexUniforms* lastFixedUniforms_ = nullptr;
-  uint64_t vertexStateVersion_ = 0, lastFixedVertexVersion_ = 0, lastFixedPipelineKey_ = 0;
+  uint64_t vertexStateVersion_ = 0;
   uint64_t fixedUniformRevision_ = 0;
   gfx::PipelineDesc translatedGpuPipeline_{};
   gfx::FlatHashMap<uint64_t,uint64_t> fixedPipelineKeys_{};
