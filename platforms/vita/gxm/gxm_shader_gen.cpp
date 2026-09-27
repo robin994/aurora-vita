@@ -174,11 +174,6 @@ void indirect(std::ostringstream& fs,const PipelineDesc& d,const TevStage& s) {
   if(!simple)fs<<"/max(u_texture_size_bias["<<tex<<"].xy,float2(1.0))";
   fs<<";\n";
 }
-std::string fog_range(const std::string& index) {
-  std::string result="u_fog_range_k[9]";
-  for(int i=8;i>=0;--i)result="("+index+"<"+std::to_string(i)+".5?u_fog_range_k["+std::to_string(i)+"]:"+result+")";
-  return result;
-}
 } // namespace
 
 std::string validate_pipeline(const gfx::PipelineDesc& d) {
@@ -349,7 +344,7 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
       "uniform float4 u_kcolor[4]", "uniform float4 u_tevreg[4]",
       "uniform float4 u_ind_mtx[6]", "uniform float4 u_texcoord_scale[8]", "uniform float4 u_texture_size_bias[8]",
       "uniform float4 u_tex_transform[8]", "uniform float4 u_tex_wrap[8]",
-      "uniform float4 u_fog_color", "uniform float4 u_fog_params", "uniform float u_fog_range_k[10]",
+      "uniform float4 u_fog_color", "uniform float4 u_fog_params", "uniform float4 u_fog_range_k[3]",
       "uniform float u_render_viewport_width"};
   if (d.fragmentScissor || d.fogMode != FogMode::None)
     fp.push_back("float4 window_position : WPOS");
@@ -603,8 +598,13 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     if(d.fogRangeEnabled) {
       fs<<"float sx=window_position.x/max(u_render_viewport_width,1.0)*2.0-1.0;\n"
           "float fo=sx-u_fog_params.w;float ri=clamp(9.0-abs(fo)*9.0,0.0,9.0);\n"
-          "float lo=floor(ri),hi=min(lo+1.0,9.0);float fk=max(lerp("
-        <<fog_range("lo")<<","<<fog_range("hi")<<",ri-lo),0.000001);\nfb*=sqrt(fo*fo+fk*fk)/fk;\n";
+          // Piecewise-linear lookup of the 10 GX range-adjustment knots as a sum of
+          // hat functions: identical to lerp(k[floor(ri)],k[floor(ri)+1],frac(ri))
+          // but branch-free and vectorised (the knots are packed as float4[3]).
+          "float fk=max(dot(saturate(1.0-abs(ri-float4(0.0,1.0,2.0,3.0))),u_fog_range_k[0])+"
+          "dot(saturate(1.0-abs(ri-float4(4.0,5.0,6.0,7.0))),u_fog_range_k[1])+"
+          "dot(saturate(1.0-abs(ri-float2(8.0,9.0))),u_fog_range_k[2].xy),0.000001);\n"
+          "fb*=sqrt(fo*fo+fk*fk)/fk;\n";
     }
     fs<<"float f=clamp(fb-u_fog_params.z,0.0,1.0);\n";
     switch(d.fogMode) {
