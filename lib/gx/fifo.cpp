@@ -82,6 +82,9 @@ struct VitaWorkerState {
 };
 
 VitaWorkerState sVitaWorker{};
+// Game-thread time blocked on the worker: waiting for a free queue slot and
+// waiting for a serial/draw-done token. Read and cleared by take_wait_stats().
+std::atomic<uint64_t> sProducerWaitUs{0}, sConsumerWaitUs{0};
 
 bool on_worker_thread() noexcept {
   return sVitaWorker.thread >= 0 && sceKernelGetThreadId() == sVitaWorker.thread;
@@ -150,7 +153,12 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
                      bool bigEndian = true, const void* ownedContext = nullptr,
                      size_t ownedContextBytes = 0) {
   if (!sVitaWorker.running.load(std::memory_order_acquire)) return 0;
-  while (sceKernelWaitSema(sVitaWorker.space, 1, nullptr) < 0) sceKernelDelayThread(100);
+  {
+    // Producer back-pressure: time the game thread waits for a free slot.
+    const uint64_t t0 = aurora::vita::gfx::telemetry_now_us();
+    while (sceKernelWaitSema(sVitaWorker.space, 1, nullptr) < 0) sceKernelDelayThread(100);
+    sProducerWaitUs.fetch_add(aurora::vita::gfx::telemetry_now_us() - t0, std::memory_order_relaxed);
+  }
 
   VitaJob& job = sVitaWorker.jobs[sVitaWorker.producer % VitaQueueDepth];
   job.type = type;
@@ -177,6 +185,10 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
 
 void wait_serial(uint64_t serial) noexcept {
   if (serial == 0) return;
+  if (sVitaWorker.completed.load(std::memory_order_acquire) >= serial) return;
+  const uint64_t t0 = aurora::vita::gfx::telemetry_now_us();
+  struct Account { uint64_t t0; ~Account() {
+    sConsumerWaitUs.fetch_add(aurora::vita::gfx::telemetry_now_us() - t0, std::memory_order_relaxed); } } account{t0};
   while (sVitaWorker.completed.load(std::memory_order_acquire) < serial) {
     if (sceKernelWaitSema(sVitaWorker.completedSignal, 1, nullptr) < 0) sceKernelDelayThread(100);
   }
@@ -209,7 +221,7 @@ bool start_worker() {
   }
   sVitaWorker.thread = sceKernelCreateThread("melee_gx_frontend", vita_worker_main, 0x10000100,
                                              VitaWorkerStackBytes, 0,
-                                             SCE_KERNEL_CPU_MASK_USER_1, nullptr);
+                                             SCE_KERNEL_CPU_MASK_USER_2, nullptr);
   if (sVitaWorker.thread < 0) {
     destroy_worker_primitives();
     return false;
@@ -224,6 +236,11 @@ bool start_worker() {
 }
 
 bool worker_running() { return sVitaWorker.running.load(std::memory_order_acquire); }
+
+void take_wait_stats(uint64_t& producerWaitUs, uint64_t& consumerWaitUs) {
+  producerWaitUs = sProducerWaitUs.exchange(0, std::memory_order_relaxed);
+  consumerWaitUs = sConsumerWaitUs.exchange(0, std::memory_order_relaxed);
+}
 
 void wait_idle() {
   if (!worker_running() || on_worker_thread()) return;

@@ -38,6 +38,8 @@ using VitaWorkerTask = void (*)(void*);
 bool start_worker();
 void shutdown_worker();
 bool worker_running();
+// Game-thread wait time accumulated since the previous call (microseconds).
+void take_wait_stats(uint64_t& producerWaitUs, uint64_t& consumerWaitUs);
 
 // `drain()` only seals/enqueues the producer buffer on Vita. Use these barriers
 // for APIs that need the decoded GX state or renderer side effects immediately.
