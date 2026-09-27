@@ -529,6 +529,10 @@ enum GxmDisableBits : uint32_t {
   // Diagnostic, not an optimization switch: sceGxmFinish after every scene and
   // record the GPU time per scene (FrameStats::diagSceneGpuUs). Serializes CPU/GPU.
   GxmDiagSceneFinish = 1u << 8,
+  // Diagnostic: every 300th frame, time the first 16 draws individually on the
+  // GPU (scene split + sceGxmFinish per draw) and append them to
+  // diagnostics/gxm_draw_gpu.log. Heavily perturbs that frame only.
+  GxmDiagDrawGpu = 1u << 9,
 };
 inline uint32_t& gxm_disable_mask() noexcept { static uint32_t mask = 0; return mask; }
 inline bool gxm_disabled(uint32_t bit) noexcept { return (gxm_disable_mask() & bit) != 0; }

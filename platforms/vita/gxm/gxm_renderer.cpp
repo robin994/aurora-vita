@@ -430,6 +430,37 @@ struct Renderer::Impl {
     sceneDepthless = false;
     return check(result, "end native scene");
   }
+  // GxmDiagDrawGpu: per-draw GPU cost of the first draws of a sampled frame.
+  uint64_t diagDrawFrame = 0; uint32_t diagDrawIndex = 0; uint64_t diagFrameCounter = 0;
+  void diag_draw_gpu(const DrawPacket& packet, const Pipeline& p) {
+    if (diagDrawFrame != diagFrameCounter) { diagDrawFrame = diagFrameCounter; diagDrawIndex = 0; }
+    if (diagFrameCounter % 300u != 150u || diagDrawIndex >= 16u) return;
+    const uint32_t index = diagDrawIndex++;
+    const uint32_t target = static_cast<uint32_t>(boundTarget);
+    const uint64_t t0 = sceKernelGetProcessTimeWide();
+    if (!end_scene()) return;
+    sceGxmFinish(context);
+    const uint64_t gpuUs = sceKernelGetProcessTimeWide() - t0;
+    char line[768];
+    int n = std::snprintf(line, sizeof line,
+        "frame=%llu draw=%u gpu_us=%llu target=%u idx=%u fixed=%u blend=%u depth=%u/%u stages=%u tex:",
+        static_cast<unsigned long long>(diagFrameCounter), index, static_cast<unsigned long long>(gpuUs), target,
+        packet.indexCount, p.desc.fixedVertexOnGpu ? 1u : 0u, static_cast<unsigned>(p.desc.blendMode),
+        p.desc.depthTest ? 1u : 0u, p.desc.depthWrite ? 1u : 0u, static_cast<unsigned>(p.desc.tev.stageCount));
+    for (unsigned i = 0; i < MaxTextures && n > 0 && n < int(sizeof line) - 96; ++i) {
+      if (!(p.textureMask & (1u << i))) continue;
+      const auto it = textures.find(packet.textures[i].texture);
+      if (it == textures.end()) continue;
+      const auto& t = *it->second;
+      n += std::snprintf(line + n, sizeof line - size_t(n), " [%u %ux%u fmt=0x%08x swz=%u mips=%u pool=%u bytes=%u]", i,
+          t.width, t.height, unsigned(sceGxmTextureGetFormat(&t.descriptor)), t.swizzled ? 1u : 0u, t.mipCount,
+          static_cast<unsigned>(t.memory.pool()), static_cast<unsigned>(t.memory.size()));
+    }
+    auto path = data_path("diagnostics/gxm_draw_gpu.log");
+    if (path.empty()) path = "ux0:data/gxm_draw_gpu.log";
+    ensure_parent_directory(path.c_str());
+    if (FILE* f = std::fopen(path.c_str(), "a")) { std::fprintf(f, "%s\n", line); std::fclose(f); }
+  }
   bool ensure_scene() {
     if (inScene) return true;
     if (!frameActive) return fail("draw outside a frame");
@@ -1012,7 +1043,7 @@ bool Renderer::begin_frame() {
     return d.fail("invalid begin_frame");
   const int displayError = d.displayError.load(std::memory_order_relaxed);
   if (displayError < 0) return d.fail("display callback failed", displayError);
-  d.stats = {}; d.frameStarted = sceKernelGetProcessTimeWide();
+  d.stats = {}; d.frameStarted = sceKernelGetProcessTimeWide(); ++d.diagFrameCounter;
   d.profileDraws = (++d.profileFrame % 120u) == 60u;
   d.stats.nativeTimingsSampled=d.profileDraws;
   d.frameActive = true; d.boundTarget = 0;
@@ -1372,6 +1403,7 @@ bool Renderer::draw(const DrawPacket& packet) {
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
   if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;
   if(d.profileDraws) d.stats.nativeDrawUs+=sceKernelGetProcessTimeWide()-profileTick;
+  if(gxm_disabled(GxmDiagDrawGpu)) d.diag_draw_gpu(packet,p);
   pi->second->inFlight = true; active->inFlight = true;
   vi->second.inFlight = true; ii->second.inFlight = true;
   ++d.stats.drawCalls;
