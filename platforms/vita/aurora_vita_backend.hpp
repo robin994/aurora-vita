@@ -112,6 +112,9 @@ struct BackendConfig {
   // Experimental native-GXM A/B profile: cache immutable geometry and keep
   // eligible lit GX vertex work on the GPU. VitaGL/host keep the conservative
   // CPU defaults. Ports can still force the GXM control path with false/0.
+  // Keep cached-RAM copies of CDRAM display lists between frames. Requires the
+  // port to publish every write to display-list memory (see fifo.hpp).
+  bool display_list_shadow=true;
 #if defined(AURORA_VITA_RENDERER_GXM)
   bool gxm_lit_fixed_vertex_gpu=true;
   bool gxm_streamed_fixed_vertex_gpu=false;

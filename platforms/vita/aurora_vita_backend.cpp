@@ -260,6 +260,9 @@ bool initialize(const BackendConfig& c) noexcept {
 #endif
   g_telemetryEnabled=c.diagnostics||c.telemetry_log_path;
   gfx::set_fifo_profile_enabled(g_telemetryEnabled);
+#if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow);
+#endif
   g_coverageEnabled=c.diagnostics||c.coverage_log_path;
   g_traceEnabled=c.diagnostics||c.trace_log_path;
   g_diagnosticsEnabled=g_telemetryEnabled||g_coverageEnabled||g_traceEnabled;

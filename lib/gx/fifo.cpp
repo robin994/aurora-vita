@@ -380,8 +380,10 @@ struct DisplayListShadow {
 constexpr size_t DisplayListShadowBudget = 8u * 1024u * 1024u;
 aurora::vita::gfx::FlatHashMap<uintptr_t, DisplayListShadow> sDisplayListShadows;
 size_t sDisplayListShadowBytes = 0;
+bool sDisplayListShadowEnabled = true;
 
 const uint8_t* display_list_shadow(const void* data, uint32_t length) {
+  if (!sDisplayListShadowEnabled) return nullptr;
   const uintptr_t address = reinterpret_cast<uintptr_t>(data);
   // Only CDRAM (uncached CPU mapping) benefits; cached RAM is read directly.
   if (address < 0x60000000u || address >= 0x70000000u) return nullptr;
@@ -405,6 +407,16 @@ const uint8_t* display_list_shadow(const void* data, uint32_t length) {
   return shadow.bytes.data();
 }
 } // namespace
+#endif
+
+#if defined(MKW_TARGET_VITA)
+void set_display_list_shadow_enabled(bool enabled) {
+  sDisplayListShadowEnabled = enabled;
+  if (!enabled) {
+    sDisplayListShadows.clear();
+    sDisplayListShadowBytes = 0;
+  }
+}
 #endif
 
 void write_stable_data(const void* data, uint32_t length) {
