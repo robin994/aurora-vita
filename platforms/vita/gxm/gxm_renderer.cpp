@@ -22,6 +22,7 @@
 #include <limits>
 #include <new>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include "gfx/vita_hash_map.hpp"
@@ -432,6 +433,7 @@ struct Renderer::Impl {
   }
   // GxmDiagDrawGpu: per-draw GPU cost of the first draws of a sampled frame.
   uint64_t diagDrawFrame = 0; uint32_t diagDrawIndex = 0; uint64_t diagFrameCounter = 0;
+  std::unordered_set<uint64_t> diagDumpedKeys;
   void diag_draw_gpu(const DrawPacket& packet, const Pipeline& p) {
     if (diagDrawFrame != diagFrameCounter) { diagDrawFrame = diagFrameCounter; diagDrawIndex = 0; }
     if (diagFrameCounter % 300u != 150u || diagDrawIndex >= 16u) return;
@@ -443,10 +445,26 @@ struct Renderer::Impl {
     const uint64_t gpuUs = sceKernelGetProcessTimeWide() - t0;
     char line[768];
     int n = std::snprintf(line, sizeof line,
-        "frame=%llu draw=%u gpu_us=%llu target=%u idx=%u fixed=%u blend=%u depth=%u/%u stages=%u tex:",
+        "frame=%llu draw=%u gpu_us=%llu target=%u idx=%u fixed=%u blend=%u depth=%u/%u stages=%u vp=%u fp=%u key=%016llx tex:",
         static_cast<unsigned long long>(diagFrameCounter), index, static_cast<unsigned long long>(gpuUs), target,
         packet.indexCount, p.desc.fixedVertexOnGpu ? 1u : 0u, static_cast<unsigned>(p.desc.blendMode),
-        p.desc.depthTest ? 1u : 0u, p.desc.depthWrite ? 1u : 0u, static_cast<unsigned>(p.desc.tev.stageCount));
+        p.desc.depthTest ? 1u : 0u, p.desc.depthWrite ? 1u : 0u, static_cast<unsigned>(p.desc.tev.stageCount),
+        p.vertexCode ? unsigned(p.vertexCode->code.size() * 4u) : 0u,
+        p.fragmentCode ? unsigned(p.fragmentCode->code.size() * 4u) : 0u,
+        static_cast<unsigned long long>(packet.pipelineKey));
+    if (diagDumpedKeys.insert(packet.pipelineKey).second) {
+      const auto source = build_tev_cg(p.desc);
+      char name[96];
+      std::snprintf(name, sizeof name, "diagnostics/cg_%016llx.txt", static_cast<unsigned long long>(packet.pipelineKey));
+      auto cgPath = data_path(name);
+      if (!cgPath.empty()) {
+        ensure_parent_directory(cgPath.c_str());
+        if (FILE* f = std::fopen(cgPath.c_str(), "wb")) {
+          std::fprintf(f, "// vertex\n%s\n// fragment\n%s\n", source.vertex.c_str(), source.fragment.c_str());
+          std::fclose(f);
+        }
+      }
+    }
     for (unsigned i = 0; i < MaxTextures && n > 0 && n < int(sizeof line) - 96; ++i) {
       if (!(p.textureMask & (1u << i))) continue;
       const auto it = textures.find(packet.textures[i].texture);
