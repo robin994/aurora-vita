@@ -440,7 +440,7 @@ struct Renderer::Impl {
     }
     // BeginScene copies the surface description, so a NULL depth surface is a
     // valid color-only scene (libgxm: same as SceGxmDepthStencilSurfaceInitDisabled).
-    const bool depthless = depthlessSceneRequested && ds;
+    const bool depthless = depthlessSceneRequested && ds && !gxm_disabled(GxmDisableDepthPolicy);
     if (depthless) ds = nullptr;
     if (ds) {
       // GXCopyTex and target switches can split one logical EFB frame across
@@ -484,6 +484,10 @@ struct Renderer::Impl {
     // and BeginScene resets the region clip to the valid region (6.8).
     scissorValid=false;
     vertexUniformState.valid=false;fragmentUniformState.valid=false;
+    if (gxm_disabled(GxmDisablePersistentState)) {
+      pipelineStateValid=false;viewportValid=false;vertexStreamValid=false;
+      textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
+    }
     inScene = true;
     return true;
   }
@@ -1019,7 +1023,7 @@ bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool
   if (!d.initialized || !d.frameActive) return d.fail("clear outside a frame");
   if (!std::isfinite(depth) || depth<0.f || depth>1.f) return d.fail("invalid clear depth");
   if (!rgb && !alpha && !writeDepth) return true;
-  if (writeDepth && !d.inScene) {
+  if (writeDepth && !d.inScene && !gxm_disabled(GxmDisableDepthPolicy)) {
     // The clear triangle covers the whole target with depthFunc=Always, so
     // every depth value of the next scene is overwritten before any other
     // draw can read it. Do not force-load the old depth for every tile; the
@@ -1047,7 +1051,7 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
   auto& d=*impl_;
   // Fast path: the unit already holds this validated texture and sampler.
   // The handle is still live: destroy_texture clears matching bindings.
-  if(unit<MaxTextures&&d.inScene&&(d.textureBindingValidMask&(1u<<unit))&&
+  if(unit<MaxTextures&&d.inScene&&!gxm_disabled(GxmDisablePersistentState)&&(d.textureBindingValidMask&(1u<<unit))&&
      d.boundTextureHandles[unit]==handle&&same_sampler(d.boundTextureSamplers[unit],s)&&
      (!requireNativeWrap||d.boundTextureNativeWrap[unit])) {
     d.boundTextureObjects[unit]->inFlight=true;
@@ -1133,7 +1137,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   // Revisioned snapshots are immutable: equal revision means equal contents.
   const bool sameFixed=!pipeline.fixedVertexOnGpu||
       (fixedVertex&&cachedVertex.fixedValid&&
-       (fixedVertex->revision?fixedVertex->revision==cachedVertex.fixedRevision:
+       (fixedVertex->revision&&!gxm_disabled(GxmDisableFixedSnapshot)?fixedVertex->revision==cachedVertex.fixedRevision:
         std::memcmp(&cachedVertex.fixed,fixedVertex,sizeof(*fixedVertex))==0));
   const bool reuseVertex=needsVertexUniforms&&cachedVertex.valid&&cachedVertex.pipelineKey==key&&sameMvp&&sameFixed;
   if(needsVertexUniforms&&!reuseVertex &&
@@ -1172,7 +1176,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
       auto& next=d.vertexUniformState;
       next.mvp=u.mvp;next.pipelineKey=key;next.fixedValid=fixedVertex!=nullptr;
       next.fixedRevision=fixedVertex?fixedVertex->revision:0;
-      if(fixedVertex&&!fixedVertex->revision)next.fixed=*fixedVertex;
+      if(fixedVertex&&(!fixedVertex->revision||gxm_disabled(GxmDisableFixedSnapshot)))next.fixed=*fixedVertex;
       next.valid=true;
     }
   }
@@ -1199,7 +1203,8 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   };
   const bool sameScissor=!p.clip||(cached.scissor.x==scissor.x&&cached.scissor.y==scissor.y&&
       cached.scissor.width==scissor.width&&cached.scissor.height==scissor.height);
-  const bool sameRevision=uniformRevision!=0&&cached.uniformRevision==uniformRevision;
+  const bool sameRevision=uniformRevision!=0&&cached.uniformRevision==uniformRevision&&
+      !gxm_disabled(GxmDisableUniformRevision);
   const bool reuseFragment=cached.valid&&cached.pipelineKey==key&&
       cached.usedTextureCount==usedTextureCount&&sameScissor&&
       sameBytes(cached.textureFlags.data(),textureFlags.data(),usedTextureCount*sizeof(textureFlags[0]))&&
@@ -1279,7 +1284,7 @@ bool Renderer::draw(const DrawPacket& packet) {
   // Discard-free variant: exact whenever the scissor covers the whole target.
   Impl::Pipeline* active = pi->second.get();
   uint64_t activeKey = packet.pipelineKey;
-  if (active->scissorFree && packet.scissor.x <= 0 && packet.scissor.y <= 0 &&
+  if (active->scissorFree && !gxm_disabled(GxmDisableScissorVariant) && packet.scissor.x <= 0 && packet.scissor.y <= 0 &&
       int64_t(packet.scissor.x) + packet.scissor.width >= int64_t(d.width()) &&
       int64_t(packet.scissor.y) + packet.scissor.height >= int64_t(d.height())) {
     active = active->scissorFree;

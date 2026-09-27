@@ -515,6 +515,21 @@ struct DrawPacket {
   Scissor scissor{};
 };
 
+// Bisection switches for the gxm-optimization changes (BackendConfig::
+// gxm_disable_mask). A set bit restores the previous behaviour.
+enum GxmDisableBits : uint32_t {
+  GxmDisableDepthPolicy = 1u << 0,      // clear-skips-depth-load, depthless present scenes
+  GxmDisableScissorVariant = 1u << 1,   // discard-free full-scissor pipeline variant
+  GxmDisablePersistentState = 1u << 2,  // keep GXM state across scenes, texture fast path
+  GxmDisableFixedSnapshot = 1u << 3,    // shared/revisioned fixed-vertex uniform snapshots
+  GxmDisableUniformRevision = 1u << 4,  // fragment uniform revisions
+  GxmDisableNativeWrap = 1u << 5,       // hardware texture wrap in shaders
+  GxmDisableGeometryEviction = 1u << 6, // static-geometry LRU eviction
+  GxmDisableDisplayListShadow = 1u << 7,
+};
+inline uint32_t& gxm_disable_mask() noexcept { static uint32_t mask = 0; return mask; }
+inline bool gxm_disabled(uint32_t bit) noexcept { return (gxm_disable_mask() & bit) != 0; }
+
 struct FrameStats {
   uint32_t drawCalls = 0;
   uint32_t triangles = 0;

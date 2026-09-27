@@ -624,6 +624,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
   for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot)
     if ((textureMask & (1u << slot)) &&
+        !gfx::gxm_disabled(gfx::GxmDisableNativeWrap) &&
         renderer_->texture_supports_hardware_wrap(bindings[slot].texture, bindings[slot].sampler))
       nativeWrapMask |= static_cast<uint8_t>(1u << slot);
   resolvedTextureBindings_=bindings;
@@ -995,7 +996,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     // Consecutive draws with the same vertex state and GPU pipeline share one
     // immutable snapshot; the renderer recognises it by revision.
     const bool spriteExpand=translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite;
-    const bool reuseFixed=!spriteExpand&&lastFixedUniforms_&&lastFixedVertexVersion_==vertexStateVersion_&&
+    const bool reuseFixed=!spriteExpand&&!gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot)&&lastFixedUniforms_&&lastFixedVertexVersion_==vertexStateVersion_&&
                           lastFixedPipelineKey_==resolvedPipelineKey;
     gfx::FixedVertexUniforms& fixed=reuseFixed?*lastFixedUniforms_:fixedVertexUniforms_.emplace_back();
     if(!reuseFixed){

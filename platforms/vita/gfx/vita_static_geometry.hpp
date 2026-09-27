@@ -140,7 +140,8 @@ public:
       return &e;
     }
     ++misses_;
-    if(entries_.size()>=1024||bytes_>=budget_)evict_for(budget_/8u);
+    const bool evict=!gxm_disabled(GxmDisableGeometryEviction);
+    if(evict&&(entries_.size()>=1024||bytes_>=budget_))evict_for(budget_/8u);
     if(entries_.size()>=1024||bytes_>=budget_)return nullptr;
     auto entry=std::make_unique<Entry>();
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
@@ -216,7 +217,7 @@ public:
     const size_t vertexBytes=scratch_.vertices.size()*stride;
     const size_t indexBytes=scratch_.indices.size()*sizeof(uint16_t);
     if(vertexBytes+indexBytes>budget_-bytes_-storedBytes) {
-      evict_for(storedBytes+vertexBytes+indexBytes);
+      if(!gxm_disabled(GxmDisableGeometryEviction))evict_for(storedBytes+vertexBytes+indexBytes);
       if(storedBytes>budget_-bytes_||vertexBytes+indexBytes>budget_-bytes_-storedBytes)return nullptr;
     }
     packed_.resize(vertexBytes);

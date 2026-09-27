@@ -115,6 +115,8 @@ struct BackendConfig {
   // Keep cached-RAM copies of CDRAM display lists between frames. Requires the
   // port to publish every write to display-list memory (see fifo.hpp).
   bool display_list_shadow=true;
+  // gxm-optimization bisection switches, see gfx::GxmDisableBits.
+  uint32_t gxm_disable_mask=0;
 #if defined(AURORA_VITA_RENDERER_GXM)
   bool gxm_lit_fixed_vertex_gpu=true;
   bool gxm_streamed_fixed_vertex_gpu=false;
