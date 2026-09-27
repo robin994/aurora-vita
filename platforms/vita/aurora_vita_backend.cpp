@@ -121,6 +121,29 @@ void set_runtime_flags_task(void* p) {
   if(g_drawSink)g_drawSink->set_runtime_feature_flags(static_cast<const RuntimeFlagsArgs*>(p)->flags);
 }
 
+// GxmDiagPhases: cheap per-phase averages without the diagnostic log machinery.
+void accumulate_phase_profile() noexcept {
+  constexpr unsigned Window=120;
+  constexpr size_t N=static_cast<size_t>(gfx::TelemetryPhase::Count);
+  static uint64_t sums[N]{},frameSum=0,drawSum=0,gxSum=0,lastGx=0;static unsigned frames=0;
+  const auto& f=g_telemetry.frame();
+  for(size_t i=0;i<N;++i)sums[i]+=f.phaseUs[i];
+  frameSum+=f.totalUs;drawSum+=f.counters.draws;
+#if defined(MKW_TARGET_VITA)
+  const uint64_t gx=aurora::gx::fifo::process_time_total_us();gxSum+=lastGx?gx-lastGx:0;lastGx=gx;
+#endif
+  if(++frames<Window)return;
+  char line[1024];int n=std::snprintf(line,sizeof line,"frames=%u frame_us=%llu gx_us=%llu draws=%llu",frames,
+      static_cast<unsigned long long>(frameSum/frames),static_cast<unsigned long long>(gxSum/frames),
+      static_cast<unsigned long long>(drawSum/frames));
+  for(size_t i=0;i<N&&n>0&&n<int(sizeof line)-48;++i)if(sums[i])
+    n+=std::snprintf(line+n,sizeof line-size_t(n)," %s=%llu",gfx::telemetry_phase_name(static_cast<gfx::TelemetryPhase>(i)),
+        static_cast<unsigned long long>(sums[i]/frames));
+  const auto path=data_path("diagnostics/phase_profile.log");
+  if(!path.empty()){ensure_parent_dir(path.c_str());if(FILE* out=std::fopen(path.c_str(),"a")){std::fprintf(out,"%s\n",line);std::fclose(out);}}
+  for(auto& s:sums)s=0;frameSum=drawSum=gxSum=0;frames=0;
+}
+
 void emit_periodic_diagnostics() noexcept {
   if (!g_telemetryEnabled || !g_drawSink) return;
   const uint32_t period = g_config.diagnostics_period_frames;
@@ -262,10 +285,12 @@ bool initialize(const BackendConfig& c) noexcept {
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   gfx::configure_program_binary_cache(g_programCachePath.empty()?nullptr:g_programCachePath.c_str());
 #endif
-  g_telemetryEnabled=c.diagnostics||c.telemetry_log_path;
-  gfx::set_fifo_profile_enabled(g_telemetryEnabled);
 #if defined(MKW_TARGET_VITA)
   gfx::gxm_disable_mask()=c.gxm_disable_mask;
+#endif
+  g_telemetryEnabled=c.diagnostics||c.telemetry_log_path||gfx::gxm_disabled(gfx::GxmDiagPhases);
+  gfx::set_fifo_profile_enabled(c.diagnostics||c.telemetry_log_path);
+#if defined(MKW_TARGET_VITA)
   aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow&&
       !gfx::gxm_disabled(gfx::GxmDisableDisplayListShadow));
 #endif
@@ -529,6 +554,7 @@ void end_frame_now() noexcept {
   if (g_telemetryEnabled) {
     g_telemetry.add_time(gfx::TelemetryPhase::Present,end-presentStart);
     g_telemetry.end_frame(g_last);
+    if(gfx::gxm_disabled(gfx::GxmDiagPhases)) accumulate_phase_profile();
   }
   ++g_frame;
   g_lastFifoProfile=gfx::fifo_profile_take();
