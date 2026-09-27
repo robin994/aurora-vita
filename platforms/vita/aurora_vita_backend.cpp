@@ -632,6 +632,7 @@ PerformanceSnapshot performance_snapshot_now() noexcept {
   out.nativeTextureUs=stats.nativeTextureUs;
   out.nativeDrawUs=stats.nativeDrawUs;
   out.nativeSceneCount=stats.nativeSceneCount;
+  for(unsigned i=0;i<4;++i)out.diagSceneGpuUs[i]=stats.diagSceneGpuUs[i];
   out.nativeEfbCopies=stats.nativeEfbCopies;
   out.nativeEfbEndSceneUs=stats.nativeEfbEndSceneUs;
   out.nativeEfbTransferSubmitUs=stats.nativeEfbTransferSubmitUs;

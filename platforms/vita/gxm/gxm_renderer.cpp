@@ -413,6 +413,13 @@ struct Renderer::Impl {
     if (!inScene) return true;
     const int result = sceGxmEndScene(context, nullptr, nullptr);
     inScene = false;
+    if (result >= 0 && gxm_disabled(GxmDiagSceneFinish)) {
+      const uint64_t waitStart = sceKernelGetProcessTimeWide();
+      sceGxmFinish(context);
+      ++finishCalls;
+      const unsigned slot = std::min<unsigned>(stats.nativeSceneCount ? stats.nativeSceneCount - 1u : 0u, 3u);
+      stats.diagSceneGpuUs[slot] += static_cast<uint32_t>(sceKernelGetProcessTimeWide() - waitStart);
+    }
     // Store/load policy is specified before BeginScene. The next frame may
     // continue an offscreen target; EndFrame alone does not retire its depth.
     // A depthless scene never touched the depth memory: keep its state.
