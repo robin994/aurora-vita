@@ -125,11 +125,12 @@ void set_runtime_flags_task(void* p) {
 void accumulate_phase_profile() noexcept {
   constexpr unsigned Window=120;
   constexpr size_t N=static_cast<size_t>(gfx::TelemetryPhase::Count);
-  static uint64_t sums[N]{},frameSum=0,drawSum=0,gxSum=0,lastGx=0,pipeT=0,vertT=0,texR=0,layT=0;static unsigned frames=0;
+  static uint64_t sums[N]{},frameSum=0,drawSum=0,gxSum=0,lastGx=0,pipeT=0,vertT=0,texR=0,layT=0,slotW=0,doneW=0,workerF=0;static unsigned frames=0;
   const auto& f=g_telemetry.frame();
   for(size_t i=0;i<N;++i)sums[i]+=f.phaseUs[i];
   frameSum+=f.totalUs;drawSum+=f.counters.draws;pipeT+=f.counters.pipelineTranslations;vertT+=f.counters.vertexTranslations;
   texR+=f.counters.textureResolves;layT+=f.counters.layoutTranslations;
+  slotW+=g_lastProducerWaitUs;doneW+=g_lastConsumerWaitUs;workerF+=g_lastWorkerFrameUs;
 #if defined(MKW_TARGET_VITA)
   const uint64_t gx=aurora::gx::fifo::process_time_total_us();gxSum+=lastGx?gx-lastGx:0;lastGx=gx;
 #endif
@@ -143,10 +144,13 @@ void accumulate_phase_profile() noexcept {
   for(size_t i=0;i<N&&n>0&&n<int(sizeof line)-48;++i)if(sums[i])
     n+=std::snprintf(line+n,sizeof line-size_t(n)," %s=%llu",gfx::telemetry_phase_name(static_cast<gfx::TelemetryPhase>(i)),
         static_cast<unsigned long long>(sums[i]/frames));
+  n+=std::snprintf(line+n,sizeof line-size_t(n)," worker=%u game_wait_slot=%llu game_wait_done=%llu worker_frame=%llu",
+      gx_worker_active()?1u:0u,static_cast<unsigned long long>(slotW/frames),static_cast<unsigned long long>(doneW/frames),
+      static_cast<unsigned long long>(workerF/frames));
   n+=std::snprintf(line+n,sizeof line-size_t(n)," inval_last_frame=[%s]",g_lastInvalidations.c_str());
   const auto path=data_path("diagnostics/phase_profile.log");
   if(!path.empty()){ensure_parent_dir(path.c_str());if(FILE* out=std::fopen(path.c_str(),"a")){std::fprintf(out,"%s\n",line);std::fclose(out);}}
-  for(auto& s:sums)s=0;frameSum=drawSum=gxSum=pipeT=vertT=texR=layT=0;frames=0;
+  for(auto& s:sums)s=0;frameSum=drawSum=gxSum=pipeT=vertT=texR=layT=slotW=doneW=workerF=0;frames=0;
 }
 
 void emit_periodic_diagnostics() noexcept {
