@@ -520,7 +520,7 @@ struct DrawPacket {
 enum GxmDisableBits : uint32_t {
   GxmDisableDepthPolicy = 1u << 0,      // clear-skips-depth-load, depthless present scenes
   GxmDisableScissorVariant = 1u << 1,   // discard-free full-scissor pipeline variant
-  GxmDisablePersistentState = 1u << 2,  // keep GXM state across scenes, texture fast path
+  GxmDisablePersistentState = 1u << 2,  // texture-binding fast path (state is always reset per scene)
   GxmDisableFixedSnapshot = 1u << 3,    // shared/revisioned fixed-vertex uniform snapshots
   GxmDisableUniformRevision = 1u << 4,  // fragment uniform revisions
   GxmDisableNativeWrap = 1u << 5,       // hardware texture wrap in shaders

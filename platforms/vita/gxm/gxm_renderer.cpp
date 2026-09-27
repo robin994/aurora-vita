@@ -478,16 +478,14 @@ struct Renderer::Impl {
     sceneDepthless = depthless;
     pendingVertexDependency = nullptr;
     pendingFragmentTransferSync = false;
-    // Programs, vertex streams, textures and render state persist on the GXM
-    // context across scenes (libgxm Overview 6.1); keep those caches. Only the
-    // default uniform buffer reservations die with the previous scene (6.3),
-    // and BeginScene resets the region clip to the valid region (6.8).
+    // libgxm documents that context state persists across scenes, but keeping
+    // it cached across BeginScene crashed the console when the title was
+    // suspended with the PS button (hardware bisection, gxm_disable 0x04).
+    // Re-establish every piece of state in each scene.
     scissorValid=false;
     vertexUniformState.valid=false;fragmentUniformState.valid=false;
-    if (gxm_disabled(GxmDisablePersistentState)) {
-      pipelineStateValid=false;viewportValid=false;vertexStreamValid=false;
-      textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
-    }
+    pipelineStateValid=false;viewportValid=false;vertexStreamValid=false;
+    textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
     inScene = true;
     return true;
   }
