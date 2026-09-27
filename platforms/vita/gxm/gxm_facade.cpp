@@ -496,6 +496,7 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeDepthlessScenes=s.nativeDepthlessScenes;
   stats_.nativeFinishCalls=s.nativeFinishCalls;
   stats_.nativeScissorFreeDraws=s.nativeScissorFreeDraws;
+  stats_.diagSceneGpuUs=s.diagSceneGpuUs;
   return ok;
 }
 bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) noexcept {return native_->readback_rgba8(pixels);}
