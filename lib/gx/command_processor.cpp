@@ -538,8 +538,25 @@ struct FifoCommandScope {
 } // namespace
 #endif
 
+#if defined(MKW_TARGET_VITA)
+namespace {
+uint32_t sProcessDepth = 0;
+uint64_t sProcessTotalUs = 0;
+// Always-on, top-level only: a handful of timer reads per frame.
+struct ProcessTimeScope {
+  uint64_t start;
+  ProcessTimeScope() noexcept : start(sProcessDepth++ == 0 ? aurora::vita::gfx::telemetry_now_us() : 0) {}
+  ~ProcessTimeScope() { if (--sProcessDepth == 0) sProcessTotalUs += aurora::vita::gfx::telemetry_now_us() - start; }
+};
+} // namespace
+uint64_t process_time_total_us() { return sProcessTotalUs; }
+#endif
+
 void process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
+#if defined(MKW_TARGET_VITA)
+  ProcessTimeScope processTimeScope;
+#endif
 #if defined(AURORA_VITA_FIFO_PROFILE)
   FifoProcessScope processScope;
   if (processScope.on && sProfileDepth == 1) aurora::vita::gfx::fifo_profile_accumulator().bytes += size;

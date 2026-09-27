@@ -612,6 +612,9 @@ PerformanceSnapshot performance_snapshot() noexcept {
 namespace {
 PerformanceSnapshot performance_snapshot_now() noexcept {
   PerformanceSnapshot out{};
+#if defined(MKW_TARGET_VITA)
+  out.gxProcessTotalUs=aurora::gx::fifo::process_time_total_us();
+#endif
   out.frameIndex=g_frame;
   out.frameUs=g_last;
   out.displayQueueLastUs=g_displayQueueLastUs;

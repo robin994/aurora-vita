@@ -57,6 +57,8 @@ void wait_marker(uint64_t serial);
 // guest publishing writes (DCFlush/DCStore/DCInvalidate, DVD reads).
 void set_display_list_shadow_enabled(bool enabled);
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian);
+// Cumulative wall time spent in top-level (non-nested) command processing.
+uint64_t process_time_total_us();
 #endif
 
 // Out-of-line slow path: grows internal buffer then appends data
