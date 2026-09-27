@@ -125,10 +125,11 @@ void set_runtime_flags_task(void* p) {
 void accumulate_phase_profile() noexcept {
   constexpr unsigned Window=120;
   constexpr size_t N=static_cast<size_t>(gfx::TelemetryPhase::Count);
-  static uint64_t sums[N]{},frameSum=0,drawSum=0,gxSum=0,lastGx=0;static unsigned frames=0;
+  static uint64_t sums[N]{},frameSum=0,drawSum=0,gxSum=0,lastGx=0,pipeT=0,vertT=0,texR=0,layT=0;static unsigned frames=0;
   const auto& f=g_telemetry.frame();
   for(size_t i=0;i<N;++i)sums[i]+=f.phaseUs[i];
-  frameSum+=f.totalUs;drawSum+=f.counters.draws;
+  frameSum+=f.totalUs;drawSum+=f.counters.draws;pipeT+=f.counters.pipelineTranslations;vertT+=f.counters.vertexTranslations;
+  texR+=f.counters.textureResolves;layT+=f.counters.layoutTranslations;
 #if defined(MKW_TARGET_VITA)
   const uint64_t gx=aurora::gx::fifo::process_time_total_us();gxSum+=lastGx?gx-lastGx:0;lastGx=gx;
 #endif
@@ -136,12 +137,16 @@ void accumulate_phase_profile() noexcept {
   char line[1024];int n=std::snprintf(line,sizeof line,"frames=%u frame_us=%llu gx_us=%llu draws=%llu",frames,
       static_cast<unsigned long long>(frameSum/frames),static_cast<unsigned long long>(gxSum/frames),
       static_cast<unsigned long long>(drawSum/frames));
+  n+=std::snprintf(line+n,sizeof line-size_t(n)," pipe_tr=%llu vert_tr=%llu tex_res=%llu layout_tr=%llu",
+      static_cast<unsigned long long>(pipeT/frames),static_cast<unsigned long long>(vertT/frames),
+      static_cast<unsigned long long>(texR/frames),static_cast<unsigned long long>(layT/frames));
   for(size_t i=0;i<N&&n>0&&n<int(sizeof line)-48;++i)if(sums[i])
     n+=std::snprintf(line+n,sizeof line-size_t(n)," %s=%llu",gfx::telemetry_phase_name(static_cast<gfx::TelemetryPhase>(i)),
         static_cast<unsigned long long>(sums[i]/frames));
+  n+=std::snprintf(line+n,sizeof line-size_t(n)," inval_last_frame=[%s]",g_lastInvalidations.c_str());
   const auto path=data_path("diagnostics/phase_profile.log");
   if(!path.empty()){ensure_parent_dir(path.c_str());if(FILE* out=std::fopen(path.c_str(),"a")){std::fprintf(out,"%s\n",line);std::fclose(out);}}
-  for(auto& s:sums)s=0;frameSum=drawSum=gxSum=0;frames=0;
+  for(auto& s:sums)s=0;frameSum=drawSum=gxSum=pipeT=vertT=texR=layT=0;frames=0;
 }
 
 void emit_periodic_diagnostics() noexcept {
@@ -554,7 +559,6 @@ void end_frame_now() noexcept {
   if (g_telemetryEnabled) {
     g_telemetry.add_time(gfx::TelemetryPhase::Present,end-presentStart);
     g_telemetry.end_frame(g_last);
-    if(gfx::gxm_disabled(gfx::GxmDiagPhases)) accumulate_phase_profile();
   }
   ++g_frame;
   g_lastFifoProfile=gfx::fifo_profile_take();
@@ -567,6 +571,7 @@ void end_frame_now() noexcept {
     g_lastWorkerFrameUs=lastEnd?nowEnd-lastEnd:0; lastEnd=nowEnd;
   }
   g_lastInvalidations=gfx::take_pipeline_invalidation_report();
+  if(g_telemetryEnabled&&gfx::gxm_disabled(gfx::GxmDiagPhases)) accumulate_phase_profile();
   emit_periodic_diagnostics();
 }
 void end_frame_task(void*) {

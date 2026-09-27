@@ -283,7 +283,8 @@ static inline f32 read_f32(const u8* ptr, bool bigEndian) {
 // Marks draw state dirty *and* invalidates the resolved-pipeline memo.
 static inline void mark_pipeline_state_dirty_at(unsigned line) noexcept {
 #if defined(AURORA_VITA_FIFO_PROFILE)
-  if (aurora::vita::gfx::g_fifoProfileEnabled) aurora::vita::gfx::note_pipeline_invalidation(line);
+  if (aurora::vita::gfx::g_fifoProfileEnabled || aurora::vita::gfx::gxm_disabled(aurora::vita::gfx::GxmDiagPhases))
+    aurora::vita::gfx::note_pipeline_invalidation(line);
 #else
   (void)line;
 #endif
