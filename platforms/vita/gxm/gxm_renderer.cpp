@@ -436,7 +436,7 @@ struct Renderer::Impl {
   std::unordered_set<uint64_t> diagDumpedKeys;
   void diag_draw_gpu(const DrawPacket& packet, const Pipeline& p) {
     if (diagDrawFrame != diagFrameCounter) { diagDrawFrame = diagFrameCounter; diagDrawIndex = 0; }
-    if (diagFrameCounter % 300u != 150u || diagDrawIndex >= 16u) return;
+    if (diagFrameCounter % 300u != 150u || diagDrawIndex >= 512u) return;
     const uint32_t index = diagDrawIndex++;
     const uint32_t target = static_cast<uint32_t>(boundTarget);
     const uint64_t t0 = sceKernelGetProcessTimeWide();

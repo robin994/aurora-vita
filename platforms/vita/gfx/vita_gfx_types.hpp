@@ -529,7 +529,7 @@ enum GxmDisableBits : uint32_t {
   // Diagnostic, not an optimization switch: sceGxmFinish after every scene and
   // record the GPU time per scene (FrameStats::diagSceneGpuUs). Serializes CPU/GPU.
   GxmDiagSceneFinish = 1u << 8,
-  // Diagnostic: every 300th frame, time the first 16 draws individually on the
+  // Diagnostic: every 300th frame, time every draw (up to 512) individually on the
   // GPU (scene split + sceGxmFinish per draw) and append them to
   // diagnostics/gxm_draw_gpu.log. Heavily perturbs that frame only.
   GxmDiagDrawGpu = 1u << 9,
