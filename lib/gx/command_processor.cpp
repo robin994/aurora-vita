@@ -979,7 +979,11 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 idx = regId - 0x28;
     u32 stage0 = idx * 2;
     u32 stage1 = idx * 2 + 1;
-    const DecodedSnapshot<decltype(g_gxState.tevStages)> snap(g_gxState.tevStages);
+    // Only the two stages this TEV-order register addresses can change.
+    static_assert(MaxTevStages % 2 == 0);
+    using TevStageT = std::remove_reference_t<decltype(g_gxState.tevStages[0])>;
+    const DecodedSnapshot<TevStageT> snap0(g_gxState.tevStages[stage0 % MaxTevStages]);
+    const DecodedSnapshot<TevStageT> snap1(g_gxState.tevStages[stage1 % MaxTevStages]);
 
     // Channel ID reverse mapping from hardware to GX
     static const GXChannelID r2c[] = {GX_COLOR0A0, GX_COLOR1A1,   GX_COLOR0A0,    GX_COLOR1A1,
@@ -1006,7 +1010,8 @@ static void handle_bp(u32 value, bool bigEndian) {
       u32 chanHw = bp_get(value, 3, 19);
       s.channelId = (chanHw < 8) ? r2c[chanHw] : GX_COLOR_NULL;
     }
-    mark_pipeline_state_dirty_if(stage0 < g_gxState.numTevStages && snap.changed());
+    mark_pipeline_state_dirty_if((stage0 < g_gxState.numTevStages && snap0.changed()) ||
+                                 (stage1 < g_gxState.numTevStages && snap1.changed()));
     break;
   }
 
