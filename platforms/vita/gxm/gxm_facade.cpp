@@ -255,8 +255,11 @@ void PipelineCache::save_hot_manifest() noexcept {
 const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& desc,FrameStats* stats) noexcept {
   const auto key=pipeline_key(desc);
   auto hotIt=hot_.find(key);
-  if(hotIt==hot_.end())hotIt=hot_.emplace(key,HotRecord{desc,0}).first;
-  ++hotIt->second.hits;hotDirty_=true;
+  // Only a new pipeline makes the persisted manifest stale. Hit counts only
+  // reorder it; they are written at clear() and with the next new entry.
+  // Marking every hit dirty rewrote the file every 300 frames (~0.8 s stall).
+  if(hotIt==hot_.end()){hotIt=hot_.emplace(key,HotRecord{desc,0}).first;hotDirty_=true;}
+  ++hotIt->second.hits;
   auto it=map_.find(key);
   if(it!=map_.end()) {it->second.lastUsed=++useSequence_;if(stats)++stats->pipelineHits;return &it->second;}
   if(stats)++stats->pipelineMisses;
@@ -283,6 +286,7 @@ void PipelineCache::bind(const CompiledPipeline& p,const GpuDrawUniforms& u,Fram
   bound_=p.key;boundPipeline_=const_cast<CompiledPipeline*>(&p);
 }
 void PipelineCache::clear() noexcept {
+  if(!hot_.empty())hotDirty_=true; // persist the final hit ordering once
   save_hot_manifest();
   if(native_)native_->finish();
   for(auto& [_,p]:map_)destroy_pipeline(p);

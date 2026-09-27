@@ -505,6 +505,9 @@ struct DrawPacket {
   bool absoluteVertexIndices = false;
   std::array<TextureBinding, MaxTextures> textures{};
   GpuDrawUniforms uniforms{};
+  // Non-zero when `uniforms` is an unchanged copy of a producer snapshot:
+  // equal revisions mean equal uniform contents (renderer skips memcmp).
+  uint64_t uniformRevision = 0;
   // Optional immutable snapshot owned by the submitting command batch. Never
   // points at live GX state; the owner retains it until execute() has returned.
   const FixedVertexUniforms* fixedVertexUniforms = nullptr;

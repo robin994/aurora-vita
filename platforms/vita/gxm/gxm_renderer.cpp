@@ -328,6 +328,7 @@ struct Renderer::Impl {
     std::array<uint16_t,MaxTextures> textureFlags{};
     std::array<std::array<float,4>,MaxTextures> textureTransform{};
     uint64_t pipelineKey = 0;
+    uint64_t uniformRevision = 0;
     uint8_t usedTextureCount = 0;
     bool valid = false;
   };
@@ -1099,7 +1100,8 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
 
 bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor& scissor,
                              const FixedVertexUniforms* fixedVertex,
-                             const std::array<TextureBinding,MaxTextures>* textures) {
+                             const std::array<TextureBinding,MaxTextures>* textures,
+                             uint64_t uniformRevision) {
   auto& d=*impl_;
   Impl::Pipeline* resolved=nullptr;
   if(d.resolvedPipelineHint&&d.resolvedPipelineHintKey==key) resolved=d.resolvedPipelineHint;
@@ -1197,8 +1199,12 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   };
   const bool sameScissor=!p.clip||(cached.scissor.x==scissor.x&&cached.scissor.y==scissor.y&&
       cached.scissor.width==scissor.width&&cached.scissor.height==scissor.height);
+  const bool sameRevision=uniformRevision!=0&&cached.uniformRevision==uniformRevision;
   const bool reuseFragment=cached.valid&&cached.pipelineKey==key&&
       cached.usedTextureCount==usedTextureCount&&sameScissor&&
+      sameBytes(cached.textureFlags.data(),textureFlags.data(),usedTextureCount*sizeof(textureFlags[0]))&&
+      sameBytes(cached.textureTransform.data(),textureTransform.data(),usedTextureCount*sizeof(textureTransform[0]))&&
+      (sameRevision||(
       sameBytes(cached.uniforms.kcolor.data(),u.kcolor.data(),sizeof(u.kcolor))&&
       sameBytes(cached.uniforms.tevreg.data(),u.tevreg.data(),sizeof(u.tevreg))&&
       sameBytes(cached.uniforms.fogColor.data(),u.fogColor.data(),sizeof(u.fogColor))&&
@@ -1207,9 +1213,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
       sameBytes(&cached.uniforms.renderViewportWidth,&u.renderViewportWidth,sizeof(u.renderViewportWidth))&&
       sameBytes(cached.uniforms.indirectMatrices.data(),u.indirectMatrices.data(),sizeof(u.indirectMatrices))&&
       sameBytes(cached.uniforms.texcoordScale.data(),u.texcoordScale.data(),usedTextureCount*sizeof(u.texcoordScale[0]))&&
-      sameBytes(cached.uniforms.textureSizeBias.data(),u.textureSizeBias.data(),usedTextureCount*sizeof(u.textureSizeBias[0]))&&
-      sameBytes(cached.textureFlags.data(),textureFlags.data(),usedTextureCount*sizeof(textureFlags[0]))&&
-      sameBytes(cached.textureTransform.data(),textureTransform.data(),usedTextureCount*sizeof(textureTransform[0]));
+      sameBytes(cached.uniforms.textureSizeBias.data(),u.textureSizeBias.data(),usedTextureCount*sizeof(u.textureSizeBias[0]))));
   if(!reuseFragment) {
     void* fragment=nullptr;
     if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
@@ -1250,6 +1254,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     auto& next=d.fragmentUniformState;
     next.uniforms=u;next.scissor=scissor;next.textureFlags=textureFlags;next.textureTransform=textureTransform;
     next.pipelineKey=key;next.usedTextureCount=static_cast<uint8_t>(usedTextureCount);next.valid=true;
+    next.uniformRevision=uniformRevision;
   } else ++d.stats.nativeFragmentUniformReuses;
   p.inFlight=true;
   return true;
@@ -1313,7 +1318,8 @@ bool Renderer::draw(const DrawPacket& packet) {
     return d.fail("full-target pipeline requires a full-target scissor");
   uint64_t profileTick = d.profileDraws ? sceKernelGetProcessTimeWide() : 0;
   d.resolvedPipelineHint=active;d.resolvedPipelineHintKey=activeKey;
-  const bool pipelineBound=bind_pipeline(activeKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures);
+  const bool pipelineBound=bind_pipeline(activeKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures,
+                                         packet.uniformRevision);
   d.resolvedPipelineHint=nullptr;d.resolvedPipelineHintKey=0;
   if(!pipelineBound) return false;
   if(d.profileDraws) { const auto now=sceKernelGetProcessTimeWide(); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }

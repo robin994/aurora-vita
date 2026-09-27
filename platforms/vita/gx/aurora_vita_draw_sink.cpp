@@ -1014,7 +1014,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     gfx::DrawPacket& packet=stream_.emplace_draw();
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
-    packet.textures=bindings;packet.uniforms=uniforms;packet.viewport=translate_viewport();packet.scissor=translate_scissor();
+    packet.textures=bindings;packet.uniforms=uniforms;packet.uniformRevision=vertexStateVersion_;
+    packet.viewport=translate_viewport();packet.scissor=translate_scissor();
     packet.fixedVertexUniforms=&fixed;
     enqueued=true;
     queuedPipelineValid_=false;
@@ -1046,6 +1047,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         packet.absoluteVertexIndices=false;
         packet.textures=bindings;
         packet.uniforms=uniforms;
+        packet.uniformRevision=vertexStateVersion_;
         packet.viewport=translate_viewport();
         packet.scissor=translate_scissor();
         packet.fixedVertexUniforms=streamedFixedPtr;
@@ -1063,7 +1065,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
 #else
     enqueued=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
-                         translate_viewport(),translate_scissor(),bindings,&error);
+                         translate_viewport(),translate_scissor(),bindings,&error,vertexStateVersion_);
 #endif
   }else enqueued=gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipeline, uniforms,
                          translate_viewport(), translate_scissor(), bindings, &error, telemetry_,

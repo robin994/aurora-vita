@@ -464,14 +464,15 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
 
 bool enqueue_streamed_draw(CommandStream&stream,const StreamedDraw&prepared,uint64_t resolvedPipelineKey,
                            const DrawUniforms&uniforms,const Viewport&viewport,const Scissor&scissor,
-                           const std::array<TextureBinding,MaxTextures>&textures,PrepareDrawError*err) noexcept {
+                           const std::array<TextureBinding,MaxTextures>&textures,PrepareDrawError*err,
+                           uint64_t uniformRevision) noexcept {
   auto fail=[&](PrepareDrawError e){if(err)*err=e;return false;};
   if(!prepared.ok()||!prepared.vertices.buffer||!prepared.vertexCount||!resolvedPipelineKey)
     return fail(prepared.error==PrepareDrawError::None?PrepareDrawError::InvalidInput:prepared.error);
   DrawPacket& d=stream.emplace_draw();
   d.pipelineKey=resolvedPipelineKey;d.vertices=prepared.vertices;d.indices=prepared.indices;
   d.vertexCount=prepared.vertexCount;d.indexCount=prepared.indexCount;d.absoluteVertexIndices=false;
-  d.textures=textures;d.uniforms=uniforms;d.viewport=viewport;d.scissor=scissor;
+  d.textures=textures;d.uniforms=uniforms;d.uniformRevision=uniformRevision;d.viewport=viewport;d.scissor=scissor;
   if(err)*err=PrepareDrawError::None;
   return true;
 }

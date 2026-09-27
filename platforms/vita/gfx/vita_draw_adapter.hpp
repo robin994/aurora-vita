@@ -106,6 +106,6 @@ bool enqueue_draw(Renderer& renderer,StreamingArena& arena,CommandStream& stream
 bool enqueue_streamed_draw(CommandStream& stream,const StreamedDraw& prepared,uint64_t resolvedPipelineKey,
                            const DrawUniforms& uniforms,const Viewport& viewport,const Scissor& scissor,
                            const std::array<TextureBinding,MaxTextures>& textures={},
-                           PrepareDrawError* error=nullptr) noexcept;
+                           PrepareDrawError* error=nullptr,uint64_t uniformRevision=0) noexcept;
 
 } // namespace aurora::vita::gfx
