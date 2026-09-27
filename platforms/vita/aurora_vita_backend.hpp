@@ -53,6 +53,11 @@ struct PerformanceSnapshot {
   uint64_t shaderCompileBlockedMisses=0;
   uint32_t shaderDiskCacheHits=0;
   uint32_t shaderDiskCacheMisses=0;
+  // Cumulative wall time in top-level GX command processing (Aurora's share of
+  // the frame when the GX worker is off). Consumers diff consecutive values.
+  uint64_t gxProcessTotalUs=0;
+  // gxm_disable bit 0x100 diagnostic: GPU time per scene of the last frame.
+  uint32_t diagSceneGpuUs[4]{};
 };
 using ParallelRangeTask = bool (*)(void* context, size_t begin, size_t end, uint32_t lane) noexcept;
 struct BackendConfig {

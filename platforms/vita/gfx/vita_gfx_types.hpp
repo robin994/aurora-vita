@@ -526,6 +526,16 @@ enum GxmDisableBits : uint32_t {
   GxmDisableNativeWrap = 1u << 5,       // hardware texture wrap in shaders
   GxmDisableGeometryEviction = 1u << 6, // static-geometry LRU eviction
   GxmDisableDisplayListShadow = 1u << 7,
+  // Diagnostic, not an optimization switch: sceGxmFinish after every scene and
+  // record the GPU time per scene (FrameStats::diagSceneGpuUs). Serializes CPU/GPU.
+  GxmDiagSceneFinish = 1u << 8,
+  // Diagnostic: every 300th frame, time every draw (up to 512) individually on the
+  // GPU (scene split + sceGxmFinish per draw) and append them to
+  // diagnostics/gxm_draw_gpu.log. Heavily perturbs that frame only.
+  GxmDiagDrawGpu = 1u << 9,
+  // Diagnostic: DrawSink phase timers only (no FIFO profile, coverage, trace or
+  // logs); averages every 120 frames go to diagnostics/phase_profile.log.
+  GxmDiagPhases = 1u << 10,
 };
 inline uint32_t& gxm_disable_mask() noexcept { static uint32_t mask = 0; return mask; }
 inline bool gxm_disabled(uint32_t bit) noexcept { return (gxm_disable_mask() & bit) != 0; }
@@ -565,6 +575,8 @@ struct FrameStats {
   uint32_t nativeFinishCalls = 0;
   // Draws that used the discard-free variant of a fragment-scissor pipeline.
   uint32_t nativeScissorFreeDraws = 0;
+  // GxmDiagSceneFinish only: CPU wait in sceGxmFinish after scene i (last slot aggregates the rest).
+  std::array<uint32_t,4> diagSceneGpuUs{};
 };
 
 } // namespace aurora::vita::gfx

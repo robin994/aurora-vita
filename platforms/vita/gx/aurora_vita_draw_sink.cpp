@@ -735,22 +735,27 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const bool extendedFeaturesOk=(!requirements.needBumpBasis||allowBumpFixedVertexGpu_)&&
       (!dynamicTexMtxMask||allowDynamicTexMatrixGpu_)&&
       (!(pointPrimitive||linePrimitive)||allowPrimitiveExpansionGpu_);
-  const bool fixedCandidate=staticGeometry_&&(!staticGeometryStableOnly_||stableSource!=nullptr)&&
-      (!translatedLit_||allowLitFixedVertexGpu_)&&
-      vertexCount>=fixedMinVertices&&explicitIndicesOk&&extendedFeaturesOk&&
-      (!(pointPrimitive||linePrimitive)||stableSource!=nullptr)&&
+  const bool gpuVertexEligible=staticGeometry_&&(!translatedLit_||allowLitFixedVertexGpu_)&&
+      explicitIndicesOk&&extendedFeaturesOk&&
       gfx::supports_fixed_vertex_gpu(translatedGpuPipeline_,layout,translatedVertexState_);
-  const bool fixedStreamCandidate = false;
+  const bool fixedCandidate=gpuVertexEligible&&(!staticGeometryStableOnly_||stableSource!=nullptr)&&
+      vertexCount>=fixedMinVertices&&(!(pointPrimitive||linePrimitive)||stableSource!=nullptr);
+  // Dynamic (skinned/animated) geometry: decode+pack on the CPU into the
+  // streaming arena, but leave matrix/normal/lighting/texgen work to the same
+  // generated vertex shader the static cache uses. Point/line expansion stays
+  // on the CPU; split-phase profiling needs the CPU transform to measure it.
+  const bool fixedStreamCandidate=allowStreamedFixedVertexGpu_&&gpuVertexEligible&&
+      !pointPrimitive&&!linePrimitive&&!(telemetry_&&telemetry_->split_vertex_phases());
   // The GPU vertex path copies only the state its generated shader can consume.
   // Indexed-PN and lit draws include their position/normal palettes and lights;
   // unsupported bump/dynamic-tex-matrix cases remain on the CPU path.
   if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty||
-     (translatedVertexStateLightweight_&&!fixedCandidate)){
+     (translatedVertexStateLightweight_&&!fixedCandidate&&!fixedStreamCandidate)){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateVertex);
     if (telemetry_) telemetry_->count_vertex_translation();
     ++vertexStateVersion_;
-    if(fixedCandidate) {
+    if(fixedCandidate||fixedStreamCandidate) {
       translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_);
       translatedVertexStateLightweight_=true;
     } else {
@@ -763,6 +768,28 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   auto& uniforms=translatedUniforms_;
   gfx::StaticGeometryCache::Entry* gpuGeometry=nullptr;
   uint64_t fixedPipelineKey=0;
+  // translatedGpuPipeline_ is translatedPipeline_ plus the fixed-vertex
+  // fields below (its layout and primitive are functions of them), so this
+  // identity is exact without re-hashing the ~2 KiB descriptor per draw.
+  // It only indexes DrawSink's own maps; the renderer still keys pipelines
+  // by pipeline_key() when one has to be created.
+  const auto gpuPipelineDescKeyFor=[&]() noexcept {
+    gfx::ScopedTelemetryPhase keyPhase(telemetry_,gfx::TelemetryPhase::StateKey);
+    const auto& gp=translatedGpuPipeline_;
+    const uint64_t fixedBits=uint64_t(gp.fixedVertexOnGpu)|(uint64_t(gp.fixedVertexIndexedPn)<<1)|
+        (uint64_t(gp.fixedPointSprite)<<2)|(uint64_t(gp.fixedLineSprite)<<3)|
+        (uint64_t(gp.fixedVertexTexMtxMask)<<8)|(uint64_t(gp.fixedPrimitiveTexcoordMask)<<16)|
+        (uint64_t(gp.primitive)<<24);
+    return gfx::hash_combine(translatedPipelineKey_,fixedBits^0xf1c3d5e7a9b20461ull);
+  };
+  const auto resolveFixedPipeline=[&](uint64_t descKey) noexcept -> uint64_t {
+    auto key=fixedPipelineKeys_.find(descKey);
+    if(key!=fixedPipelineKeys_.end()&&renderer_->pipelines().find(key->second))return key->second;
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::PipelineResolve);
+    const uint64_t created=renderer_->create_pipeline(translatedGpuPipeline_);
+    if(created)fixedPipelineKeys_[descKey]=created;
+    return created;
+  };
   if(fixedCandidate){
 #if defined(__vita__)
     static unsigned debugGpuDraws=0;
@@ -780,30 +807,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(gpuGeometry&&telemetry_)telemetry_->gpu_geometry(staticGeometry_->hits()!=before,gpuGeometry->vertexCount);
     }
     if(gpuGeometry){
-      // translatedGpuPipeline_ is translatedPipeline_ plus the fixed-vertex
-      // fields below (its layout and primitive are functions of them), so this
-      // identity is exact without re-hashing the ~2 KiB descriptor per draw.
-      // It only indexes DrawSink's own maps; the renderer still keys pipelines
-      // by pipeline_key() when one has to be created.
-      uint64_t gpuPipelineDescKey=0;
-      { gfx::ScopedTelemetryPhase keyPhase(telemetry_,gfx::TelemetryPhase::StateKey);
-        const auto& gp=translatedGpuPipeline_;
-        const uint64_t fixedBits=uint64_t(gp.fixedVertexOnGpu)|(uint64_t(gp.fixedVertexIndexedPn)<<1)|
-            (uint64_t(gp.fixedPointSprite)<<2)|(uint64_t(gp.fixedLineSprite)<<3)|
-            (uint64_t(gp.fixedVertexTexMtxMask)<<8)|(uint64_t(gp.fixedPrimitiveTexcoordMask)<<16)|
-            (uint64_t(gp.primitive)<<24);
-        gpuPipelineDescKey=gfx::hash_combine(translatedPipelineKey_,fixedBits^0xf1c3d5e7a9b20461ull); }
+      const uint64_t gpuPipelineDescKey=gpuPipelineDescKeyFor();
       if(gpuGeometry->pipelineDescKey==gpuPipelineDescKey&&gpuGeometry->pipelineKey&&
          renderer_->pipelines().find(gpuGeometry->pipelineKey)) {
         fixedPipelineKey=gpuGeometry->pipelineKey;
       } else {
-        auto key=fixedPipelineKeys_.find(gpuPipelineDescKey);
-        if(key!=fixedPipelineKeys_.end()&&renderer_->pipelines().find(key->second))fixedPipelineKey=key->second;
-        else{
-          gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::PipelineResolve);
-          fixedPipelineKey=renderer_->create_pipeline(translatedGpuPipeline_);
-          if(fixedPipelineKey)fixedPipelineKeys_[gpuPipelineDescKey]=fixedPipelineKey;
-        }
+        fixedPipelineKey=resolveFixedPipeline(gpuPipelineDescKey);
         if(fixedPipelineKey){
           gpuGeometry->pipelineDescKey=gpuPipelineDescKey;
           gpuGeometry->pipelineKey=fixedPipelineKey;
@@ -816,7 +825,17 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       else gpuGeometry=nullptr;
     }
   }
-  if(!gpuGeometry&&translatedVertexStateLightweight_) {
+  // A cache miss (volatile/animated source, full budget) falls through to the
+  // streamed GPU-vertex path when enabled; otherwise to the CPU transform.
+  bool streamFixed=false;
+  if(!gpuGeometry&&fixedStreamCandidate){
+    fixedPipelineKey=resolveFixedPipeline(gpuPipelineDescKeyFor());
+    if(fixedPipelineKey){
+      renderer_->pipelines().pin(fixedPipelineKey);
+      streamFixed=true;
+    }
+  }
+  if(!gpuGeometry&&!streamFixed&&translatedVertexStateLightweight_) {
     // A shader/cache miss or a full geometry budget can reject a GPU candidate.
     // The CPU fallback needs its complete matrices, lights and texgen state.
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
@@ -824,8 +843,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     translatedVertexStateLightweight_=false;
     ++vertexStateVersion_;
   }
-  const auto gpuLayout=gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
-  const auto& streamedPipeline=pipeline;
+  const auto gpuLayout=streamFixed?gfx::effective_gpu_vertex_layout(translatedGpuPipeline_):
+      gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
+  const auto& streamedPipeline=streamFixed?translatedGpuPipeline_:pipeline;
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
   const bool useStreamed=!gpuGeometry&&!(telemetry_&&telemetry_->split_vertex_phases())&&
       source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&
@@ -891,7 +911,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   gfx::StreamedDraw streamed{};
   if(useStreamed) {
     (void)gfx::prepare_streamed_draw_into(streamed,*arena_,rawVertices,rawBytes,vertexCount,
-        source,rawIndices,indexCount,layout,pipeline,vertexState,&uniforms,telemetry_);
+        source,rawIndices,indexCount,layout,streamedPipeline,vertexState,&uniforms,telemetry_);
   } else if(!gpuGeometry) {
     (void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
                                 pipeline,vertexState,&uniforms,expansion,telemetry_,exactTriangleDedup);
@@ -943,36 +963,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   gfx::FrameStats statsBeforeEnqueue{};
   if (telemetry_) statsBeforeEnqueue = renderer_->stats();
   uint64_t resolvedPipelineKey = 0;
-#if defined(AURORA_VITA_ENABLE_EXPERIMENTAL_STREAMED)
-  if(gpuGeometry){
+  if(gpuGeometry||streamFixed){
     resolvedPipelineKey=fixedPipelineKey;
-  }else {
-    const auto preparedPrimitive=useStreamed?streamed.primitive:prepared.primitive;
-    const bool preparedClipSpace=useStreamed?streamed.positionIsClipSpace:prepared.positionIsClipSpace;
-    if (queuedPipelineValid_ && translatedPipelineKey == queuedTranslatedPipelineKey_ &&
-        preparedPrimitive == queuedPrimitive_ &&
-        preparedClipSpace == queuedPositionIsClipSpace_) {
-    resolvedPipelineKey = queuedResolvedPipelineKey_;
-    } else {
-      resolvedPipelineKey = gfx::resolve_draw_pipeline(*renderer_,preparedPrimitive,preparedClipSpace,streamedPipeline,telemetry_);
-      if (resolvedPipelineKey) {
-        queuedTranslatedPipelineKey_ = streamedPipelineDescKey;
-        queuedResolvedPipelineKey_ = resolvedPipelineKey;
-        queuedPrimitive_ = preparedPrimitive;
-        queuedPositionIsClipSpace_ = preparedClipSpace;
-        queuedPipelineValid_ = true;
-      }
-    }
-  }
-  gfx::FixedVertexUniforms streamedFixed{};
-  const gfx::FixedVertexUniforms* streamedFixedPtr=nullptr;
-  if(!gpuGeometry&&fixedStreamCandidate){
-    streamedFixed=gfx::fixed_vertex_uniforms(translatedGpuPipeline_,vertexState);
-    streamedFixedPtr=&streamedFixed;
-  }
-#else
-  if(gpuGeometry){
-    resolvedPipelineKey=fixedPipelineKey;
+    queuedPipelineValid_=false;
   }else{
     const auto preparedPrimitive=useStreamed?streamed.primitive:prepared.primitive;
     const bool preparedClipSpace=useStreamed?streamed.positionIsClipSpace:prepared.positionIsClipSpace;
@@ -990,17 +983,13 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       }
     }
   }
-  const gfx::FixedVertexUniforms* streamedFixedPtr=nullptr;
-#endif
-  bool enqueued=false;
-  if(gpuGeometry){
-    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
-    // Consecutive draws with the same vertex state and GPU pipeline share one
-    // immutable snapshot; the renderer recognises it by revision.
+  // Consecutive draws with the same vertex state and GPU pipeline share one
+  // immutable snapshot; the renderer recognises it by revision. Build it, then
+  // share the previous one when the contents are byte-identical (exact:
+  // hardware bisection showed version/key-based sharing could reuse a
+  // snapshot whose inputs had changed). Snapshots live until the next flush.
+  const auto buildFixedUniforms=[&]() noexcept -> gfx::FixedVertexUniforms& {
     const bool spriteExpand=translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite;
-    // Build the snapshot, then share the previous one when the contents are
-    // byte-identical (exact: hardware bisection showed version/key-based
-    // sharing could reuse a snapshot whose inputs had changed).
     gfx::FixedVertexUniforms& fixed=fixedVertexUniforms_.emplace_back();
     gfx::fixed_vertex_uniforms_into(fixed,translatedGpuPipeline_,vertexState);
     const bool reuseFixed=!spriteExpand&&!gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot)&&lastFixedUniforms_&&
@@ -1019,6 +1008,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         translatedGpuPipeline_.fixedPointSprite?expansion.pointTexOffset:expansion.lineTexOffset
       }};
     }
+    return shared;
+  };
+  bool enqueued=false;
+  if(gpuGeometry){
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
+    gfx::FixedVertexUniforms& shared=buildFixedUniforms();
     gfx::DrawPacket& packet=stream_.emplace_draw();
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
@@ -1058,7 +1053,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         packet.uniformRevision=vertexStateVersion_;
         packet.viewport=translate_viewport();
         packet.scissor=translate_scissor();
-        packet.fixedVertexUniforms=streamedFixedPtr;
+        packet.fixedVertexUniforms=streamFixed?&buildFixedUniforms():nullptr;
         renderer_->invalidate_resource_bindings();
         {
           gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::Submit);
@@ -1073,7 +1068,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
 #else
     enqueued=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
-                         translate_viewport(),translate_scissor(),bindings,&error,vertexStateVersion_);
+                         translate_viewport(),translate_scissor(),bindings,&error,vertexStateVersion_,
+                         streamFixed?&buildFixedUniforms():nullptr);
 #endif
   }else enqueued=gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipeline, uniforms,
                          translate_viewport(), translate_scissor(), bindings, &error, telemetry_,

@@ -90,6 +90,7 @@ void ensure_parent_dir(const char*) noexcept {}
 #endif
 
 gfx::FifoProfile g_lastFifoProfile{};
+uint64_t g_lastProducerWaitUs=0,g_lastConsumerWaitUs=0,g_lastWorkerFrameUs=0;
 std::string g_lastInvalidations;
 
 // With the asynchronous GX worker the renderer, DrawSink and their frame state
@@ -120,6 +121,38 @@ void set_runtime_flags_task(void* p) {
   if(g_drawSink)g_drawSink->set_runtime_feature_flags(static_cast<const RuntimeFlagsArgs*>(p)->flags);
 }
 
+// GxmDiagPhases: cheap per-phase averages without the diagnostic log machinery.
+void accumulate_phase_profile() noexcept {
+  constexpr unsigned Window=120;
+  constexpr size_t N=static_cast<size_t>(gfx::TelemetryPhase::Count);
+  static uint64_t sums[N]{},frameSum=0,drawSum=0,gxSum=0,lastGx=0,pipeT=0,vertT=0,texR=0,layT=0,slotW=0,doneW=0,workerF=0;static unsigned frames=0;
+  const auto& f=g_telemetry.frame();
+  for(size_t i=0;i<N;++i)sums[i]+=f.phaseUs[i];
+  frameSum+=f.totalUs;drawSum+=f.counters.draws;pipeT+=f.counters.pipelineTranslations;vertT+=f.counters.vertexTranslations;
+  texR+=f.counters.textureResolves;layT+=f.counters.layoutTranslations;
+  slotW+=g_lastProducerWaitUs;doneW+=g_lastConsumerWaitUs;workerF+=g_lastWorkerFrameUs;
+#if defined(MKW_TARGET_VITA)
+  const uint64_t gx=aurora::gx::fifo::process_time_total_us();gxSum+=lastGx?gx-lastGx:0;lastGx=gx;
+#endif
+  if(++frames<Window)return;
+  char line[1024];int n=std::snprintf(line,sizeof line,"frames=%u frame_us=%llu gx_us=%llu draws=%llu",frames,
+      static_cast<unsigned long long>(frameSum/frames),static_cast<unsigned long long>(gxSum/frames),
+      static_cast<unsigned long long>(drawSum/frames));
+  n+=std::snprintf(line+n,sizeof line-size_t(n)," pipe_tr=%llu vert_tr=%llu tex_res=%llu layout_tr=%llu",
+      static_cast<unsigned long long>(pipeT/frames),static_cast<unsigned long long>(vertT/frames),
+      static_cast<unsigned long long>(texR/frames),static_cast<unsigned long long>(layT/frames));
+  for(size_t i=0;i<N&&n>0&&n<int(sizeof line)-48;++i)if(sums[i])
+    n+=std::snprintf(line+n,sizeof line-size_t(n)," %s=%llu",gfx::telemetry_phase_name(static_cast<gfx::TelemetryPhase>(i)),
+        static_cast<unsigned long long>(sums[i]/frames));
+  n+=std::snprintf(line+n,sizeof line-size_t(n)," worker=%u game_wait_slot=%llu game_wait_done=%llu worker_frame=%llu",
+      gx_worker_active()?1u:0u,static_cast<unsigned long long>(slotW/frames),static_cast<unsigned long long>(doneW/frames),
+      static_cast<unsigned long long>(workerF/frames));
+  n+=std::snprintf(line+n,sizeof line-size_t(n)," inval_last_frame=[%s]",g_lastInvalidations.c_str());
+  const auto path=data_path("diagnostics/phase_profile.log");
+  if(!path.empty()){ensure_parent_dir(path.c_str());if(FILE* out=std::fopen(path.c_str(),"a")){std::fprintf(out,"%s\n",line);std::fclose(out);}}
+  for(auto& s:sums)s=0;frameSum=drawSum=gxSum=pipeT=vertT=texR=layT=slotW=doneW=workerF=0;frames=0;
+}
+
 void emit_periodic_diagnostics() noexcept {
   if (!g_telemetryEnabled || !g_drawSink) return;
   const uint32_t period = g_config.diagnostics_period_frames;
@@ -142,7 +175,8 @@ void emit_periodic_diagnostics() noexcept {
       "fifo_bp_us=%llu fifo_bp=%u fifo_cp_us=%llu fifo_cp=%u fifo_xf_us=%llu fifo_xf=%u "
       "fifo_indx_us=%llu fifo_indx=%u fifo_calldl_us=%llu fifo_calldl=%u "
       "fifo_draw_us=%llu fifo_draw=%u fifo_aurora_us=%llu fifo_aurora=%u fifo_other_us=%llu fifo_other=%u "
-      "dl_calls=%u dl_bytes=%llu dl_cdram_bytes=%llu dl_copy_us=%llu",
+      "dl_calls=%u dl_bytes=%llu dl_cdram_bytes=%llu dl_copy_us=%llu "
+      "gx_worker=%u game_wait_slot_us=%llu game_wait_done_us=%llu worker_frame_us=%llu",
       static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
       g_config.render_width?g_config.render_width:g_config.width,
@@ -173,7 +207,9 @@ void emit_periodic_diagnostics() noexcept {
       static_cast<unsigned long long>(g_lastFifoProfile.us[7]),g_lastFifoProfile.count[7],
       g_lastFifoProfile.dlCalls,static_cast<unsigned long long>(g_lastFifoProfile.dlBytes),
       static_cast<unsigned long long>(g_lastFifoProfile.dlCdramBytes),
-      static_cast<unsigned long long>(g_lastFifoProfile.dlCopyUs));
+      static_cast<unsigned long long>(g_lastFifoProfile.dlCopyUs),
+      gx_worker_active()?1u:0u,static_cast<unsigned long long>(g_lastProducerWaitUs),
+      static_cast<unsigned long long>(g_lastConsumerWaitUs),static_cast<unsigned long long>(g_lastWorkerFrameUs));
   const std::string invalidationLine="[AURORA-VITA][INVALIDATE] frame="+std::to_string(g_telemetry.frame().frame)+g_lastInvalidations;
   if(writeConsole)
     AURORA_VITA_LOG_INFO("%s\n%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str(),invalidationLine.c_str());
@@ -258,10 +294,12 @@ bool initialize(const BackendConfig& c) noexcept {
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   gfx::configure_program_binary_cache(g_programCachePath.empty()?nullptr:g_programCachePath.c_str());
 #endif
-  g_telemetryEnabled=c.diagnostics||c.telemetry_log_path;
-  gfx::set_fifo_profile_enabled(g_telemetryEnabled);
 #if defined(MKW_TARGET_VITA)
   gfx::gxm_disable_mask()=c.gxm_disable_mask;
+#endif
+  g_telemetryEnabled=c.diagnostics||c.telemetry_log_path||gfx::gxm_disabled(gfx::GxmDiagPhases);
+  gfx::set_fifo_profile_enabled(c.diagnostics||c.telemetry_log_path);
+#if defined(MKW_TARGET_VITA)
   aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow&&
       !gfx::gxm_disabled(gfx::GxmDisableDisplayListShadow));
 #endif
@@ -528,7 +566,16 @@ void end_frame_now() noexcept {
   }
   ++g_frame;
   g_lastFifoProfile=gfx::fifo_profile_take();
+#if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::take_wait_stats(g_lastProducerWaitUs,g_lastConsumerWaitUs);
+#endif
+  {
+    // Worker-side wall time between consecutive end_frame calls.
+    static uint64_t lastEnd=0; const uint64_t nowEnd=now_us();
+    g_lastWorkerFrameUs=lastEnd?nowEnd-lastEnd:0; lastEnd=nowEnd;
+  }
   g_lastInvalidations=gfx::take_pipeline_invalidation_report();
+  if(g_telemetryEnabled&&gfx::gxm_disabled(gfx::GxmDiagPhases)) accumulate_phase_profile();
   emit_periodic_diagnostics();
 }
 void end_frame_task(void*) {
@@ -584,8 +631,25 @@ uint64_t frame_index() noexcept{return g_frame;}
 uint64_t last_frame_time_us() noexcept{return g_last;}
 uint32_t width() noexcept{return g_config.width;}
 uint32_t height() noexcept{return g_config.height;}
+namespace { PerformanceSnapshot performance_snapshot_now() noexcept; }
 PerformanceSnapshot performance_snapshot() noexcept {
+#if defined(MKW_TARGET_VITA)
+  // Renderer statistics and cache maps belong to the GX worker: read them on
+  // it (ordered after the pending FIFO) instead of racing its mutations.
+  if(gx_worker_active()){
+    PerformanceSnapshot out{};
+    aurora::gx::fifo::run_sync([](void* p){*static_cast<PerformanceSnapshot*>(p)=performance_snapshot_now();},&out);
+    return out;
+  }
+#endif
+  return performance_snapshot_now();
+}
+namespace {
+PerformanceSnapshot performance_snapshot_now() noexcept {
   PerformanceSnapshot out{};
+#if defined(MKW_TARGET_VITA)
+  out.gxProcessTotalUs=aurora::gx::fifo::process_time_total_us();
+#endif
   out.frameIndex=g_frame;
   out.frameUs=g_last;
   out.displayQueueLastUs=g_displayQueueLastUs;
@@ -603,6 +667,7 @@ PerformanceSnapshot performance_snapshot() noexcept {
   out.nativeTextureUs=stats.nativeTextureUs;
   out.nativeDrawUs=stats.nativeDrawUs;
   out.nativeSceneCount=stats.nativeSceneCount;
+  for(unsigned i=0;i<4;++i)out.diagSceneGpuUs[i]=stats.diagSceneGpuUs[i];
   out.nativeEfbCopies=stats.nativeEfbCopies;
   out.nativeEfbEndSceneUs=stats.nativeEfbEndSceneUs;
   out.nativeEfbTransferSubmitUs=stats.nativeEfbTransferSubmitUs;
@@ -629,6 +694,7 @@ PerformanceSnapshot performance_snapshot() noexcept {
   }
   return out;
 }
+} // namespace
 void set_runtime_shader_compilation_enabled(bool enabled) noexcept {
   if(gx_worker_active()) { queue_on_gx_worker(set_shader_compile_task,ShaderCompileArgs{enabled}); return; }
   if(g_renderer)g_renderer->set_runtime_shader_compilation_enabled(enabled);

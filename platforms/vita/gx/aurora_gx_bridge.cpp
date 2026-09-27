@@ -205,7 +205,8 @@ bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::
   // translate directly from one ShaderConfig snapshot.
   const auto& g=aurora::gx::g_gxState;
   aurora::gx::PipelineConfig pc{};
-  pc.shaderConfig=build_current_shader_config(static_cast<GXVtxFmt>(fmt),translate_line_mode(primitive));
+  { gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateMemo); // build_current_shader_config share
+    pc.shaderConfig=build_current_shader_config(static_cast<GXVtxFmt>(fmt),translate_line_mode(primitive)); }
   pc.depthFunc=g.depthFunc;pc.cullMode=g.cullMode;pc.blendMode=g.blendMode;
   pc.blendFacSrc=g.blendFacSrc;pc.blendFacDst=g.blendFacDst;pc.blendOp=g.blendOp;
   pc.dstAlpha=g.dstAlpha;pc.depthCompare=g.depthCompare;pc.depthUpdate=g.depthUpdate;
