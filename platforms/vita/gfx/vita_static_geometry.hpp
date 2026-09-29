@@ -14,9 +14,10 @@ namespace aurora::vita::gfx {
 // Verified object-space geometry, immutable for its entire GPU lifetime. A
 // source which changes at the same key becomes volatile and takes the CPU path;
 // it is never overwritten while queued or in flight. When the budget is full,
-// least-recently-used entries not referenced by the current frame are evicted;
-// their GPU buffers are released only after RetireFrames further frames, when
-// the display queue has retired every draw that could read them (no finish).
+// least-recently-used entries not referenced by the current frame are evicted.
+// Their GPU storage stays charged to the cache budget until retirement and is
+// released only after RetireFrames plus one explicit GPU-idle barrier. Frame age
+// alone is not a sufficient lifetime proof across rapid scene/target changes.
 class StaticGeometryCache {
 public:
   struct Snapshot {
@@ -50,23 +51,30 @@ public:
   StaticGeometryCache(const StaticGeometryCache&)=delete;
   StaticGeometryCache& operator=(const StaticGeometryCache&)=delete;
 
-  size_t bytes() const noexcept { return bytes_; }
+  size_t bytes() const noexcept { return bytes_ + retiredBytes_; }
+  size_t retired_bytes() const noexcept { return retiredBytes_; }
   size_t size() const noexcept { return entries_.size(); }
   uint64_t hits() const noexcept { return hits_; }
   uint64_t misses() const noexcept { return misses_; }
   uint64_t lookup_fallbacks() const noexcept { return lookupFallbacks_; }
   uint64_t evictions() const noexcept { return evictions_; }
 
-  // Called once per frame before any lookup: releases buffers of entries
-  // evicted at least RetireFrames frames ago.
+  // Called once per frame before any lookup. Retired buffers are destroyed in
+  // one synchronized batch: do not rely on per-buffer inFlight bookkeeping for
+  // memory that may span several GXM scenes and display-queue submissions.
   void begin_frame(uint64_t frame) noexcept {
     frame_=frame;
+    bool hasDue=false;
+    for(const auto& r:retired_)
+      if(frame_>=r.frame+RetireFrames){hasDue=true;break;}
+    if(hasDue)renderer_.buffers().wait_idle();
     size_t kept=0;
     for(size_t i=0;i<retired_.size();++i) {
       auto& r=retired_[i];
       if(frame_>=r.frame+RetireFrames) {
         renderer_.buffers().destroy_retired(r.vertices);
         renderer_.buffers().destroy_retired(r.indices);
+        retiredBytes_=r.gpuBytes<=retiredBytes_?retiredBytes_-r.gpuBytes:0;
       } else retired_[kept++]=r;
     }
     retired_.resize(kept);
@@ -141,8 +149,8 @@ public:
     }
     ++misses_;
     const bool evict=!gxm_disabled(GxmDisableGeometryEviction);
-    if(evict&&(entries_.size()>=1024||bytes_>=budget_))evict_for(budget_/8u);
-    if(entries_.size()>=1024||bytes_>=budget_)return nullptr;
+    if(evict&&retiredBytes_==0&&(entries_.size()>=1024||this->bytes()>=budget_))evict_for(budget_/8u);
+    if(entries_.size()>=1024||this->bytes()>=budget_)return nullptr;
     auto entry=std::make_unique<Entry>();
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
     entry->stableSource=stableSource;entry->stableSourceBytes=stableSource?bytes:0;
@@ -159,7 +167,12 @@ public:
       entry->sourceIndices.assign(sourceIndices,sourceIndices+sourceIndexCount);
       storedBytes+=size_t(sourceIndexCount)*sizeof(uint16_t);
     }
-    if(storedBytes>budget_-bytes_)return nullptr;
+    size_t committedBefore=this->bytes();
+    if(committedBefore>budget_||storedBytes>budget_-committedBefore) {
+      if(evict&&retiredBytes_==0)evict_for(storedBytes);
+      committedBefore=this->bytes();
+      if(committedBefore>budget_||storedBytes>budget_-committedBefore)return nullptr;
+    }
     if(pipeline.fixedPointSprite||pipeline.fixedLineSprite) {
       scratch_.error=PrepareDrawError::None;
       scratch_.vertices.clear();scratch_.indices.clear();scratch_.scratch.clear();
@@ -216,9 +229,14 @@ public:
     const size_t stride=gpuLayout.attributes[0].stride;
     const size_t vertexBytes=scratch_.vertices.size()*stride;
     const size_t indexBytes=scratch_.indices.size()*sizeof(uint16_t);
-    if(vertexBytes+indexBytes>budget_-bytes_-storedBytes) {
-      if(!gxm_disabled(GxmDisableGeometryEviction))evict_for(storedBytes+vertexBytes+indexBytes);
-      if(storedBytes>budget_-bytes_||vertexBytes+indexBytes>budget_-bytes_-storedBytes)return nullptr;
+    size_t committed=this->bytes();
+    if(committed>budget_||storedBytes>budget_-committed||
+       vertexBytes+indexBytes>budget_-committed-storedBytes) {
+      if(!gxm_disabled(GxmDisableGeometryEviction)&&retiredBytes_==0)
+        evict_for(storedBytes+vertexBytes+indexBytes);
+      committed=this->bytes();
+      if(committed>budget_||storedBytes>budget_-committed||
+         vertexBytes+indexBytes>budget_-committed-storedBytes)return nullptr;
     }
     packed_.resize(vertexBytes);
     for(size_t i=0;i<scratch_.vertices.size();++i)
@@ -241,16 +259,17 @@ public:
   }
 
   void clear() noexcept {
+    if(!retired_.empty())renderer_.buffers().wait_idle();
     for(const auto& r:retired_) {
-      renderer_.buffers().destroy(r.vertices);
-      renderer_.buffers().destroy(r.indices);
+      renderer_.buffers().destroy_retired(r.vertices);
+      renderer_.buffers().destroy_retired(r.indices);
     }
     retired_.clear();
     for(auto& pair:entries_) {
       renderer_.buffers().destroy(pair.second->vertices.buffer);
       renderer_.buffers().destroy(pair.second->indices.buffer);
     }
-    entries_.clear();bytes_=0;hits_=misses_=lookupFallbacks_=0;
+    entries_.clear();bytes_=retiredBytes_=0;hits_=misses_=lookupFallbacks_=0;
   }
 
   static bool same_layout(const VertexDecodeLayout& a,const VertexDecodeLayout& b) noexcept {
@@ -370,10 +389,14 @@ private:
     return key;
   }
   Renderer& renderer_;
-  size_t budget_=0,bytes_=0;
+  size_t budget_=0,bytes_=0,retiredBytes_=0;
   uint64_t hits_=0,misses_=0,lookupFallbacks_=0;
   FlatHashMap<uint64_t,std::unique_ptr<Entry>> entries_{};
-  struct Retired { Handle vertices=InvalidHandle,indices=InvalidHandle; uint64_t frame=0; };
+  struct Retired {
+    Handle vertices=InvalidHandle,indices=InvalidHandle;
+    uint64_t frame=0;
+    size_t gpuBytes=0;
+  };
   std::vector<Retired> retired_{};
   uint64_t frame_=0,evictions_=0;
 
@@ -392,7 +415,9 @@ private:
       const auto it=entries_.find(key);
       if(it==entries_.end())continue;
       auto& e=*it->second;
-      retired_.push_back(Retired{e.vertices.buffer,e.indices.buffer,frame_});
+      const size_t gpuBytes=size_t(e.vertices.size)+size_t(e.indices.size);
+      retired_.push_back(Retired{e.vertices.buffer,e.indices.buffer,frame_,gpuBytes});
+      retiredBytes_+=gpuBytes;
       freed+=e.accountedBytes;
       bytes_=e.accountedBytes<=bytes_?bytes_-e.accountedBytes:0;
       entries_.erase(it);

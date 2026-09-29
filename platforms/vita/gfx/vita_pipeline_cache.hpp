@@ -48,7 +48,8 @@ public:
   void invalidate_bound() noexcept{bound_=0;boundPipeline_=nullptr;fixedStateValid_=false;}
   void set_max_entries(size_t maxEntries) noexcept;
   void configure_hot_manifest(const char* path,size_t prewarmLimit=192) noexcept;
-  size_t prewarm_hot(FrameStats* stats=nullptr) noexcept;
+  size_t prewarm_hot(FrameStats* stats=nullptr,
+                     StartupProgressCallback progress=nullptr,void* progressUser=nullptr) noexcept;
   void save_hot_manifest() noexcept;
   void clear_blocked_compile_misses() noexcept { blockedKeys_.clear(); }
   void pin(uint64_t key) noexcept { if(key) pinned_.insert(key); }

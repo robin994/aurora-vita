@@ -320,6 +320,43 @@ TEST(VitaFixedVertex, SnapshotBoundsAndMemoryBudgetAreEnforced) {
   EXPECT_EQ(cache.bytes(),0u);EXPECT_EQ(cache.size(),0u);
 }
 
+TEST(VitaFixedVertex, RetiredGeometryStaysBudgetedUntilSynchronizedReclaim) {
+  IndexedFixture probeFixture;
+  Renderer probeRenderer;ASSERT_TRUE(probeRenderer.initialize());
+  StaticGeometryCache probe(probeRenderer,1024*1024);
+  probe.begin_frame(1);
+  ASSERT_NE(probe.get(probeFixture.raw.data(),probeFixture.raw.size(),probeFixture.raw.size(),
+                      SourcePrimitive::Triangles,probeFixture.layout,probeFixture.pipeline,
+                      probeFixture.state,nullptr),nullptr);
+  const size_t oneEntryBytes=probe.bytes();
+  ASSERT_GT(oneEntryBytes,0u);
+
+  IndexedFixture f;
+  Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache cache(renderer,oneEntryBytes+1u);
+  cache.begin_frame(1);
+  ASSERT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  EXPECT_EQ(cache.retired_bytes(),0u);
+
+  cache.begin_frame(2);
+  for(size_t i=0;i<f.raw.size();++i)f.raw[i]=static_cast<uint8_t>((i+1u)%3u);
+  // The old entry can leave the lookup map immediately, but its GPU allocation
+  // remains charged until the retirement barrier runs. The replacement therefore
+  // falls back instead of temporarily exceeding the cache's real GPU footprint.
+  EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  EXPECT_EQ(cache.size(),0u);
+  EXPECT_GT(cache.retired_bytes(),0u);
+  EXPECT_LE(cache.bytes(),oneEntryBytes+1u);
+
+  cache.begin_frame(2+StaticGeometryCache::RetireFrames);
+  EXPECT_EQ(cache.retired_bytes(),0u);
+  EXPECT_EQ(cache.bytes(),0u);
+  EXPECT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+}
+
 TEST(VitaFixedVertex, PipelineKeySeparatesCpuAndGpuVertexConventions) {
   PipelineDesc p{};const auto cpu=pipeline_key(p);p.fixedVertexOnGpu=true;
   EXPECT_NE(cpu,pipeline_key(p));

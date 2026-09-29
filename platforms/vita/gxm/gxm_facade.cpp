@@ -209,11 +209,14 @@ void PipelineCache::configure_hot_manifest(const char* path,size_t prewarmLimit)
   if(!hot_.empty())AURORA_VITA_LOG_INFO("[aurora-gxm] pipeline_manifest loaded=%u prewarm_limit=%u\n",
       static_cast<unsigned>(hot_.size()),static_cast<unsigned>(prewarmLimit_));
 }
-size_t PipelineCache::prewarm_hot(FrameStats* stats) noexcept {
+size_t PipelineCache::prewarm_hot(FrameStats* stats,StartupProgressCallback progress,void* progressUser) noexcept {
   if(!native_||hot_.empty()||!prewarmLimit_)return 0;
   std::vector<std::pair<uint64_t,HotRecord*>> ordered;ordered.reserve(hot_.size());
   for(auto& [key,record]:hot_)ordered.emplace_back(key,&record);
   std::sort(ordered.begin(),ordered.end(),[](const auto&a,const auto&b){return a.second->hits>b.second->hits;});
+  const size_t target=std::min({prewarmLimit_,ordered.size(),maxEntries_});
+  size_t visited=0;
+  if(progress)progress("pipeline_prewarm",0,target?target:1,progressUser);
   size_t warmed=0;
   for(const auto& [key,record]:ordered){
     if(warmed>=prewarmLimit_||map_.size()>=maxEntries_)break;
@@ -226,7 +229,10 @@ size_t PipelineCache::prewarm_hot(FrameStats* stats) noexcept {
     CompiledPipeline p{};p.key=key;p.desc=record->desc;p.lastUsed=++useSequence_;
     map_.emplace(key,std::move(p));++warmed;
     if(stats)++stats->pipelineHits;
+    ++visited;
+    if(progress)progress("pipeline_prewarm",std::min(visited,target),target?target:1,progressUser);
   }
+  if(progress)progress("pipeline_prewarm",target?target:1,target?target:1,progressUser);
   highWaterEntries_=std::max(highWaterEntries_,map_.size());
   if(warmed)AURORA_VITA_LOG_INFO("[aurora-gxm] pipeline_prewarm warmed=%u resident=%u\n",
       static_cast<unsigned>(warmed),static_cast<unsigned>(map_.size()));
@@ -406,6 +412,8 @@ bool Renderer::initialize() noexcept {
   c.programCachePath=cfg_.programBinaryCachePath;
   c.preloadProgramCache=cfg_.preloadProgramBinaryCache;
   c.programCachePreloadLimit=cfg_.programBinaryPreloadLimit;
+  c.startupProgress=cfg_.startupProgress;
+  c.startupProgressUser=cfg_.startupProgressUser;
   c.maxPipelines=cfg_.pipelineBudget+16; // Native clear/blit variants are not GX cache entries.
   if(!native_->initialize(c))return false;
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=native_.get();
@@ -420,7 +428,7 @@ bool Renderer::initialize() noexcept {
     }
   }
   pipelines_.configure_hot_manifest(cfg_.pipelineWarmupPath,cfg_.pipelinePrewarmLimit);
-  pipelines_.prewarm_hot();
+  pipelines_.prewarm_hot(nullptr,cfg_.startupProgress,cfg_.startupProgressUser);
   if(cfg_.sealRuntimeShaderCompilationAfterPrewarm)
     native_->set_runtime_shader_compilation_enabled(false);
   targetWidth_=renderWidth;targetHeight_=renderHeight;initialized_=true;failed_=false;

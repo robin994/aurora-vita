@@ -7,8 +7,12 @@ namespace aurora::vita::gfx {
 
 using CpuRangeTask = bool (*)(void* context, size_t begin, size_t end, uint32_t lane) noexcept;
 
-// Vita applications have three CPU cores available for game work. Keep the
-// render thread as one execution lane and add up to two persistent CPU workers.
+inline constexpr uint32_t MaxExecutionLanes = 4;
+inline constexpr uint32_t MaxWorkerThreads = MaxExecutionLanes - 1;
+
+// Keep the render thread as lane 0. CPU1/CPU2 remain the normal helpers; an
+// optional third helper may be pinned to the system-reserved core when the
+// title has explicit access to it (for example through CapUnlocker).
 bool initialize_cpu_workers(uint32_t workerThreads = 2, size_t minItems = 512,
                             uint32_t defaultExecutionLanes = 0) noexcept;
 void shutdown_cpu_workers() noexcept;
@@ -27,5 +31,8 @@ bool cpu_parallel_for_min_lanes(size_t count, size_t minItems, uint32_t maxExecu
 uint32_t cpu_worker_threads() noexcept;
 uint32_t cpu_execution_lanes() noexcept;
 size_t cpu_parallel_min_items() noexcept;
+bool cpu_core3_available() noexcept;
+int cpu_core3_cpu_id() noexcept;
+int cpu_core3_affinity_mask() noexcept;
 
 } // namespace aurora::vita::gfx

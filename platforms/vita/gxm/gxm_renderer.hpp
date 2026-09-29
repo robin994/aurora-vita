@@ -24,6 +24,8 @@ struct Config {
   const char* programCachePath = nullptr;
   bool preloadProgramCache = false;
   size_t programCachePreloadLimit = 1024;
+  gfx::StartupProgressCallback startupProgress = nullptr;
+  void* startupProgressUser = nullptr;
 };
 
 // Native implementation used by the public gfx::Renderer facade and the device

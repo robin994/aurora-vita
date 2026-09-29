@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include "vita_log.hpp"
+#include "gfx/vita_gfx_types.hpp"
 #include "gfx/vita_telemetry.hpp"
 #include "integration/vita_feature_coverage.hpp"
 #include "integration/vita_frame_trace.hpp"
@@ -86,14 +87,18 @@ struct BackendConfig {
   size_t stream_vertex_bytes=4*1024*1024;
   size_t stream_index_bytes=1024*1024;
   uint32_t stream_slots=3;
-  // The render thread remains the sole vitaGL owner. These workers only run
-  // CPU-side per-vertex decode/transform work, giving Vita three CPU lanes in
-  // total with the default two workers plus the caller.
+  // The render thread remains the sole graphics owner. These workers only run
+  // CPU-side preparation. A third helper may exist on CPU3, but ports can keep
+  // both renderer and game jobs capped to the original CPU0-2 topology until a
+  // quota-aware scheduler is enabled.
   uint32_t cpu_worker_threads=2;
   // Maximum caller+worker lanes used by Aurora's own decode/transform path.
   // Zero uses every configured lane. Ports with real-time work on CPU1 can
   // create a low-priority second helper but cap renderer work to CPU0+CPU2.
   uint32_t cpu_renderer_execution_lanes=0;
+  // Maximum caller+worker lanes used by the public game-side parallel_for().
+  // Keeping this at 3 while probing a fourth lane makes CPU3 probe-only.
+  uint32_t cpu_game_execution_lanes=0;
   // Minimum useful work per CPU lane. Smaller draws stay on the render thread;
   // larger draws progressively use one or two workers as their size warrants.
   uint32_t cpu_parallel_min_vertices=512;
@@ -155,6 +160,10 @@ struct BackendConfig {
   bool gxm_preload_program_cache=false;
   size_t gxm_program_cache_preload_limit=1024;
   bool gxm_seal_shader_cache_after_prewarm=false;
+  // Optional synchronous boot progress callback. Called only from initialize()
+  // on the calling thread while program/pipeline caches are being prepared.
+  gfx::StartupProgressCallback startup_progress=nullptr;
+  void* startup_progress_user=nullptr;
   // Diagnostic only: submit at most this many GX draw packets per frame. Zero
   // disables the limit. Useful for framebuffer bisection of rendering faults.
   uint32_t diagnostic_draw_limit=0;
@@ -191,10 +200,13 @@ integration::FeatureCoverage& feature_coverage() noexcept;
 integration::FrameTrace& frame_trace() noexcept;
 gfx::MemoryBudgetSnapshot memory_budget() noexcept;
 size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept;
-// Shared Vita CPU helper. CPU0 participates as lane 0 and Aurora's persistent
-// helper executes lane 1 on CPU2. Jobs are synchronous: this returns only after
-// all ranges complete. Nested calls safely fall back to the caller.
+// Shared Vita CPU helper. CPU0 participates as lane 0; persistent helpers may
+// occupy CPU2, CPU1 and (when verified) CPU3. Jobs are synchronous: this returns
+// only after all dispatched ranges complete. Nested calls fall back to caller.
 bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* context) noexcept;
 uint32_t worker_threads() noexcept;
 uint32_t execution_lanes() noexcept;
+bool core3_available() noexcept;
+int core3_cpu_id() noexcept;
+int core3_affinity_mask() noexcept;
 } // namespace aurora::vita

@@ -821,6 +821,7 @@ bool Renderer::initialize(const Config& config) {
   d.runtimeShaderCompileEnabled = true;
   d.pipelineCompileBlocked = false;
   if (config.preloadProgramCache && config.programCachePreloadLimit) {
+    if(config.startupProgress)config.startupProgress("program_cache",0,1,config.startupProgressUser);
     std::vector<PreloadedProgram> programs;
     d.programCache.preload(programs, config.programCachePreloadLimit);
     for (auto& program : programs) {
@@ -831,6 +832,7 @@ bool Renderer::initialize(const Config& config) {
       compiled->code = std::move(program.words);
       d.stageCache.emplace(program.sourceHash, std::move(compiled));
     }
+    if(config.startupProgress)config.startupProgress("program_cache",1,1,config.startupProgressUser);
   }
   d.initialized = true;
   PipelineDesc clear{};
@@ -1262,7 +1264,11 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
       cached.scissor.width==scissor.width&&cached.scissor.height==scissor.height);
   const bool sameRevision=uniformRevision!=0&&cached.uniformRevision==uniformRevision&&
       !gxm_disabled(GxmDisableUniformRevision);
-  const bool reuseFragment=cached.valid&&cached.pipelineKey==key&&
+  // The bisection bit must disable the whole optimization, not only the
+  // revision shortcut. Goal/scene transitions are exactly where a stale
+  // default-uniform reservation would be most damaging on hardware.
+  const bool reuseFragment=!gxm_disabled(GxmDisableUniformRevision)&&
+      cached.valid&&cached.pipelineKey==key&&
       cached.usedTextureCount==usedTextureCount&&sameScissor&&
       sameBytes(cached.textureFlags.data(),textureFlags.data(),usedTextureCount*sizeof(textureFlags[0]))&&
       sameBytes(cached.textureTransform.data(),textureTransform.data(),usedTextureCount*sizeof(textureTransform[0]))&&

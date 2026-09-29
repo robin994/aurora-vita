@@ -29,6 +29,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/threadmgr/thread.h>
 #if !defined(AURORA_VITA_RENDERER_GXM)
 #include <vitaGL.h>
 #endif
@@ -401,6 +402,8 @@ bool initialize(const BackendConfig& c) noexcept {
   // The native budget covers persistent streaming buffers as well as textures.
   rc.nativeResourceBudget=c.texture_cache_budget+c.static_geometry_budget+
       (c.stream_vertex_bytes+c.stream_index_bytes)*c.stream_slots+16u*1024u*1024u;
+  rc.startupProgress=c.startup_progress;
+  rc.startupProgressUser=c.startup_progress_user;
 #if defined(AURORA_VITA_RENDERER_GXM)
   // Program binaries and hot-pipeline manifests are per title by default so
   // unrelated games cannot consume each other's cache entries or storage.
@@ -427,6 +430,33 @@ bool initialize(const BackendConfig& c) noexcept {
     AURORA_VITA_LOG_ERROR(
         "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
+#if defined(__vita__)
+  // Keep this one-shot probe independent from the normal runtime log so
+  // NO_LOGS builds still leave hardware evidence of CPU3 availability.
+  const auto cpuProbePath=data_path("cpu3_probe.log");
+  if(!cpuProbePath.empty()) {
+    SceKernelSystemInfo system{};system.size=sizeof(system);
+    const int systemRc=sceKernelGetSystemInfo(&system);
+    if(FILE* probe=std::fopen(cpuProbePath.c_str(),"w")) {
+      std::fprintf(probe,
+          "requested_workers=%u\nworkers=%u\nlanes=%u\nrenderer_cap=%u\ngame_cap=%u\n"
+          "core3_available=%u\ncore3_cpu=%d\ncore3_affinity=0x%08x\n"
+          "system_info_rc=0x%08x\nactive_cpu_mask=0x%08x\ncore3_idle_raw=%llu\n",
+          c.cpu_worker_threads,gfx::cpu_worker_threads(),gfx::cpu_execution_lanes(),
+          c.cpu_renderer_execution_lanes,c.cpu_game_execution_lanes,
+          gfx::cpu_core3_available()?1u:0u,gfx::cpu_core3_cpu_id(),
+          static_cast<unsigned>(gfx::cpu_core3_affinity_mask()),static_cast<unsigned>(systemRc),
+          systemRc>=0?static_cast<unsigned>(system.activeCpuMask):0u,
+          systemRc>=0?static_cast<unsigned long long>(system.cpuInfo[3].idleClock):0ull);
+      std::fclose(probe);
+    }
+  }
+#endif
+  AURORA_VITA_LOG_INFO(
+      "[aurora-vita] cpu topology workers=%u lanes=%u renderer_cap=%u game_cap=%u core3=%u core3_cpu=%d core3_affinity=0x%08x\n",
+      gfx::cpu_worker_threads(),gfx::cpu_execution_lanes(),c.cpu_renderer_execution_lanes,
+      c.cpu_game_execution_lanes,gfx::cpu_core3_available()?1u:0u,gfx::cpu_core3_cpu_id(),
+      static_cast<unsigned>(gfx::cpu_core3_affinity_mask()));
   AURORA_VITA_LOG_INFO(
       "[aurora-vita] render config display=%ux%u internal=%ux%u native_cmpr=%u direct_stream=%u scratch_dynamic=%u scratch_stream=%u gpu_vertex_stride=%u gpu_geometry_mb=%llu stream_v=%llu stream_i=%llu slots=%u\n",
       c.width,c.height,renderWidth,renderHeight,
@@ -718,11 +748,14 @@ size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept{
 }
 
 bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* context) noexcept {
-  return gfx::cpu_parallel_for_min(count,minItems,task,context);
+  return gfx::cpu_parallel_for_min_lanes(count,minItems,g_config.cpu_game_execution_lanes,task,context);
 }
 
 uint32_t worker_threads() noexcept { return gfx::cpu_worker_threads(); }
 uint32_t execution_lanes() noexcept { return gfx::cpu_execution_lanes(); }
+bool core3_available() noexcept { return gfx::cpu_core3_available(); }
+int core3_cpu_id() noexcept { return gfx::cpu_core3_cpu_id(); }
+int core3_affinity_mask() noexcept { return gfx::cpu_core3_affinity_mask(); }
 
 // benchmark.c keeps this hook weak so non-Aurora builds do not need to provide
 // it.  On Vita provide a strong implementation backed by the actual CPU time

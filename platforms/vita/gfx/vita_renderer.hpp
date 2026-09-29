@@ -31,6 +31,8 @@ struct RendererConfig {
   bool preloadProgramBinaryCache=false;
   size_t programBinaryPreloadLimit=1024;
   bool sealRuntimeShaderCompilationAfterPrewarm=false;
+  StartupProgressCallback startupProgress=nullptr;
+  void* startupProgressUser=nullptr;
 };
 class Renderer {
 public:

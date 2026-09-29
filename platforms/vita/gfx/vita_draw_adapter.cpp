@@ -131,7 +131,7 @@ struct FusedVertexContext {
   VertexPipelineRequirements requirements{};
   VertexSemanticMask decodeSemantics=AllVertexSemantics;
   CanonicalVertex* vertices=nullptr;
-  std::array<uint8_t,3> error{{0,0,0}}; // 1=decode, 2=transform
+  std::array<uint8_t,MaxExecutionLanes> error{}; // 1=decode, 2=transform
 };
 
 void pack_gpu_vertex(uint8_t* dst,const CanonicalVertex& src,const VertexLayout& layout) noexcept {
@@ -187,7 +187,7 @@ struct StreamedVertexContext {
   uint8_t* destination=nullptr;
   size_t gpuStride=0;
   bool transformPosition=true;
-  std::array<uint8_t,3> error{{0,0,0}};
+  std::array<uint8_t,MaxExecutionLanes> error{};
 };
 
 bool decode_transform_pack_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {

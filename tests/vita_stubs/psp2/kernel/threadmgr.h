@@ -2,6 +2,7 @@
 // Host test shim for the production Vita worker protocol. This models threads
 // and bounded counting semaphores, not Vita scheduling or device performance.
 #include <cstddef>
+#include <psp2/kernel/cpu.h>
 using SceUID=int;
 using SceSize=size_t;
 inline constexpr int SCE_KERNEL_CPU_MASK_USER_1=2,SCE_KERNEL_CPU_MASK_USER_2=4;
@@ -14,3 +15,6 @@ int sceKernelStartThread(SceUID,SceSize,void*);
 int sceKernelWaitThreadEnd(SceUID,void*,void*);
 int sceKernelDeleteThread(SceUID);
 int sceKernelDelayThread(unsigned);
+int sceKernelGetCpuId(void);
+SceUID sceKernelGetThreadId(void);
+int sceKernelGetThreadCpuAffinityMask(SceUID);

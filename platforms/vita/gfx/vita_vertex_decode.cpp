@@ -213,10 +213,14 @@ struct DecodeContext {
   size_t streamSize = 0;
   const VertexDecodeLayout* layout = nullptr;
   CanonicalVertex* vertices = nullptr;
-  std::array<size_t, 3> badVertex{{
-      std::numeric_limits<size_t>::max(),
-      std::numeric_limits<size_t>::max(),
-      std::numeric_limits<size_t>::max()}};
+  std::array<size_t, MaxExecutionLanes> badVertex{};
+
+  DecodeContext() noexcept { badVertex.fill(std::numeric_limits<size_t>::max()); }
+  DecodeContext(const uint8_t* input, size_t inputSize, const VertexDecodeLayout* inputLayout,
+                CanonicalVertex* output) noexcept
+      : stream(input), streamSize(inputSize), layout(inputLayout), vertices(output) {
+    badVertex.fill(std::numeric_limits<size_t>::max());
+  }
 };
 
 bool decode_range(void* opaque, size_t begin, size_t end, uint32_t lane) noexcept {

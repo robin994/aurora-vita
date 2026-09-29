@@ -10,6 +10,7 @@ namespace aurora::vita::gfx {
 
 using Handle = uint32_t;
 constexpr Handle InvalidHandle = 0;
+using StartupProgressCallback = void (*)(const char* phase, size_t current, size_t total, void* user);
 constexpr uint32_t MaxTextures = 8;
 constexpr uint32_t MaxTevStages = 16;
 constexpr uint32_t MaxVertexAttributes = 16;
@@ -522,7 +523,7 @@ enum GxmDisableBits : uint32_t {
   GxmDisableScissorVariant = 1u << 1,   // discard-free full-scissor pipeline variant
   GxmDisablePersistentState = 1u << 2,  // texture-binding fast path (state is always reset per scene)
   GxmDisableFixedSnapshot = 1u << 3,    // shared/revisioned fixed-vertex uniform snapshots
-  GxmDisableUniformRevision = 1u << 4,  // fragment uniform revisions
+  GxmDisableUniformRevision = 1u << 4,  // disable fragment-uniform reuse entirely
   GxmDisableNativeWrap = 1u << 5,       // hardware texture wrap in shaders
   GxmDisableGeometryEviction = 1u << 6, // static-geometry LRU eviction
   GxmDisableDisplayListShadow = 1u << 7,
