@@ -62,7 +62,7 @@ void evict_tlut_object(u32 tlutObjId) noexcept {
 void invalidate_static_texture_cache() noexcept {
   for (auto& texture : g_gxState.textures) texture.reset();
   for (auto& texture : g_gxState.loadedTextures) texture.set_no_cache(true);
-  g_gxState.stateDirty = true;
+  g_gxState.mark_dirty();
 }
 
 Vec2<uint32_t> logical_fb_size() noexcept {
@@ -116,24 +116,24 @@ MappedRenderState map_logical_render_state() noexcept {
 }
 
 void set_logical_viewport(const gfx::Viewport& viewport) noexcept {
-  if (viewport != g_gxState.logicalViewport) g_gxState.stateDirty = true;
+  if (viewport != g_gxState.logicalViewport) g_gxState.mark_dirty(StateDomain::Vertex | StateDomain::Fragment | StateDomain::Raster);
   g_gxState.logicalViewport = viewport;
   set_render_viewport(map_logical_viewport(viewport));
 }
 
 void set_render_viewport(const gfx::Viewport& viewport) noexcept {
-  if (viewport != g_gxState.renderViewport) g_gxState.stateDirty = true;
+  if (viewport != g_gxState.renderViewport) g_gxState.mark_dirty(StateDomain::Vertex | StateDomain::Fragment | StateDomain::Raster);
   g_gxState.renderViewport = viewport;
 }
 
 void set_logical_scissor(const gfx::ClipRect& scissor) noexcept {
-  if (scissor != g_gxState.logicalScissor) g_gxState.stateDirty = true;
+  if (scissor != g_gxState.logicalScissor) g_gxState.mark_dirty(StateDomain::Raster);
   g_gxState.logicalScissor = scissor;
   set_render_scissor(map_logical_scissor(scissor));
 }
 
 void set_render_scissor(const gfx::ClipRect& scissor) noexcept {
-  if (scissor != g_gxState.renderScissor) g_gxState.stateDirty = true;
+  if (scissor != g_gxState.renderScissor) g_gxState.mark_dirty(StateDomain::Raster);
   g_gxState.renderScissor = scissor;
 }
 
@@ -144,7 +144,7 @@ const gfx::TextureBind& get_texture(GXTexMapID id) noexcept {
 void resolve_sampled_textures(const ShaderInfo&) noexcept {}
 
 void notify_copy_texture_created() noexcept {
-  g_gxState.stateDirty = true;
+  g_gxState.mark_dirty();
 }
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept {

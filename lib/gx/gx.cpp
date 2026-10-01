@@ -962,7 +962,7 @@ gfx::ClipRect map_logical_scissor(const gfx::ClipRect& logicalScissor) noexcept 
 void set_logical_viewport(const gfx::Viewport& viewport) noexcept {
   const bool changed = viewport != g_gxState.logicalViewport;
   g_gxState.logicalViewport = viewport;
-  g_gxState.stateDirty = g_gxState.stateDirty || changed;
+  if (changed) g_gxState.mark_dirty(StateDomain::Vertex | StateDomain::Fragment | StateDomain::Raster);
   apply_logical_render_state();
 }
 
@@ -971,7 +971,7 @@ void set_render_viewport(const gfx::Viewport& viewport) noexcept {
     return;
   }
   g_gxState.renderViewport = viewport;
-  g_gxState.stateDirty = true;
+  g_gxState.mark_dirty();
   gfx::set_viewport(viewport);
 }
 
@@ -1113,7 +1113,7 @@ void invalidate_static_texture_cache() noexcept {
   s_lastStaticSourceResolveKeyValid.fill(false);
   s_lastStaticSourceNoCopyRevision.fill(0);
   prune_idle_texture_caches();
-  g_gxState.stateDirty = true;
+  g_gxState.mark_dirty();
 }
 
 void clear_copy_texture_cache() noexcept {

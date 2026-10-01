@@ -123,18 +123,14 @@ uint8_t current_component_size(GXAttr attr, GXCompType type) noexcept {
   }
 }
 
-aurora::gx::ShaderConfig build_current_shader_config(GXVtxFmt fmt, uint8_t lineMode) noexcept {
+void build_current_vertex_attributes(decltype(aurora::gx::ShaderConfig{}.attrs)& attrs, uint8_t& streamStride, GXVtxFmt fmt) noexcept {
   const auto& g = aurora::gx::g_gxState;
-  aurora::gx::ShaderConfig sc{};
-  sc.fogType = static_cast<u8>(g.fog.type);
-  sc.fogRangeAdjust = (g.fogRange[0] & (1u << 10)) != 0;
-  sc.lineMode = lineMode;
   const auto& vf = g.vtxFmts[static_cast<size_t>(fmt)];
   uint16_t streamOffset = 0;
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX0 + 7; ++i) {
     const auto attr = static_cast<GXAttr>(i);
     const auto source = g.vtxDesc[static_cast<size_t>(i)];
-    auto& m = sc.attrs[static_cast<size_t>(i)];
+    auto& m = attrs[static_cast<size_t>(i)];
     if (source == GX_NONE) { m = {}; continue; }
     const auto& af = vf.attrs[static_cast<size_t>(i)];
     const uint8_t count = current_component_count(attr, af.cnt);
@@ -157,7 +153,16 @@ aurora::gx::ShaderConfig build_current_shader_config(GXVtxFmt fmt, uint8_t lineM
       streamOffset += static_cast<uint16_t>(current_component_size(attr, af.type) * count);
     }
   }
-  sc.vtxStride = static_cast<u8>(std::min<uint16_t>(streamOffset, 255u));
+  streamStride = static_cast<u8>(std::min<uint16_t>(streamOffset, 255u));
+}
+
+aurora::gx::ShaderConfig build_current_shader_config(GXVtxFmt fmt, uint8_t lineMode) noexcept {
+  const auto& g = aurora::gx::g_gxState;
+  aurora::gx::ShaderConfig sc{};
+  sc.fogType = static_cast<u8>(g.fog.type);
+  sc.fogRangeAdjust = (g.fogRange[0] & (1u << 10)) != 0;
+  sc.lineMode = lineMode;
+  build_current_vertex_attributes(sc.attrs, sc.vtxStride, fmt);
   sc.tevSwapTable = g.tevSwapTable;
   sc.tevStageCount = std::min<u32>(g.numTevStages, aurora::gx::MaxTevStages);
   for (u32 i = 0; i < sc.tevStageCount; ++i) sc.tevStages[i] = g.tevStages[i];
@@ -226,9 +231,14 @@ bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::
   return false;
 }
 
+static gfx::VertexDecodeLayout translate_vertex_attributes(
+    const decltype(aurora::gx::ShaderConfig{}.attrs)& attrs, uint8_t streamStride) noexcept;
+
 gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept {
-  const auto sc = build_current_shader_config(static_cast<GXVtxFmt>(fmt), 0);
-  return translate_vertex_layout(sc);
+  decltype(aurora::gx::ShaderConfig{}.attrs) attrs{};
+  uint8_t stride=0;
+  build_current_vertex_attributes(attrs,stride,static_cast<GXVtxFmt>(fmt));
+  return translate_vertex_attributes(attrs,stride);
 }
 
 Capabilities inspect_current(uint8_t primitive, uint8_t fmt) noexcept {
@@ -314,9 +324,10 @@ std::array<float,4> copy_vec4(const aurora::Vec4<float>& in) noexcept {
 }
 }
 
-gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& c) noexcept {
+static gfx::VertexDecodeLayout translate_vertex_attributes(
+    const decltype(aurora::gx::ShaderConfig{}.attrs)& attrs, uint8_t streamStride) noexcept {
   gfx::VertexDecodeLayout out{};
-  out.streamStride = c.vtxStride;
+  out.streamStride = streamStride;
   out.streamLittleEndian = false; // GX FIFO/display-list bytes are big-endian.
   auto add = [&](GXAttr attr, VertexSemantic semantic, const aurora::gx::AttrConfig& m,
                        uint8_t components, uint16_t streamExtra = 0, uint16_t valueExtra = 0) mutable {
@@ -336,21 +347,21 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
   };
 
   // Matrix indices are always byte-sized values in the GX vertex stream.
-  if (c.attrs[GX_VA_PNMTXIDX].attrType != GX_NONE) {
-    auto m = c.attrs[GX_VA_PNMTXIDX]; m.compType = GX_U8; m.cnt = 1; m.frac = 0;
+  if (attrs[GX_VA_PNMTXIDX].attrType != GX_NONE) {
+    auto m = attrs[GX_VA_PNMTXIDX]; m.compType = GX_U8; m.cnt = 1; m.frac = 0;
     add(GX_VA_PNMTXIDX, VertexSemantic::PnMatrixIndex, m, 1);
   }
   for (unsigned i = 0; i < MaxTextures; ++i) {
     const auto attr = static_cast<GXAttr>(GX_VA_TEX0MTXIDX + i);
-    if (c.attrs[attr].attrType == GX_NONE) continue;
-    auto m = c.attrs[attr]; m.compType = GX_U8; m.cnt = 1; m.frac = 0;
+    if (attrs[attr].attrType == GX_NONE) continue;
+    auto m = attrs[attr]; m.compType = GX_U8; m.cnt = 1; m.frac = 0;
     add(attr, tex_mtx_semantic(i), m, 1);
   }
 
-  add(GX_VA_POS, VertexSemantic::Position, c.attrs[GX_VA_POS],
-      std::min<uint8_t>(c.attrs[GX_VA_POS].cnt, 3));
+  add(GX_VA_POS, VertexSemantic::Position, attrs[GX_VA_POS],
+      std::min<uint8_t>(attrs[GX_VA_POS].cnt, 3));
 
-  const auto& n = c.attrs[GX_VA_NRM];
+  const auto& n = attrs[GX_VA_NRM];
   if (n.attrType != GX_NONE) {
     if (n.cnt == 9) {
       const uint16_t comp3 = static_cast<uint16_t>(3u * vertex_component_size(GX_VA_NRM, static_cast<GXCompType>(n.compType)));
@@ -365,19 +376,60 @@ gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& 
       add(GX_VA_NRM, VertexSemantic::Normal, n, std::min<uint8_t>(n.cnt, 3));
     }
   }
-  add(GX_VA_CLR0, VertexSemantic::Color0, c.attrs[GX_VA_CLR0], 4);
-  add(GX_VA_CLR1, VertexSemantic::Color1, c.attrs[GX_VA_CLR1], 4);
+  add(GX_VA_CLR0, VertexSemantic::Color0, attrs[GX_VA_CLR0], 4);
+  add(GX_VA_CLR1, VertexSemantic::Color1, attrs[GX_VA_CLR1], 4);
   for (unsigned i = 0; i < MaxTextures; ++i) {
     const auto attr = static_cast<GXAttr>(GX_VA_TEX0 + i);
-    add(attr, tex_semantic(i), c.attrs[attr], std::min<uint8_t>(c.attrs[attr].cnt, 2));
+    add(attr, tex_semantic(i), attrs[attr], std::min<uint8_t>(attrs[attr].cnt, 2));
   }
   gfx::compile_vertex_decode_layout(out);
   return out;
 }
 
+gfx::VertexDecodeLayout translate_vertex_layout(const aurora::gx::ShaderConfig& c) noexcept {
+  return translate_vertex_attributes(c.attrs,c.vtxStride);
+}
+
+void translate_fragment_uniforms(gfx::DrawUniforms& uniforms,const gfx::PipelineDesc& pipeline) noexcept {
+  const auto& g=aurora::gx::g_gxState;
+  for (unsigned i = 0; i < 4; ++i) {
+    uniforms.tevreg[i] = copy_vec4(g.colorRegs[i]);
+    uniforms.kcolor[i] = copy_vec4(g.kcolors[i]);
+  }
+  if(pipeline.fogMode!=gfx::FogMode::None) {
+    uniforms.fogColor = copy_vec4(g.fog.color);
+    const float logicalWidth = std::max(g.logicalViewport.width, 1.f);
+    const float renderWidth = std::max(g.renderViewport.width, 1.f);
+    const int32_t rawCenter = static_cast<int32_t>(g.fogRange[0] & 0x3ffu) - 342;
+    const float rangeCenter = ((static_cast<float>(rawCenter) - g.logicalViewport.left) / logicalWidth) * 2.f - 1.f +
+                              (g.renderViewport.left / renderWidth) * 2.f;
+    uniforms.fogParams = {g.fog.a, g.fog.b, g.fog.c, rangeCenter};
+    uniforms.renderViewportWidth = renderWidth;
+    if(pipeline.fogRangeEnabled) for (unsigned i=0;i<uniforms.fogRangeK.size();++i) {
+      const u32 packed = g.fogRange[1 + i / 2];
+      const u32 raw = (packed >> ((i & 1u) * 12u)) & 0xfffu;
+      uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
+    }
+  }
+
+  if(pipeline.tev.indirectStageCount) {
+    for (unsigned i = 0; i < gfx::MaxTextures; ++i) {
+      const auto& s = g.texCoordScales[i];
+      uniforms.texcoordScale[i] = {static_cast<float>(s.scaleS) + 1.f, static_cast<float>(s.scaleT) + 1.f, 0.f, 0.f};
+      const auto& t = g.loadedTextures[i];
+      uniforms.textureSizeBias[i] = {static_cast<float>(t.width()), static_cast<float>(t.height()), t.lod_bias(), 0.f};
+    }
+    for (unsigned i = 0; i < gfx::MaxIndMatrices; ++i) {
+      const auto& m = g.indTexMtxs[i];
+      uniforms.indirectMatrices[i * 2] = {m.mtx.m0.x, m.mtx.m0.y, m.mtx.m1.x, m.mtx.m1.y};
+      uniforms.indirectMatrices[i * 2 + 1] = {m.mtx.m2.x, m.mtx.m2.y, std::exp2f(m.scaleExp), 0.f};
+    }
+  }
+}
+
 void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms,
                             const gfx::PipelineDesc& pipeline,
-                            const gfx::VertexDecodeLayout& layout) noexcept {
+                            const gfx::VertexDecodeLayout& layout, bool updateFragment) noexcept {
   const auto& g = aurora::gx::g_gxState;
   state.currentPnMatrix = static_cast<uint8_t>(std::min<u32>(g.currentPnMtx, state.postexMatrices.size() - 1));
 
@@ -461,43 +513,11 @@ void translate_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms&
     d.position = copy_vec4(s.pos); d.direction = copy_vec4(s.dir); d.color = copy_vec4(s.color);
     d.cosAtt = copy_vec4(s.cosAtt); d.distAtt = copy_vec4(s.distAtt); uniforms.lights[i] = d;
   }
-  for (unsigned i = 0; i < 4; ++i) {
-    uniforms.tevreg[i] = copy_vec4(g.colorRegs[i]);
-    uniforms.kcolor[i] = copy_vec4(g.kcolors[i]);
-  }
-  if(pipeline.fogMode!=gfx::FogMode::None) {
-    uniforms.fogColor = copy_vec4(g.fog.color);
-    const float logicalWidth = std::max(g.logicalViewport.width, 1.f);
-    const float renderWidth = std::max(g.renderViewport.width, 1.f);
-    const int32_t rawCenter = static_cast<int32_t>(g.fogRange[0] & 0x3ffu) - 342;
-    const float rangeCenter = ((static_cast<float>(rawCenter) - g.logicalViewport.left) / logicalWidth) * 2.f - 1.f +
-                              (g.renderViewport.left / renderWidth) * 2.f;
-    uniforms.fogParams = {g.fog.a, g.fog.b, g.fog.c, rangeCenter};
-    uniforms.renderViewportWidth = renderWidth;
-    if(pipeline.fogRangeEnabled) for (unsigned i=0;i<uniforms.fogRangeK.size();++i) {
-      const u32 packed = g.fogRange[1 + i / 2];
-      const u32 raw = (packed >> ((i & 1u) * 12u)) & 0xfffu;
-      uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
-    }
-  }
-
-  if(pipeline.tev.indirectStageCount) {
-    for (unsigned i = 0; i < gfx::MaxTextures; ++i) {
-      const auto& s = g.texCoordScales[i];
-      uniforms.texcoordScale[i] = {static_cast<float>(s.scaleS) + 1.f, static_cast<float>(s.scaleT) + 1.f, 0.f, 0.f};
-      const auto& t = g.loadedTextures[i];
-      uniforms.textureSizeBias[i] = {static_cast<float>(t.width()), static_cast<float>(t.height()), t.lod_bias(), 0.f};
-    }
-    for (unsigned i = 0; i < gfx::MaxIndMatrices; ++i) {
-      const auto& m = g.indTexMtxs[i];
-      uniforms.indirectMatrices[i * 2] = {m.mtx.m0.x, m.mtx.m0.y, m.mtx.m1.x, m.mtx.m1.y};
-      uniforms.indirectMatrices[i * 2 + 1] = {m.mtx.m2.x, m.mtx.m2.y, std::exp2f(m.scaleExp), 0.f};
-    }
-  }
+  if(updateFragment) translate_fragment_uniforms(uniforms,pipeline);
 }
 
 void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUniforms& uniforms,
-                                  const gfx::PipelineDesc& pipeline) noexcept {
+                                  const gfx::PipelineDesc& pipeline, bool updateFragment) noexcept {
   const auto& g=aurora::gx::g_gxState;
   state.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(g.currentPnMtx,state.postexMatrices.size()-1));
   const auto requirements=gfx::vertex_pipeline_requirements(pipeline);
@@ -553,43 +573,7 @@ void translate_fixed_vertex_state(gfx::VertexTransformState& state, gfx::DrawUni
     d.position=copy_vec4(s.pos);d.direction=copy_vec4(s.dir);d.color=copy_vec4(s.color);
     d.cosAtt=copy_vec4(s.cosAtt);d.distAtt=copy_vec4(s.distAtt);uniforms.lights[i]=d;
   }
-  for(unsigned i=0;i<4;++i) {
-    uniforms.tevreg[i]=copy_vec4(g.colorRegs[i]);
-    uniforms.kcolor[i]=copy_vec4(g.kcolors[i]);
-  }
-  // These fragment uniforms are dead when the generated shader omits the
-  // corresponding GX feature. Avoid rebuilding them on every matrix/state
-  // update: fixed-vertex draws can number in the hundreds per Strikers frame.
-  if(pipeline.fogMode!=gfx::FogMode::None) {
-    uniforms.fogColor=copy_vec4(g.fog.color);
-    const float logicalWidth=std::max(g.logicalViewport.width,1.f);
-    const float renderWidth=std::max(g.renderViewport.width,1.f);
-    const int32_t rawCenter=static_cast<int32_t>(g.fogRange[0]&0x3ffu)-342;
-    const float rangeCenter=((static_cast<float>(rawCenter)-g.logicalViewport.left)/logicalWidth)*2.f-1.f+
-                            (g.renderViewport.left/renderWidth)*2.f;
-    uniforms.fogParams={g.fog.a,g.fog.b,g.fog.c,rangeCenter};
-    uniforms.renderViewportWidth=renderWidth;
-    if(pipeline.fogRangeEnabled) for(unsigned i=0;i<uniforms.fogRangeK.size();++i) {
-      const u32 packed=g.fogRange[1+i/2];
-      const u32 raw=(packed>>((i&1u)*12u))&0xfffu;
-      uniforms.fogRangeK[i]=static_cast<float>(raw)/64.f;
-    }
-  }
-  if(pipeline.tev.indirectStageCount) {
-    // Texture dimensions/scales and indirect matrices are referenced only by
-    // the indirect-TEV code emitted by gxm_shader_gen.
-    for(unsigned i=0;i<gfx::MaxTextures;++i) {
-      const auto& s=g.texCoordScales[i];
-      uniforms.texcoordScale[i]={static_cast<float>(s.scaleS)+1.f,static_cast<float>(s.scaleT)+1.f,0.f,0.f};
-      const auto& t=g.loadedTextures[i];
-      uniforms.textureSizeBias[i]={static_cast<float>(t.width()),static_cast<float>(t.height()),t.lod_bias(),0.f};
-    }
-    for(unsigned i=0;i<gfx::MaxIndMatrices;++i) {
-      const auto& m=g.indTexMtxs[i];
-      uniforms.indirectMatrices[i*2]={m.mtx.m0.x,m.mtx.m0.y,m.mtx.m1.x,m.mtx.m1.y};
-      uniforms.indirectMatrices[i*2+1]={m.mtx.m2.x,m.mtx.m2.y,std::exp2f(m.scaleExp),0.f};
-    }
-  }
+  if(updateFragment) translate_fragment_uniforms(uniforms,pipeline);
 }
 
 

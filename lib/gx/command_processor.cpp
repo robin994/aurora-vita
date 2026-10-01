@@ -288,7 +288,7 @@ static inline void mark_pipeline_state_dirty_at(unsigned line) noexcept {
 #else
   (void)line;
 #endif
-  g_gxState.stateDirty = true;
+  g_gxState.mark_dirty();
   g_gxState.pipelineStateGeneration = next_gx_state_epoch();
 }
 #define mark_pipeline_state_dirty() mark_pipeline_state_dirty_at(__LINE__)
@@ -307,14 +307,14 @@ struct DecodedSnapshot {
 #define mark_pipeline_state_dirty_if(cond)                                                                           \
   do {                                                                                                               \
     if (cond) mark_pipeline_state_dirty_at(__LINE__);                                                                \
-    else g_gxState.stateDirty = true;                                                                                \
+    else g_gxState.mark_dirty();                                                                                \
   } while (0)
 
 // Indexed-array bindings change for almost every mesh. On Vita they only
 // affect the vertex decode layout; elsewhere they stay part of the pipeline.
 static inline void mark_array_state_dirty() noexcept {
 #if defined(MKW_TARGET_VITA)
-  g_gxState.stateDirty = true;
+  g_gxState.mark_dirty(StateDomain::Layout);
   g_gxState.layoutStateGeneration = next_gx_state_epoch();
 #else
   mark_pipeline_state_dirty();
@@ -344,7 +344,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     for (u32 i = 0; i < len; i++) {
       flat[i] = read_f32(data + i * 4, bigEndian);
     }
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Vertex);
     return true;
   } else if (addr < 0x0F0) {
     // Texture matrices (0x078-0x0EF)
@@ -361,7 +361,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     for (u32 i = 0; i < len; i++) {
       flat[i] = read_f32(data + i * 4, bigEndian);
     }
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Vertex);
     return true;
   } else if (addr >= 0x400 && addr < 0x45A) {
     // Normal matrices (0x400-0x459)
@@ -381,7 +381,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
         flat[row * 4 + col] = read_f32(data + i * 4, bigEndian);
       }
     }
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Vertex);
     return true;
   } else if (addr >= 0x500 && addr < 0x5F0) {
     // Post-transform texture matrices (0x500-0x5EF)
@@ -395,7 +395,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     for (u32 i = 0; i < len; i++) {
       flat[startOffset + i] = read_f32(data + i * 4, bigEndian);
     }
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Vertex);
     return true;
   } else if (addr >= 0x600 && addr < 0x680) {
     // Lights (0x600-0x67F) - 8 lights, 16 values each
@@ -455,7 +455,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
       }
     }
     g_gxState.preparedLightsDirty = true;
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Vertex);
     return true;
   }
   return false;
@@ -502,7 +502,7 @@ static void apply_xf_projection() {
     proj.m3[2] = -1.0f;
   }
 
-  g_gxState.stateDirty = true;
+  g_gxState.mark_dirty(StateDomain::Vertex);
 }
 
 // Forward declarations for register handlers
@@ -869,7 +869,7 @@ static void handle_bp(u32 value, bool bigEndian) {
   // Indirect texture mask (0x0F).
   case 0x0F:
     g_gxState.indTexMask = static_cast<u8>(value & 0xFF);
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty();
     break;
 
   // TEV indirect stages (0x10-0x1F)
@@ -928,7 +928,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     g_gxState.lineTexOffset = static_cast<GXTexOffset>(bp_get(value, 3, 16));
     g_gxState.pointTexOffset = static_cast<GXTexOffset>(bp_get(value, 3, 19));
     g_gxState.lineHalfAspect = bp_get(value, 1, 22) != 0;
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty();
     break;
   }
 
@@ -1166,7 +1166,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     std::memcpy(&g_gxState.fog.aRaw, &a_bits, sizeof(g_gxState.fog.aRaw));
     u32 b_s = g_gxState.fog.fog2Raw & 0x1F;
     g_gxState.fog.a = std::ldexp(g_gxState.fog.aRaw, static_cast<int>(b_s));
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Fragment);
     break;
   }
   // FOG1 (0xEF): B mantissa (24-bit)
@@ -1176,7 +1176,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 b_s = g_gxState.fog.fog2Raw & 0x1F;
     float B_mant = static_cast<float>(g_gxState.fog.bMagnitude) / 8388638.0f;
     g_gxState.fog.b = std::ldexp(B_mant, static_cast<int>(b_s) - 1);
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Fragment);
     break;
   }
   // FOG2 (0xF0): B shift/exponent (5-bit)
@@ -1193,7 +1193,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     g_gxState.fog.bMagnitude = bp_get(g_gxState.fog.fog1Raw, 24, 0);
     float B_mant = static_cast<float>(g_gxState.fog.bMagnitude) / 8388638.0f;
     g_gxState.fog.b = std::ldexp(B_mant, static_cast<int>(b_s) - 1);
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Fragment);
     break;
   }
 
@@ -1226,7 +1226,7 @@ static void handle_bp(u32 value, bool bigEndian) {
         static_cast<float>(b) / 255.f,
         1.f,
     };
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Fragment);
     break;
   }
 
@@ -1255,7 +1255,7 @@ static void handle_bp(u32 value, bool bigEndian) {
           kc[2] = static_cast<float>(bp_get(value, 8, 0)) / 255.f;  // B
           kc[1] = static_cast<float>(bp_get(value, 8, 12)) / 255.f; // G
         }
-        g_gxState.stateDirty = true;
+        g_gxState.mark_dirty(StateDomain::Fragment);
       }
     } else {
       // TEV color register (11-bit signed components)
@@ -1281,7 +1281,7 @@ static void handle_bp(u32 value, bool bigEndian) {
           cr[2] = static_cast<float>(b) / 255.f;
           cr[1] = static_cast<float>(g) / 255.f;
         }
-        g_gxState.stateDirty = true;
+        g_gxState.mark_dirty(StateDomain::Fragment);
       }
     }
     break;
@@ -1325,7 +1325,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     }
     info.scaleExp = static_cast<s8>(info.adjScaleRaw) - 17;
 
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Fragment);
     break;
   }
 
@@ -1361,7 +1361,7 @@ static void handle_bp(u32 value, bool bigEndian) {
       tcs.lineOffset = bp_get(value, 1, 18) != 0;
       tcs.pointOffset = bp_get(value, 1, 19) != 0;
     }
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty();
     break;
   }
 
@@ -1392,7 +1392,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     u8 a = bp_get(value, 8, 8);
     g_gxState.clearColor[0] = static_cast<float>(r) / 255.f;
     g_gxState.clearColor[3] = static_cast<float>(a) / 255.f;
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Clear);
     break;
   }
   case 0x50: {
@@ -1400,12 +1400,12 @@ static void handle_bp(u32 value, bool bigEndian) {
     u8 g = bp_get(value, 8, 8);
     g_gxState.clearColor[2] = static_cast<float>(b) / 255.f;
     g_gxState.clearColor[1] = static_cast<float>(g) / 255.f;
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Clear);
     break;
   }
   case 0x51: {
     g_gxState.clearDepth = bp_get(value, 24, 0);
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty(StateDomain::Clear);
     break;
   }
   case 0xF4: {
@@ -1493,7 +1493,7 @@ static void handle_bp(u32 value, bool bigEndian) {
         break;
       }
       if (changed) {
-        g_gxState.stateDirty = true;
+        g_gxState.mark_dirty();
       }
     } else {
 #ifndef NDEBUG
@@ -1745,31 +1745,31 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
       case 0x09:
         // numChans
         g_gxState.numChans = val;
-        g_gxState.stateDirty = true;
+        g_gxState.mark_dirty();
         break;
       case 0x0A:
         // Ambient color 0
         g_gxState.colorChannelState[GX_COLOR0].ambColor = unpack_color(val);
         g_gxState.colorChannelState[GX_ALPHA0].ambColor = unpack_color(val);
-        g_gxState.stateDirty = true;
+        g_gxState.mark_dirty(StateDomain::Vertex);
         break;
       case 0x0B:
         // Ambient color 1
         g_gxState.colorChannelState[GX_COLOR1].ambColor = unpack_color(val);
         g_gxState.colorChannelState[GX_ALPHA1].ambColor = unpack_color(val);
-        g_gxState.stateDirty = true;
+        g_gxState.mark_dirty(StateDomain::Vertex);
         break;
       case 0x0C:
         // Material color 0
         g_gxState.colorChannelState[GX_COLOR0].matColor = unpack_color(val);
         g_gxState.colorChannelState[GX_ALPHA0].matColor = unpack_color(val);
-        g_gxState.stateDirty = true;
+        g_gxState.mark_dirty(StateDomain::Vertex);
         break;
       case 0x0D:
         // Material color 1
         g_gxState.colorChannelState[GX_COLOR1].matColor = unpack_color(val);
         g_gxState.colorChannelState[GX_ALPHA1].matColor = unpack_color(val);
-        g_gxState.stateDirty = true;
+        g_gxState.mark_dirty(StateDomain::Vertex);
         break;
       case 0x0E:
       case 0x0F:
@@ -2605,7 +2605,7 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
                          slot.texObjId != next.texObjId || slot.texDataVersion != next.texDataVersion;
     slot = next;
     if (changed) {
-      g_gxState.stateDirty = true;
+      g_gxState.mark_dirty();
     }
   } else if (subCmd == GX_LOAD_AURORA_TLUT) {
     CHECK(pos + 23 <= size, "GX_LOAD_AURORA_TLUT read overrun");
@@ -2624,7 +2624,7 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     slot.tlutDataVersion = read_u32(data + pos, bigEndian);
     pos += 4;
     slot.set_no_cache(false); // Reset no-cache flag
-    g_gxState.stateDirty = true;
+    g_gxState.mark_dirty();
   } else if (subCmd == GX_LOAD_AURORA_DESTROY_TEXOBJ) {
     CHECK(pos + 4 <= size, "GX_LOAD_AURORA_DESTROY_TEXOBJ read overrun");
     evict_texture_object(read_u32(data + pos, bigEndian));

@@ -17,7 +17,11 @@ int main() {
   CommandStream stream;
   constexpr unsigned draws=2048,frames=20;
   stream.reserve(draws);
-  for(unsigned i=0;i<draws;++i)stream.emplace_draw().pipelineKey=i+1;
+  DrawUniforms uniforms{};std::array<TextureBinding,MaxTextures> textures{};
+  for(unsigned i=0;i<draws;++i) {
+    auto& packet=stream.emplace_draw();packet.pipelineKey=i+1;
+    uniforms.mvp[0]=float(i);stream.share_draw_state(packet,uniforms,textures,i+1);
+  }
   const auto before=allocations;
   for(unsigned frame=0;frame<frames;++frame) {
     stream.reset();
@@ -25,8 +29,10 @@ int main() {
       auto& packet=stream.emplace_draw();
       if(packet.pipelineKey||packet.fixedVertexUniforms)return 2;
       packet.pipelineKey=i+1;
+      uniforms.mvp[0]=float(i);stream.share_draw_state(packet,uniforms,textures,i+1);
     }
     if(stream.draw_packet(0).pipelineKey!=1||stream.tail_draw()->pipelineKey!=draws)return 3;
+    if(stream.state_snapshot_count()!=draws||stream.draw_packet(0).gpu_uniforms().mvp[0]!=0)return 4;
   }
   const size_t warmAllocations=allocations-before;
   std::printf("command stream: packet_bytes=%zu draws=%u frames=%u warm_allocations=%zu\n",

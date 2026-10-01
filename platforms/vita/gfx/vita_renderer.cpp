@@ -165,12 +165,12 @@ case CommandType::Draw:draw(s.draw_packet(c.drawIndex));break;case CommandType::
   glFlush();
 #endif
   break;}}if(finalize){pipelines_.clear_pins();pipelines_.trim_to_budget();}}
-void Renderer::draw(const DrawPacket&d) noexcept {const auto*p=pipelines_.find(d.pipelineKey);if(!p)return;if(p->desc.fixedVertexOnGpu&&!d.fixedVertexUniforms)return;pipelines_.bind(*p,d.uniforms,&stats_,d.fixedVertexUniforms);
+void Renderer::draw(const DrawPacket&d) noexcept {const auto*p=pipelines_.find(d.pipelineKey);if(!p)return;if(p->desc.fixedVertexOnGpu&&!d.fixedVertexUniforms)return;pipelines_.bind(*p,d.gpu_uniforms(),&stats_,d.fixedVertexUniforms);
 #if defined(__vita__)
   if(!viewportValid_||!same_viewport(cachedViewport_,d.viewport)){const GLint vy=static_cast<GLint>(targetHeight_)-static_cast<GLint>(d.viewport.y+d.viewport.height);glViewport((GLint)d.viewport.x,vy,(GLsizei)d.viewport.width,(GLsizei)d.viewport.height);const float minDepth=std::clamp(std::min(d.viewport.znear,d.viewport.zfar),0.0f,1.0f);const float maxDepth=std::clamp(std::max(d.viewport.znear,d.viewport.zfar),0.0f,1.0f);glDepthRangef(minDepth,maxDepth);cachedViewport_=d.viewport;viewportValid_=true;}
   if(!scissorEnabled_){glEnable(GL_SCISSOR_TEST);scissorEnabled_=true;}
   if(!scissorValid_||!same_scissor(cachedScissor_,d.scissor)){const GLint sy=static_cast<GLint>(targetHeight_)-(d.scissor.y+d.scissor.height);glScissor(d.scissor.x,sy,d.scissor.width,d.scissor.height);cachedScissor_=d.scissor;scissorValid_=true;}
-  for(unsigned i=0;i<MaxTextures;i++)if(d.textures[i].texture&&(!textureStateValid_[i]||!same_texture_binding(cachedTextures_[i],d.textures[i]))){if(d.textures[i].source==TextureSource::Efb)efb_.bind_texture(d.textures[i].texture,i,d.textures[i].sampler);else textures_.bind(d.textures[i].texture,i,d.textures[i].sampler);cachedTextures_[i]=d.textures[i];textureStateValid_[i]=true;}
+  for(unsigned i=0;i<MaxTextures;i++)if(d.texture_bindings()[i].texture&&(!textureStateValid_[i]||!same_texture_binding(cachedTextures_[i],d.texture_bindings()[i]))){if(d.texture_bindings()[i].source==TextureSource::Efb)efb_.bind_texture(d.texture_bindings()[i].texture,i,d.texture_bindings()[i].sampler);else textures_.bind(d.texture_bindings()[i].texture,i,d.texture_bindings()[i].sampler);cachedTextures_[i]=d.texture_bindings()[i];textureStateValid_[i]=true;}
   GLuint vb=buffers_.gl_id(d.vertices.buffer);if(!vb)return;
   const uint32_t vertexBaseOffset=d.absoluteVertexIndices?0:d.vertices.offset;
   if(!vertexStateValid_||cachedVertexBuffer_!=d.vertices.buffer||cachedVertexOffset_!=vertexBaseOffset||cachedVertexPipeline_!=p->key){

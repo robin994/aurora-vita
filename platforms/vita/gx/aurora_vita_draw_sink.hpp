@@ -57,6 +57,7 @@ struct DrawSinkConfig {
   // streams otherwise pay a full content hash before falling back to CPU work.
   bool staticGeometryStableOnly = false;
   bool allowLitFixedVertexGpu = false;
+  bool localDrawBatching = false;
   bool allowStreamedFixedVertexGpu = false;
   bool allowDynamicTexMatrixGpu = false;
   bool allowBumpFixedVertexGpu = false;
@@ -72,6 +73,7 @@ enum DrawSinkRuntimeFeature : uint32_t {
   RuntimeBumpFixedVertex     = 1u << 4,
   RuntimePrimitiveExpansion  = 1u << 5,
   RuntimeStaticStableOnly    = 1u << 6,
+  RuntimeLocalDrawBatching   = 1u << 7,
 };
 
 class DrawSink {
@@ -139,11 +141,17 @@ private:
   bool translatedVertexStateLightweight_ = false;
   gfx::Handle whiteTexture_ = gfx::InvalidHandle;
 #if defined(AURORA_VITA_UPSTREAM)
+  uint64_t translatedVertexRevision_ = 0, translatedFragmentRevision_ = 0;
+  uint64_t resolvedTextureRevision_ = 0, consumedStateSerial_ = 0;
+  uint32_t resolvedTextureStateIdentity_ = 0;
   uint32_t translatedStateGeneration_ = 0;
   uint32_t translatedLayoutGeneration_ = 0;
   uint8_t translatedPrimitive_ = 0;
   uint8_t translatedFmt_ = 0;
   gfx::PipelineDesc translatedPipeline_{};
+  gfx::DrawRecipe cpuRecipe_{},gpuRecipe_{};
+  uint32_t gpuRecipeFlags_=0;
+  bool gpuRecipeValid_=false;
   gfx::VertexDecodeLayout translatedLayout_{};
   uint64_t translatedPipelineKey_ = 0;
   uint64_t translatedBaseKey_ = 0;
@@ -173,6 +181,7 @@ private:
   bool strictUnsupported_ = false;
   bool strictFailed_ = false;
   bool allowLitFixedVertexGpu_ = false;
+  bool localDrawBatching_ = false;
   bool allowStreamedFixedVertexGpu_ = false;
   bool allowDynamicTexMatrixGpu_ = false;
   bool allowBumpFixedVertexGpu_ = false;

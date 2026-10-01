@@ -514,6 +514,12 @@ struct DrawPacket {
   const FixedVertexUniforms* fixedVertexUniforms = nullptr;
   Viewport viewport{};
   Scissor scissor{};
+  // Canonical packet in this CommandStream, whose inline state stays immutable
+  // until reset. Sharing its storage adds no second state allocation per draw.
+  // A source packet always has sharedState==nullptr (no chains).
+  const DrawPacket* sharedState=nullptr;
+  const GpuDrawUniforms& gpu_uniforms() const noexcept {return sharedState?sharedState->uniforms:uniforms;}
+  const std::array<TextureBinding,MaxTextures>& texture_bindings() const noexcept {return sharedState?sharedState->textures:textures;}
 };
 
 // Bisection switches for the gxm-optimization changes (BackendConfig::
@@ -537,10 +543,16 @@ enum GxmDisableBits : uint32_t {
   // Diagnostic: DrawSink phase timers only (no FIFO profile, coverage, trace or
   // logs); averages every 120 frames go to diagnostics/phase_profile.log.
   GxmDiagPhases = 1u << 10,
+  GxmDisableStateDomains = 1u << 11, // reference: rebuild uniforms/textures on every dirty write
+  GxmDisableStateDiff = 1u << 12, // reference: emit the complete native pipeline state
+  GxmDisableLocalBatch = 1u << 13, // reference: one native draw per logical draw
+  GxmDisableSharedState = 1u << 14, // reference: copy inline uniform/texture state into every packet
 };
 inline uint32_t& gxm_disable_mask() noexcept { static uint32_t mask = 0; return mask; }
 inline bool gxm_disabled(uint32_t bit) noexcept { return (gxm_disable_mask() & bit) != 0; }
 
+enum class FinishReason : uint8_t { Explicit,BufferMutation,TextureMutation,ResourceDestroy,Readback,TargetMutation,StreamReuse,FrameDiscard,Count };
+inline constexpr size_t FinishReasonCount=static_cast<size_t>(FinishReason::Count);
 struct FrameStats {
   uint32_t drawCalls = 0;
   uint32_t triangles = 0;
@@ -559,6 +571,9 @@ struct FrameStats {
   // CPU time spent inside sceGxmDisplayQueueAddEntry. A sustained non-trivial
   // value indicates display-queue/GPU backpressure rather than frontend CPU work.
   uint64_t nativeDisplayQueueAddUs = 0;
+  uint32_t nativePipelineSetters=0,nativePipelineSettersSkipped=0;
+  uint32_t nativeUniformUploadCalls=0;
+  uint64_t nativeUniformUploadBytes=0;
   uint32_t nativeVertexUniformReuses = 0;
   uint32_t nativeFragmentUniformReuses = 0;
   uint32_t nativeSceneCount = 0;
@@ -574,6 +589,8 @@ struct FrameStats {
   uint32_t nativeDepthlessScenes = 0;
   // Full CPU/GPU synchronizations (sceGxmFinish) since the previous frame.
   uint32_t nativeFinishCalls = 0;
+  // Lifetime counters; difference successive snapshots to include inter-frame work.
+  std::array<uint64_t,FinishReasonCount> nativeFinishReasonCalls{},nativeFinishReasonWaitUs{};
   // Draws that used the discard-free variant of a fragment-scissor pipeline.
   uint32_t nativeScissorFreeDraws = 0;
   // GxmDiagSceneFinish only: CPU wait in sceGxmFinish after scene i (last slot aggregates the rest).

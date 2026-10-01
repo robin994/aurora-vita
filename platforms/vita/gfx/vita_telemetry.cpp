@@ -110,9 +110,15 @@ std::string Telemetry::format_frame() const {
       << " unsupported=" << frame_.counters.unsupportedFeatures
       << " pipeline_translations=" << frame_.counters.pipelineTranslations
       << " vertex_translations=" << frame_.counters.vertexTranslations
+      << " fragment_translations=" << frame_.counters.fragmentTranslations
       << " texture_resolves=" << frame_.counters.textureResolves
       << " translation_memo_hits=" << frame_.counters.translationMemoHits
-      << " layout_translations=" << frame_.counters.layoutTranslations;
+      << " layout_translations=" << frame_.counters.layoutTranslations
+      << " batch_candidates=" << frame_.counters.batchCandidates
+      << " batch_merged=" << frame_.counters.batchMerged
+      << " batch_rejected_state=" << frame_.counters.batchRejectedState
+      << " batch_rejected_indices=" << frame_.counters.batchRejectedIndices
+      << " batch_rebased_indices=" << frame_.counters.batchRebasedIndices;
   for (size_t i = 0; i < frame_.phaseUs.size(); ++i) {
     out << ' ' << telemetry_phase_name(static_cast<TelemetryPhase>(i)) << "_us=" << frame_.phaseUs[i];
   }

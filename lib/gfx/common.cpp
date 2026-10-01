@@ -1055,7 +1055,8 @@ static bool begin_frame_impl(bool clearEfb) {
                                   gx::g_gxState.renderScissor != mappedRenderState.scissor;
   gx::g_gxState.renderViewport = mappedRenderState.viewport;
   gx::g_gxState.renderScissor = mappedRenderState.scissor;
-  gx::g_gxState.stateDirty = gx::g_gxState.stateDirty || renderStateChanged;
+  if (renderStateChanged)
+    gx::g_gxState.mark_dirty(gx::StateDomain::Vertex | gx::StateDomain::Fragment | gx::StateDomain::Raster);
   g_cachedViewport = mappedRenderState.viewport;
   g_cachedScissor = mappedRenderState.scissor;
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});

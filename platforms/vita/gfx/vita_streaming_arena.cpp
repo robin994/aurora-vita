@@ -20,6 +20,25 @@
 #endif
 
 namespace aurora::vita::gfx {
+bool StreamingArena::indices_pending(const BufferSlice& slice) const noexcept {
+  if(!initialized_||current_>=slots_.size())return false;
+  const auto& slot=slots_[current_];
+  return slice.buffer==slot.index&&slice.offset>=slot.iflushed&&slice.offset<=slot.ioff&&
+      slice.size<=slot.ioff-slice.offset;
+}
+bool StreamingArena::rebase_pending_indices(const BufferSlice& slice,uint32_t count,
+                                            uint32_t base,uint32_t vertices) noexcept {
+  if(!initialized_||current_>=slots_.size()||!count||!vertices||uint64_t(base)+vertices>=64000u)return false;
+  auto& slot=slots_[current_];
+  const size_t bytes=size_t(count)*sizeof(uint16_t);
+  if(!indices_pending(slice)||slice.size!=bytes||slice.offset%alignof(uint16_t))return false;
+  auto* storage=slot.idirect?static_cast<uint8_t*>(slot.idirect):indexStage_.data();
+  if(!storage)return false;
+  auto* indices=reinterpret_cast<uint16_t*>(storage+slice.offset);
+  for(uint32_t i=0;i<count;++i)if(indices[i]>=vertices)return false;
+  for(uint32_t i=0;i<count;++i)indices[i]=static_cast<uint16_t>(indices[i]+base);
+  return true;
+}
 
 StreamingArena::StreamingArena(BufferPool& pool, StreamingArenaConfig cfg) noexcept : pool_(pool), cfg_(cfg) {}
 StreamingArena::~StreamingArena() { shutdown(); }

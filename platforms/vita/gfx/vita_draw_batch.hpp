@@ -25,15 +25,19 @@ inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noex
       a.viewport.znear != b.viewport.znear || a.viewport.zfar != b.viewport.zfar ||
       a.scissor.x != b.scissor.x || a.scissor.y != b.scissor.y ||
       a.scissor.width != b.scissor.width || a.scissor.height != b.scissor.height ||
-      !aurora_vita_bytes_equal(&a.uniforms, &b.uniforms, sizeof(a.uniforms))) return false;
+      (&a.gpu_uniforms()!=&b.gpu_uniforms()&&
+       !aurora_vita_bytes_equal(&a.gpu_uniforms(), &b.gpu_uniforms(), sizeof(a.uniforms)))) return false;
+  if(&a.texture_bindings()==&b.texture_bindings())return true;
   for (unsigned i = 0; i < MaxTextures; ++i) {
-    const auto& x = a.textures[i]; const auto& y = b.textures[i];
+    const auto& x = a.texture_bindings()[i]; const auto& y = b.texture_bindings()[i];
     if (x.texture != y.texture || x.source != y.source || x.flipX != y.flipX ||
         x.flipY != y.flipY || x.forceOpaque != y.forceOpaque || x.sampleFormat != y.sampleFormat ||
         x.sampler.wrapS != y.sampler.wrapS || x.sampler.wrapT != y.sampler.wrapT ||
         x.sampler.minFilter != y.sampler.minFilter || x.sampler.magFilter != y.sampler.magFilter ||
         x.sampler.lodBias != y.sampler.lodBias || x.sampler.minLod != y.sampler.minLod ||
-        x.sampler.maxLod != y.sampler.maxLod) return false;
+        x.sampler.maxLod != y.sampler.maxLod ||
+        x.uvScaleX != y.uvScaleX || x.uvScaleY != y.uvScaleY ||
+        x.uvBiasX != y.uvBiasX || x.uvBiasY != y.uvBiasY) return false;
   }
   return true;
 }

@@ -6,6 +6,7 @@
 #include "../vita_data_paths.hpp"
 #include "../vita_log.hpp"
 #include "gfx/vita_pipeline_key.hpp"
+#include "gfx/vita_pipeline_state_diff.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_sampler_units.hpp"
 #include "gfx/vita_cpu_workers.hpp"
@@ -297,20 +298,30 @@ struct Renderer::Impl {
   struct CompiledStage {
     std::vector<uint32_t> code;
   };
+  struct UniformParameter {
+    const SceGxmProgramParameter* parameter=nullptr;
+    unsigned capacity=0;
+    UniformParameter& operator=(const SceGxmProgramParameter* value) noexcept {
+      parameter=value;
+      capacity=value?sceGxmProgramParameterGetComponentCount(value)*sceGxmProgramParameterGetArraySize(value):0;
+      return *this;
+    }
+    explicit operator bool() const noexcept {return parameter!=nullptr;}
+  };
   struct Pipeline {
     PipelineDesc desc{};
     std::shared_ptr<CompiledStage> vertexCode, fragmentCode;
-    SceGxmShaderPatcherId vertexId = nullptr, fragmentId = nullptr;
-    SceGxmVertexProgram* vertex = nullptr;
-    SceGxmFragmentProgram* fragment = nullptr;
-    const SceGxmProgramParameter *mvp = nullptr, *kcolor = nullptr, *tevreg = nullptr, *clip = nullptr;
-    const SceGxmProgramParameter *fogColor=nullptr,*fogParams=nullptr,*fogRange=nullptr,*viewportWidth=nullptr;
-    const SceGxmProgramParameter *indirectMatrices=nullptr,*texcoordScale=nullptr,*textureSizeBias=nullptr,*textureTransform=nullptr,*textureWrap=nullptr,*textureForceOpaque=nullptr,*textureCopyMode=nullptr;
-    const SceGxmProgramParameter *gxPosition=nullptr,*gxNormal=nullptr,*gxMaterial=nullptr,*gxAmbient=nullptr,*gxLight=nullptr;
-    const SceGxmProgramParameter *gxPositionPalette=nullptr,*gxNormalPalette=nullptr,*gxTexturePalette=nullptr;
-    const SceGxmProgramParameter *gxPrimitiveExpand=nullptr;
-    std::array<const SceGxmProgramParameter*,MaxTextures> gxTexture{};
-    std::array<const SceGxmProgramParameter*,MaxTextures> gxPost{};
+    SceGxmShaderPatcherId vertexId{}, fragmentId{};
+    SceGxmVertexProgram* vertex{};
+    SceGxmFragmentProgram* fragment{};
+    UniformParameter mvp{}, kcolor{}, tevreg{}, clip{};
+    UniformParameter fogColor{},fogParams{},fogRange{},viewportWidth{};
+    UniformParameter indirectMatrices{},texcoordScale{},textureSizeBias{},textureTransform{},textureWrap{},textureForceOpaque{},textureCopyMode{};
+    UniformParameter gxPosition{},gxNormal{},gxMaterial{},gxAmbient{},gxLight{};
+    UniformParameter gxPositionPalette{},gxNormalPalette{},gxTexturePalette{};
+    UniformParameter gxPrimitiveExpand{};
+    std::array<UniformParameter,MaxTextures> gxTexture{};
+    std::array<UniformParameter,MaxTextures> gxPost{};
     uint8_t textureMask = 0;
     uint8_t usedTextureCount = 0;
     uint8_t fixedTextureUniformMask = 0;
@@ -321,7 +332,7 @@ struct Renderer::Impl {
     // when the draw scissor covers the complete target (the common case), so
     // the ISP keeps the opaque pass type and hidden surface removal.
     bool ownsVertex = true;
-    Pipeline* scissorFree = nullptr;
+    Pipeline* scissorFree{};
   };
   struct FragmentUniformState {
     GpuDrawUniforms uniforms{};
@@ -373,6 +384,8 @@ struct Renderer::Impl {
   // Requested by presentation passes that never test or write depth.
   bool depthlessSceneRequested = false, sceneDepthless = false;
   uint64_t finishCalls = 0, finishCallsAtFrameStart = 0;
+  std::array<uint64_t,FinishReasonCount> finishReasonCalls{},finishReasonWaitUs{};
+  PipelineBindingState boundPipelineState{};
   bool pipelineStateValid = false, viewportValid = false, scissorValid = false;
   bool vertexStreamValid = false;
   Viewport cachedViewport{};
@@ -467,7 +480,7 @@ struct Renderer::Impl {
     }
     for (unsigned i = 0; i < MaxTextures && n > 0 && n < int(sizeof line) - 96; ++i) {
       if (!(p.textureMask & (1u << i))) continue;
-      const auto it = textures.find(packet.textures[i].texture);
+      const auto it = textures.find(packet.texture_bindings()[i].texture);
       if (it == textures.end()) continue;
       const auto& t = *it->second;
       n += std::snprintf(line + n, sizeof line - size_t(n), " [%u %ux%u fmt=0x%08x swz=%u mips=%u pool=%u bytes=%u]", i,
@@ -1175,17 +1188,31 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   const auto& pipeline=p.desc;
   const unsigned usedTextureCount=p.usedTextureCount;
   if(!d.pipelineStateValid||d.boundPipelineKey!=key) {
-    sceGxmSetVertexProgram(d.context,p.vertex);
-    sceGxmSetFragmentProgram(d.context,p.fragment);
-    // Setting a program ends that pipeline's default uniform reservation
-    // (libgxm Overview 6.3): never reuse a reservation across a program change.
-    d.vertexUniformState.valid=false;d.fragmentUniformState.valid=false;
+    const bool reset=!d.pipelineStateValid||gxm_disabled(GxmDisableStateDiff);
     const auto compare=pipeline.depthTest?depth_func(pipeline.depthFunc):SCE_GXM_DEPTH_FUNC_ALWAYS;
     const auto write=pipeline.depthTest&&pipeline.depthWrite?SCE_GXM_DEPTH_WRITE_ENABLED:SCE_GXM_DEPTH_WRITE_DISABLED;
-    sceGxmSetFrontDepthFunc(d.context,compare);sceGxmSetBackDepthFunc(d.context,compare);
-    sceGxmSetFrontDepthWriteEnable(d.context,write);sceGxmSetBackDepthWriteEnable(d.context,write);
-    sceGxmSetCullMode(d.context,pipeline.cull==CullMode::None?SCE_GXM_CULL_NONE:
-        pipeline.cull==CullMode::Back?SCE_GXM_CULL_CCW:SCE_GXM_CULL_CW);
+    const auto cull=pipeline.cull==CullMode::None?SCE_GXM_CULL_NONE:
+        pipeline.cull==CullMode::Back?SCE_GXM_CULL_CCW:SCE_GXM_CULL_CW;
+    const PipelineBindingState next{p.vertex,p.fragment,uint32_t(compare),uint32_t(write),uint32_t(cull)};
+    const auto changes=pipeline_state_changes(d.boundPipelineState,next,reset);
+    if(changes&BindVertex){
+      sceGxmSetVertexProgram(d.context,p.vertex);
+      d.vertexUniformState.valid=false;
+    }
+    if(changes&BindFragment){
+      sceGxmSetFragmentProgram(d.context,p.fragment);
+      d.fragmentUniformState.valid=false;
+    }
+    if(changes&BindDepthFunction){
+      sceGxmSetFrontDepthFunc(d.context,compare);sceGxmSetBackDepthFunc(d.context,compare);
+    }
+    if(changes&BindDepthWrite){
+      sceGxmSetFrontDepthWriteEnable(d.context,write);sceGxmSetBackDepthWriteEnable(d.context,write);
+    }
+    if(changes&BindCull)sceGxmSetCullMode(d.context,cull);
+    const auto emitted=pipeline_setter_count(changes);
+    d.stats.nativePipelineSetters+=emitted;d.stats.nativePipelineSettersSkipped+=7-emitted;
+    d.boundPipelineState=next;
     d.pipelineStateValid=true;d.boundPipelineKey=key;
   }
   const float clip[]{float(scissor.x),float(scissor.y),float(int64_t(scissor.x)+scissor.width),float(int64_t(scissor.y)+scissor.height)};
@@ -1201,10 +1228,11 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   const bool reuseVertex=needsVertexUniforms&&cachedVertex.valid&&cachedVertex.pipelineKey==key&&sameMvp&&sameFixed;
   if(needsVertexUniforms&&!reuseVertex &&
      !d.check(sceGxmReserveVertexDefaultUniformBuffer(d.context,&vertex),"reserve vertex uniforms")) return false;
-  const auto uploadVertex=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
+  const auto uploadVertex=[&](const Impl::UniformParameter& param,unsigned count,const float* data) {
     if(!param) return true;
-    count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
-    return d.check(sceGxmSetUniformDataF(vertex,param,0,count,data),"upload vertex uniform");
+    count=std::min(count,param.capacity);
+    ++d.stats.nativeUniformUploadCalls;d.stats.nativeUniformUploadBytes+=count*sizeof(float);
+    return d.check(sceGxmSetUniformDataF(vertex,param.parameter,0,count,data),"upload vertex uniform");
   };
   if(!reuseVertex&&p.mvp && !uploadVertex(p.mvp,16,u.mvp.data())) return false;
   if(!reuseVertex&&pipeline.fixedVertexOnGpu) {
@@ -1285,10 +1313,11 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(!reuseFragment) {
     void* fragment=nullptr;
     if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
-    const auto upload=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
+    const auto upload=[&](const Impl::UniformParameter& param,unsigned count,const float* data) {
       if(!param || !count) return true;
-      count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
-      return d.check(sceGxmSetUniformDataF(fragment,param,0,count,data),"upload fragment uniform");
+      count=std::min(count,param.capacity);
+      ++d.stats.nativeUniformUploadCalls;d.stats.nativeUniformUploadBytes+=count*sizeof(float);
+      return d.check(sceGxmSetUniformDataF(fragment,param.parameter,0,count,data),"upload fragment uniform");
     };
     if(!upload(p.kcolor,16,u.kcolor[0].data()) || !upload(p.tevreg,16,u.tevreg[0].data()) || !upload(p.clip,4,clip)) return false;
     if(!upload(p.fogColor,4,u.fogColor.data()) || !upload(p.fogParams,4,u.fogParams.data()) ||
@@ -1386,13 +1415,13 @@ bool Renderer::draw(const DrawPacket& packet) {
     return d.fail("full-target pipeline requires a full-target scissor");
   uint64_t profileTick = d.profileDraws ? sceKernelGetProcessTimeWide() : 0;
   d.resolvedPipelineHint=active;d.resolvedPipelineHintKey=activeKey;
-  const bool pipelineBound=bind_pipeline(activeKey,packet.uniforms,packet.scissor,packet.fixedVertexUniforms,&packet.textures,
+  const bool pipelineBound=bind_pipeline(activeKey,packet.gpu_uniforms(),packet.scissor,packet.fixedVertexUniforms,&packet.texture_bindings(),
                                          packet.uniformRevision);
   d.resolvedPipelineHint=nullptr;d.resolvedPipelineHintKey=0;
   if(!pipelineBound) return false;
   if(d.profileDraws) { const auto now=sceKernelGetProcessTimeWide(); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
-    if(!bind_texture(packet.textures[i].texture,i,packet.textures[i].sampler,
+    if(!bind_texture(packet.texture_bindings()[i].texture,i,packet.texture_bindings()[i].sampler,
                      (pipeline.nativeTextureWrapMask&(1u<<i))!=0)) return false;
   if(d.profileDraws) { const auto now=sceKernelGetProcessTimeWide(); d.stats.nativeTextureUs+=now-profileTick; profileTick=now; }
   if(!d.viewportValid||!same_viewport(d.cachedViewport,vp)) {
@@ -1453,7 +1482,7 @@ bool Renderer::end_frame(bool present) {
   } else {
     // Discarded presents retain the current display; complete writes before the
     // same offscreen surface can become the next scene's target.
-    if(!finish()) return false;
+    if(!finish(FinishReason::FrameDiscard)) return false;
   }
   const uint64_t afterQueue=sceKernelGetProcessTimeWide();
   static uint64_t presentCount=0;
@@ -1466,6 +1495,7 @@ bool Renderer::end_frame(bool present) {
       static_cast<unsigned long long>(afterQueue-timingStart));
   d.stats.cpuFrameUs = sceKernelGetProcessTimeWide() - d.frameStarted;
   // Includes synchronizations issued between frames (resource destruction).
+  d.stats.nativeFinishReasonCalls=d.finishReasonCalls;d.stats.nativeFinishReasonWaitUs=d.finishReasonWaitUs;
   d.stats.nativeFinishCalls = static_cast<uint32_t>(d.finishCalls - d.finishCallsAtFrameStart);
   d.finishCallsAtFrameStart = d.finishCalls;
   if(present) {
@@ -1506,7 +1536,7 @@ bool Renderer::end_frame(bool present) {
 bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) {
   auto& d = *impl_;
   if (!d.initialized || d.inScene || !d.displayed) return d.fail("readback requires a completed presented frame");
-  if(!finish()) return false;
+  if(!finish(FinishReason::Readback)) return false;
   pixels.resize(size_t(d.config.width) * d.config.height * 4);
   const auto* source = static_cast<const uint8_t*>(d.surfaces[d.front].memory.data());
   for (uint32_t y = 0; y < d.config.height; ++y)
@@ -1515,9 +1545,10 @@ bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) {
   return true;
 }
 
-bool Renderer::finish() {
+bool Renderer::finish(FinishReason reason) {
   auto& d=*impl_;
   if(!d.context) return true;
+  const uint64_t waitStart=sceKernelGetProcessTimeWide();
   if(!d.end_scene()) return false;
   if(d.pendingFragmentTransferSync) {
     if(!d.check(sceGxmTransferFinish(),"finish pending native transfer"))return false;
@@ -1525,6 +1556,11 @@ bool Renderer::finish() {
   }
   sceGxmFinish(d.context);
   ++d.finishCalls;
+  const auto reasonIndex=std::min(static_cast<size_t>(reason),FinishReasonCount-1);
+  ++d.finishReasonCalls[reasonIndex];
+  d.finishReasonWaitUs[reasonIndex]+=sceKernelGetProcessTimeWide()-waitStart;
+  d.stats.nativeFinishReasonCalls=d.finishReasonCalls;
+  d.stats.nativeFinishReasonWaitUs=d.finishReasonWaitUs;
   d.pendingVertexDependency=nullptr;
   for(auto& [_,b]:d.buffers) b.inFlight=false;
   for(auto& [_,t]:d.textures) t->inFlight=false;
@@ -1541,7 +1577,7 @@ bool Renderer::update_buffer(Handle handle,const void* data,size_t bytes,size_t 
   if(it==d.buffers.end() || offset>it->second.bytes || bytes>it->second.bytes-offset || (!data&&bytes))
     return d.fail("invalid buffer update");
   if(!bytes) return true;
-  if(it->second.inFlight && !storageRetired && !finish()) return false;
+  if(it->second.inFlight && !storageRetired && !finish(FinishReason::BufferMutation)) return false;
   // StreamingArena only sets storageRetired after its frames-in-flight interval.
   // At that point the corresponding display work has already rotated through
   // GXM's bounded queue, so a second global finish here would serialize every
@@ -1578,7 +1614,7 @@ bool Renderer::update_texture(Handle handle,const TextureDesc& desc,bool storage
   if(swizzled!=texture.swizzled || stride!=texture.stride || mipCount!=texture.mipCount ||
      pixelBytes>texture.memory.size()) return false;
 
-  if(texture.inFlight && !storageRetired && !finish()) return false;
+  if(texture.inFlight && !storageRetired && !finish(FinishReason::TextureMutation)) return false;
   // The volatile texture ring only revisits a slot after more frames than the
   // display queue can retain, matching StreamingArena's retirement contract.
   if(storageRetired) texture.inFlight=false;
@@ -1591,7 +1627,7 @@ void Renderer::destroy_buffer(Handle handle,bool storageRetired) {
   auto& d=*impl_;
   auto it=d.buffers.find(handle);
   if(it==d.buffers.end()) return;
-  if(it->second.inFlight && !storageRetired && !finish()) return;
+  if(it->second.inFlight && !storageRetired && !finish(FinishReason::ResourceDestroy)) return;
   if(d.boundVertexBuffer==handle){d.vertexStreamValid=false;d.boundVertexBuffer=0;}
   d.resourceBytes-=it->second.memory.size();
   d.buffers.erase(it);
@@ -1601,7 +1637,7 @@ void Renderer::destroy_pipeline(uint64_t key) {
   auto& d=*impl_;
   auto it=d.pipelines.find(key);
   if(it==d.pipelines.end() || key==d.clearPipeline) return;
-  if(it->second->inFlight && !finish()) return;
+  if(it->second->inFlight && !finish(FinishReason::ResourceDestroy)) return;
   // Program state persists across scenes: a pipeline recreated later with the
   // same key must not be mistaken for the released programs still set here.
   d.pipelineStateValid=false;d.boundPipelineKey=0;
@@ -1620,7 +1656,7 @@ void Renderer::destroy_texture(Handle handle) {
   auto& d=*impl_;
   auto it=d.textures.find(handle);
   if(it==d.textures.end()) return;
-  if((it->second->inFlight || handle==d.boundTarget) && !finish()) return;
+  if((it->second->inFlight || handle==d.boundTarget) && !finish(FinishReason::ResourceDestroy)) return;
   if(handle==d.boundTarget) d.boundTarget=0;
   d.invalidate_texture_binding(handle);
   d.resourceBytes-=it->second->memory.size()+it->second->depth.size();
@@ -1689,7 +1725,7 @@ bool Renderer::read_target(Handle handle,std::vector<uint8_t>& pixels) {
   auto& d=*impl_;
   const auto it=d.textures.find(handle);
   if(it==d.textures.end()) return d.fail("unknown readback texture");
-  if(!finish()) return false;
+  if(!finish(FinishReason::Readback)) return false;
   const auto& t=*it->second;
   pixels.resize(size_t(t.width)*t.height*4);
   for(uint32_t y=0;y<t.height;++y)
@@ -1703,7 +1739,7 @@ bool Renderer::read_current(std::vector<uint8_t>& pixels,uint32_t& width,uint32_
   if(!d.initialized || !d.frameActive) return d.fail("read current requires an active frame");
   width=d.width();height=d.height();
   if(d.boundTarget) return read_target(d.boundTarget,pixels);
-  if(!finish()) return false;
+  if(!finish(FinishReason::Readback)) return false;
   pixels.resize(size_t(width)*height*4);
   const auto* source=static_cast<const uint8_t*>(d.surfaces[d.back].memory.data());
   for(uint32_t y=0;y<height;++y)
@@ -1717,7 +1753,7 @@ bool Renderer::upload_target(Handle handle,const void* rgba,uint32_t width,uint3
   if(!rgba || it==d.textures.end() || it->second->width!=width || it->second->height!=height)
     return d.fail("invalid EFB upload");
   auto& t=*it->second;
-  if((t.inFlight || handle==d.boundTarget) && !finish()) return false;
+  if((t.inFlight || handle==d.boundTarget) && !finish(FinishReason::TargetMutation)) return false;
   for(uint32_t y=0;y<height;++y)
     std::memcpy(static_cast<uint8_t*>(t.memory.data())+size_t(y)*t.stride*4,
       static_cast<const uint8_t*>(rgba)+size_t(y)*width*4,size_t(width)*4);

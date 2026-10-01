@@ -1,6 +1,7 @@
 #include "vita_draw_adapter.hpp"
 #include "vita_cpu_workers.hpp"
 #include "vita_fixed_vertex.hpp"
+#include "vita_draw_batch.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -117,8 +118,8 @@ bool batch_compatible(const DrawPacket&a,const DrawPacket&b) noexcept {
   // channel/light state is consumed by the CPU vertex pipeline before enqueue and
   // never reaches the Vita shader. Comparing it here both burns memory bandwidth
   // and prevents otherwise identical GPU draws from coalescing.
-  if(std::memcmp(&a.uniforms,&b.uniforms,sizeof(GpuDrawUniforms))!=0)return false;
-  for(unsigned i=0;i<MaxTextures;i++)if(!same_texture(a.textures[i],b.textures[i]))return false;
+  if(std::memcmp(&a.gpu_uniforms(),&b.gpu_uniforms(),sizeof(GpuDrawUniforms))!=0)return false;
+  for(unsigned i=0;i<MaxTextures;i++)if(!same_texture(a.texture_bindings()[i],b.texture_bindings()[i]))return false;
   return true;
 }
 
@@ -262,6 +263,16 @@ VertexSemanticMask decode_semantics_for_pipeline(const PipelineDesc& pipeline,
   return mask;
 }
 }
+DrawRecipe build_draw_recipe(const PipelineDesc& pipeline) noexcept {
+  DrawRecipe recipe{};
+  recipe.requirements=vertex_pipeline_requirements(pipeline);
+  recipe.gpuLayout=effective_gpu_vertex_layout(pipeline);
+  recipe.gpuStride=recipe.gpuLayout.count?recipe.gpuLayout.attributes[0].stride:0;
+  recipe.decodeSemantics=pipeline.fixedVertexOnGpu?fixed_vertex_gpu_inputs(pipeline,recipe.requirements):
+      decode_semantics_for_pipeline(pipeline,recipe.requirements);
+  return recipe;
+}
+
 DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint32_t explicitIndexCount,size_t vertexStride) noexcept {
   DrawFootprint f{};
   if(!count)return f;
@@ -285,7 +296,7 @@ DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t count,uint
 void pack_gpu_vertex_bytes(uint8_t* dst,const CanonicalVertex& vertex,const VertexLayout& layout) noexcept {
   pack_gpu_vertex(dst,vertex,layout);
 }
-bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry,bool deduplicateTriangles) noexcept {
+bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t count,SourcePrimitive source,const VertexDecodeLayout&layout,const PipelineDesc&pipeline,const VertexTransformState&state,DrawUniforms*uniforms,const PrimitiveExpansionState&expansion,Telemetry*telemetry,bool deduplicateTriangles,const DrawRecipe* recipe) noexcept {
   out.error=PrepareDrawError::None;out.vertices.clear();out.indices.clear();out.scratch.clear();out.rawScratch.clear();out.dedupTable.clear();out.primitive=Primitive::Triangles;out.positionIsClipSpace=false;
   if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return false;}
   if(size_t(count)*layout.streamStride>bytes){out.error=PrepareDrawError::VertexDecodeFailed;return false;}
@@ -312,9 +323,11 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
   }
   auto&transformed=expanded?out.scratch:out.vertices;
   transformed.resize(decodeCount);
-  const auto requirements=vertex_pipeline_requirements(pipeline);
+  const auto preparedRecipe=recipe?DrawRecipe{}:build_draw_recipe(pipeline);
+  const auto& cachedRecipe=recipe?*recipe:preparedRecipe;
+  const auto requirements=cachedRecipe.requirements;
   FusedVertexContext fused{decodeRaw,decodeBytes,&layout,&pipeline,&state,requirements,
-                           pipeline.fixedVertexOnGpu?fixed_vertex_gpu_inputs(pipeline):decode_semantics_for_pipeline(pipeline,requirements),transformed.data()};
+                           cachedRecipe.decodeSemantics,transformed.data()};
   // Decode and GX vertex processing used to dispatch the worker pool twice and
   // walk the 168-byte canonical array twice. Fusing them keeps each vertex hot
   // in cache and makes medium-sized Strikers draws worth parallelizing.
@@ -344,20 +357,22 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
 bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint8_t*raw,size_t bytes,uint32_t count,
                                 SourcePrimitive source,const uint16_t*rawIndices,uint32_t rawIndexCount,
                                 const VertexDecodeLayout&layout,const PipelineDesc&pipeline,
-                                const VertexTransformState&state,DrawUniforms*uniforms,Telemetry*telemetry) noexcept {
+                                const VertexTransformState&state,DrawUniforms*uniforms,Telemetry*telemetry,const DrawRecipe* recipe) noexcept {
   out=StreamedDraw{};
   if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return false;}
   if(source==SourcePrimitive::Points||source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip){
     out.error=PrepareDrawError::UnsupportedLineExpansion;return false;
   }
   if(!layout.streamStride||size_t(count)*layout.streamStride>bytes){out.error=PrepareDrawError::VertexDecodeFailed;return false;}
-  const VertexLayout gpuLayout=effective_gpu_vertex_layout(pipeline);
+  const auto preparedRecipe=recipe?DrawRecipe{}:build_draw_recipe(pipeline);
+  const auto& cachedRecipe=recipe?*recipe:preparedRecipe;
+  const VertexLayout& gpuLayout=cachedRecipe.gpuLayout;
   if(gpuLayout.count<1||gpuLayout.attributes[0].stride==0){out.error=PrepareDrawError::InvalidInput;return false;}
   const size_t gpuStride=gpuLayout.attributes[0].stride;
   const auto footprint=estimate_draw_footprint(source,count,rawIndexCount,gpuStride);
   if(!footprint.valid){out.error=PrepareDrawError::TooManyVertices;return false;}
   if(rawIndexCount&&!rawIndices){out.error=PrepareDrawError::InvalidInput;return false;}
-  const auto requirements=vertex_pipeline_requirements(pipeline);
+  const auto requirements=cachedRecipe.requirements;
   // Keep the GX position transform on the correctness-first CPU path. Folding a
   // fixed PN matrix into u_mvp looked equivalent for simple test matrices, but
   // real GX streams can change XF/current-matrix semantics independently of the
@@ -372,8 +387,7 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
   out.primitive=Primitive::Triangles;
   out.positionIsClipSpace=false;
 
-  const VertexSemanticMask decodeSemantics=pipeline.fixedVertexOnGpu?
-      fixed_vertex_gpu_inputs(pipeline):decode_semantics_for_pipeline(pipeline,requirements);
+  const VertexSemanticMask decodeSemantics=cachedRecipe.decodeSemantics;
   StreamedVertexContext fused{raw,bytes,&layout,&pipeline,&state,requirements,
                               decodeSemantics,gpuLayout,
                               static_cast<uint8_t*>(vertexDst),gpuStride,true};
@@ -465,15 +479,36 @@ bool enqueue_draw(Renderer&renderer,StreamingArena&arena,CommandStream&stream,co
 bool enqueue_streamed_draw(CommandStream&stream,const StreamedDraw&prepared,uint64_t resolvedPipelineKey,
                            const DrawUniforms&uniforms,const Viewport&viewport,const Scissor&scissor,
                            const std::array<TextureBinding,MaxTextures>&textures,PrepareDrawError*err,
-                           uint64_t uniformRevision,const FixedVertexUniforms* fixedVertexUniforms) noexcept {
+                           uint64_t uniformRevision,const FixedVertexUniforms* fixedVertexUniforms,
+                           StreamingArena* batchArena,Telemetry* telemetry) noexcept {
   auto fail=[&](PrepareDrawError e){if(err)*err=e;return false;};
   if(!prepared.ok()||!prepared.vertices.buffer||!prepared.vertexCount||!resolvedPipelineKey)
     return fail(prepared.error==PrepareDrawError::None?PrepareDrawError::InvalidInput:prepared.error);
-  DrawPacket& d=stream.emplace_draw();
+  auto* tail=batchArena&&prepared.primitive==Primitive::Triangles?stream.tail_draw():nullptr;
+  DrawPacket& d=stream.emplace_geometry_draw();
   d.pipelineKey=resolvedPipelineKey;d.vertices=prepared.vertices;d.indices=prepared.indices;
   d.vertexCount=prepared.vertexCount;d.indexCount=prepared.indexCount;d.absoluteVertexIndices=false;
-  d.textures=textures;d.uniforms=uniforms;d.uniformRevision=uniformRevision;d.viewport=viewport;d.scissor=scissor;
+  d.firstVertex=0;d.instanceCount=1;
+  stream.share_draw_state(d,uniforms,textures,uniformRevision);
+  d.uniformRevision=uniformRevision;d.viewport=viewport;d.scissor=scissor;
   d.fixedVertexUniforms=fixedVertexUniforms;
+  if(batchArena){
+    if(tail){
+      if(telemetry)telemetry->batch_candidate();
+      if(local_draws_mergeable(*tail,d)){
+        if(batchArena->indices_pending(tail->indices)&&
+           batchArena->rebase_pending_indices(d.indices,d.indexCount,tail->vertexCount,d.vertexCount)){
+          tail->vertices.size+=d.vertices.size;tail->indices.size+=d.indices.size;
+          tail->vertexCount+=d.vertexCount;tail->indexCount+=d.indexCount;
+          if(telemetry)telemetry->batch_merged(d.indexCount);
+          stream.discard_tail_draw();
+          if(err)*err=PrepareDrawError::None;
+          return true;
+        }
+        if(telemetry)telemetry->batch_rejected_indices();
+      }else if(telemetry)telemetry->batch_rejected_state();
+    }
+  }
   if(err)*err=PrepareDrawError::None;
   return true;
 }
