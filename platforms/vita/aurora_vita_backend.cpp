@@ -1,6 +1,7 @@
 #include "aurora_vita_backend.hpp"
 #include "gfx/vita_cpu_workers.hpp"
 #include "gfx/vita_memory_revision.hpp"
+#include "gfx/vita_published_snapshot.hpp"
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_texture_decode.hpp"
@@ -41,6 +42,8 @@
 namespace aurora::vita {
 namespace {
 BackendConfig g_config{};
+gfx::PublishedSnapshot<PerformanceSnapshot> g_completedPerformance;
+PerformanceSnapshot performance_snapshot_now() noexcept;
 bool g_initialized=false;
 bool g_diagnosticsEnabled=false;
 bool g_telemetryEnabled=false;
@@ -213,8 +216,25 @@ void emit_periodic_diagnostics() noexcept {
       gx_worker_active()?1u:0u,static_cast<unsigned long long>(g_lastProducerWaitUs),
       static_cast<unsigned long long>(g_lastConsumerWaitUs),static_cast<unsigned long long>(g_lastWorkerFrameUs));
   const std::string invalidationLine="[AURORA-VITA][INVALIDATE] frame="+std::to_string(g_telemetry.frame().frame)+g_lastInvalidations;
+  char nativeStateLine[2048];
+  int used=std::snprintf(nativeStateLine,sizeof nativeStateLine,
+      "[AURORA-VITA][NATIVE_STATE] frame=%llu pipeline_setters=%u pipeline_setters_skipped=%u "
+      "uniform_upload_calls=%u uniform_upload_bytes=%llu local_batch=%u shared_state_copies=%llu",
+      static_cast<unsigned long long>(g_telemetry.frame().frame),rs.nativePipelineSetters,
+      rs.nativePipelineSettersSkipped,rs.nativeUniformUploadCalls,
+      static_cast<unsigned long long>(rs.nativeUniformUploadBytes),
+      (g_drawSink->runtime_feature_flags()&gxbridge::RuntimeLocalDrawBatching)?1u:0u,
+      static_cast<unsigned long long>(g_telemetry.frame().counters.sharedStateCopies));
+  constexpr const char* reasons[]{"explicit","buffer_mutation","texture_mutation","resource_destroy",
+      "readback","target_mutation","stream_reuse","frame_discard"};
+  static_assert(std::size(reasons)==gfx::FinishReasonCount);
+  for(size_t i=0;i<gfx::FinishReasonCount&&used>0&&used<int(sizeof nativeStateLine)-160;++i)
+    used+=std::snprintf(nativeStateLine+used,sizeof nativeStateLine-size_t(used),
+        " finish_%s_calls_total=%llu finish_%s_us_total=%llu",reasons[i],
+        static_cast<unsigned long long>(rs.nativeFinishReasonCalls[i]),reasons[i],
+        static_cast<unsigned long long>(rs.nativeFinishReasonWaitUs[i]));
   if(writeConsole)
-    AURORA_VITA_LOG_INFO("%s\n%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str(),invalidationLine.c_str());
+    AURORA_VITA_LOG_INFO("%s\n%s\n%s\n%s\n%s\n",frameLine.c_str(),rendererLine,memLine.c_str(),invalidationLine.c_str(),nativeStateLine);
   if (writeFile) {
     ensure_parent_dir(g_config.telemetry_log_path);
     g_telemetry.append_frame_log(g_config.telemetry_log_path);
@@ -222,6 +242,7 @@ void emit_periodic_diagnostics() noexcept {
     if (fp) {
       std::fwrite(rendererLine,1,std::strlen(rendererLine),fp);std::fwrite("\n",1,1,fp);
       std::fwrite(memLine.data(),1,memLine.size(),fp); std::fwrite("\n",1,1,fp);
+      std::fwrite(nativeStateLine,1,std::strlen(nativeStateLine),fp);std::fwrite("\n",1,1,fp);
       std::fwrite(invalidationLine.data(),1,invalidationLine.size(),fp); std::fwrite("\n",1,1,fp); std::fclose(fp);
     }
   }
@@ -558,6 +579,7 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.staticGeometryMinVertices=c.static_geometry_min_vertices;
   dc.staticGeometryStableOnly=c.static_geometry_stable_only;
   dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
+  dc.localDrawBatching=g_config.gxm_local_draw_batching;
   dc.allowStreamedFixedVertexGpu=c.gxm_streamed_fixed_vertex_gpu;
   dc.allowDynamicTexMatrixGpu=c.gxm_dynamic_tex_matrix_gpu;
   dc.allowBumpFixedVertexGpu=c.gxm_bump_fixed_vertex_gpu;
@@ -683,6 +705,10 @@ void end_frame_now() noexcept {
   g_lastInvalidations=gfx::take_pipeline_invalidation_report();
   if(g_telemetryEnabled&&gfx::gxm_disabled(gfx::GxmDiagPhases)) accumulate_phase_profile();
   emit_periodic_diagnostics();
+  if(!g_renderer->failed()) {
+    auto completed=performance_snapshot_now();completed.completedFrame=true;
+    g_completedPerformance.publish(completed);
+  }
 }
 void end_frame_task(void*) {
   end_frame_now();
@@ -731,6 +757,7 @@ void shutdown() noexcept {
   g_coverageEnabled=false;
   g_traceEnabled=false;
   g_initialized=false;
+  g_completedPerformance.publish(PerformanceSnapshot{});
 }
 
 uint64_t frame_index() noexcept{return g_frame;}
@@ -738,6 +765,7 @@ uint64_t last_frame_time_us() noexcept{return g_last;}
 uint32_t width() noexcept{return g_config.width;}
 uint32_t height() noexcept{return g_config.height;}
 namespace { PerformanceSnapshot performance_snapshot_now() noexcept; }
+PerformanceSnapshot completed_performance_snapshot() noexcept {return g_completedPerformance.read();}
 PerformanceSnapshot performance_snapshot() noexcept {
 #if defined(MKW_TARGET_VITA)
   // Renderer statistics and cache maps belong to the GX worker: read them on
@@ -812,7 +840,15 @@ PerformanceSnapshot performance_snapshot_now() noexcept {
   out.nativeDepthStoreScenes=stats.nativeDepthStoreScenes;
   out.nativeDepthlessScenes=stats.nativeDepthlessScenes;
   out.nativeFinishCalls=stats.nativeFinishCalls;
+  out.nativeFinishReasonCalls=stats.nativeFinishReasonCalls;out.nativeFinishReasonWaitUs=stats.nativeFinishReasonWaitUs;
   out.nativeScissorFreeDraws=stats.nativeScissorFreeDraws;
+  out.nativePipelineSetters=stats.nativePipelineSetters;
+  out.nativePipelineSettersSkipped=stats.nativePipelineSettersSkipped;
+  out.nativeUniformUploadCalls=stats.nativeUniformUploadCalls;
+  out.nativeUniformUploadBytes=stats.nativeUniformUploadBytes;
+  const auto& counters=g_telemetry.frame().counters;
+  out.batchCandidates=counters.batchCandidates;out.batchMerged=counters.batchMerged;
+  out.batchRejectedState=counters.batchRejectedState;out.batchRejectedIndices=counters.batchRejectedIndices;
   out.shaderRuntimeCompilationEnabled=g_renderer->runtime_shader_compilation_enabled();
   out.shaderRuntimeCompiles=g_renderer->runtime_shader_compiles();
   out.shaderRuntimeCompileUs=g_renderer->runtime_shader_compile_us();

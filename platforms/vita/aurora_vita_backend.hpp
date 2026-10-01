@@ -19,6 +19,7 @@ enum class InitFailure : uint8_t {
   DrawSinkInitFailed,
 };
 struct PerformanceSnapshot {
+  bool completedFrame=false;
   uint64_t frameIndex=0;
   uint64_t frameUs=0;
   uint64_t rendererCpuFrameUs=0;
@@ -44,7 +45,11 @@ struct PerformanceSnapshot {
   uint32_t nativeDepthStoreScenes=0;
   uint32_t nativeDepthlessScenes=0;
   uint32_t nativeFinishCalls=0;
+  std::array<uint64_t,gfx::FinishReasonCount> nativeFinishReasonCalls{},nativeFinishReasonWaitUs{};
   uint32_t nativeScissorFreeDraws=0;
+  uint32_t nativePipelineSetters=0,nativePipelineSettersSkipped=0,nativeUniformUploadCalls=0;
+  uint64_t nativeUniformUploadBytes=0;
+  uint64_t batchCandidates=0,batchMerged=0,batchRejectedState=0,batchRejectedIndices=0;
   uint64_t staticGeometryHits=0;
   uint64_t staticGeometryMisses=0;
   uint64_t staticGeometryLookupFallbacks=0;
@@ -154,6 +159,8 @@ struct BackendConfig {
   // Native GXM only. D16 halves depth bandwidth and tile backing size, but GX
   // exposes 24-bit Z so titles with tight depth ranges may prefer DF32.
   bool gxm_d16_depth=false;
+  // Adjacent streamed triangles only; hardware A/B before enabling in a port.
+  bool gxm_local_draw_batching=false;
   // Native GXM render-target scene budget. Gameplay telemetry should stay below
   // this in steady state; Strikers currently averages ~2.4 and peaks at 3.
   uint32_t gxm_scenes_per_frame=5;
@@ -237,6 +244,9 @@ void discard_present() noexcept;
 void schedule_display_clear(float r,float g,float b,float a,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
 uint64_t frame_index() noexcept;uint64_t last_frame_time_us() noexcept;uint32_t width() noexcept;uint32_t height() noexcept;
 PerformanceSnapshot performance_snapshot() noexcept;
+// Latest complete frame; never fences the GX worker. completedFrame is false
+// before the first successful end_frame. The existing synchronous API remains.
+PerformanceSnapshot completed_performance_snapshot() noexcept;
 // GXM only: disabling runtime compilation guarantees that cache misses never
 // call vitaShaRK. Missing stages fail that draw instead of stalling to compile.
 void set_runtime_shader_compilation_enabled(bool enabled) noexcept;

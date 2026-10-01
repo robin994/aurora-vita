@@ -52,9 +52,13 @@ struct TelemetryCounters {
   uint64_t unsupportedFeatures = 0;
   uint64_t pipelineTranslations = 0;
   uint64_t vertexTranslations = 0;
+  uint64_t fragmentTranslations = 0;
   uint64_t textureResolves = 0;
   uint64_t translationMemoHits = 0;
   uint64_t layoutTranslations = 0;
+  uint64_t batchCandidates=0,batchMerged=0,batchRejectedState=0,batchRejectedIndices=0;
+  uint64_t batchRebasedIndices=0;
+  uint64_t sharedStateCopies=0;
 };
 
 struct FrameTelemetry {
@@ -72,9 +76,15 @@ public:
   void add_time(TelemetryPhase phase, uint64_t us) noexcept;
   void count_pipeline_translation() noexcept { ++frame_.counters.pipelineTranslations; }
   void count_vertex_translation() noexcept { ++frame_.counters.vertexTranslations; }
+  void count_fragment_translation() noexcept { ++frame_.counters.fragmentTranslations; }
   void count_texture_resolve() noexcept { ++frame_.counters.textureResolves; }
   void count_translation_memo_hit() noexcept { ++frame_.counters.translationMemoHits; }
   void count_layout_translation() noexcept { ++frame_.counters.layoutTranslations; }
+  void batch_candidate() noexcept { ++frame_.counters.batchCandidates; }
+  void batch_merged(uint32_t indices) noexcept { ++frame_.counters.batchMerged;frame_.counters.batchRebasedIndices+=indices; }
+  void batch_rejected_state() noexcept { ++frame_.counters.batchRejectedState; }
+  void batch_rejected_indices() noexcept { ++frame_.counters.batchRejectedIndices; }
+  void shared_state_copies(uint64_t count) noexcept {frame_.counters.sharedStateCopies+=count;lifetime_.sharedStateCopies+=count;}
   void add_draw(uint32_t vertices, uint32_t indices, uint32_t triangles) noexcept;
   void vertex_dedup(uint32_t inputVertices,uint32_t uniqueVertices) noexcept;
   void gpu_geometry(bool hit,uint32_t vertices) noexcept;

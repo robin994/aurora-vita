@@ -1,4 +1,5 @@
 #pragma once
+#include "state_revisions.hpp"
 #include <dolphin/gx.h>
 #include <aurora/math.hpp>
 
@@ -472,6 +473,14 @@ struct GXState {
   u8 numTevStages = 0;
   u8 numTexGens = 0;
   bool stateDirty = true;
+  // Domain revisions restart when GXState is replaced. Keep a separate identity
+  // so resource caches cannot mistake a new state for a previous revision 1.
+  u32 stateIdentity = next_gx_state_epoch();
+  StateRevisions stateRevisions{};
+  void mark_dirty(StateDomain domains = StateDomain::All) noexcept {
+    stateDirty = true;
+    stateRevisions.mark(domains);
+  }
   // Bumped by the decoded register writes that feed populate_pipeline_config, and by nothing else.
   u32 pipelineStateGeneration = next_gx_state_epoch();
   // Vita: bumped by indexed-array base/size/stride changes. Those feed only the

@@ -1,5 +1,8 @@
 # Interchangeable Vita renderers: vitaGL and native SceGxm
 
+The [2026-10-02 GX/GXM refactor report](GXM_REFACTOR_2026-10-02.md) documents current
+state revisions, local batching controls, completed-frame snapshots and validation.
+
 The same public `aurora::vita` API, `gfx::Renderer` facade, GX frontend, FIFO
 command processor and DrawSink now compile with either hardware implementation:
 

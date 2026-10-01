@@ -49,14 +49,14 @@ inline bool supports_fixed_vertex_gpu(const PipelineDesc& pipeline,
   return true;
 }
 
-inline VertexSemanticMask fixed_vertex_gpu_inputs(const PipelineDesc& pipeline) noexcept {
+inline VertexSemanticMask fixed_vertex_gpu_inputs(const PipelineDesc& pipeline,
+                                                 VertexPipelineRequirements requirements) noexcept {
   VertexSemanticMask mask=vertex_semantic_bit(VertexSemantic::Position);
-  const auto requirements=vertex_pipeline_requirements(pipeline);
   if(requirements.needNormal)mask|=vertex_semantic_bit(VertexSemantic::Normal);
   if(requirements.needBumpBasis)
     mask|=vertex_semantic_bit(VertexSemantic::Binormal)|vertex_semantic_bit(VertexSemantic::Tangent);
   if(pipeline.fixedVertexIndexedPn)mask|=vertex_semantic_bit(VertexSemantic::PnMatrixIndex);
-  const uint8_t colors=vertex_pipeline_requirements(pipeline).colorMask;
+  const uint8_t colors=requirements.colorMask;
   for (unsigned i=0;i<2;++i) if (colors&(1u<<i)) {
     if (pipeline.colorChannels[i].materialSource==ColorSource::Vertex ||
         pipeline.colorChannels[i+2].materialSource==ColorSource::Vertex ||
@@ -97,6 +97,10 @@ inline VertexSemanticMask fixed_vertex_gpu_inputs(const PipelineDesc& pipeline) 
     mask|=vertex_semantic_bit(semantic);
   }
   return mask;
+}
+
+inline VertexSemanticMask fixed_vertex_gpu_inputs(const PipelineDesc& pipeline) noexcept {
+  return fixed_vertex_gpu_inputs(pipeline,vertex_pipeline_requirements(pipeline));
 }
 
 inline VertexLayout fixed_vertex_gpu_layout(const PipelineDesc& pipeline) noexcept {

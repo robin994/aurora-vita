@@ -66,6 +66,15 @@ struct StreamedDraw {
   bool ok() const noexcept { return error == PrepareDrawError::None; }
 };
 
+// Immutable structural data: never stores live matrices, lights or textures.
+struct DrawRecipe {
+  VertexPipelineRequirements requirements{};
+  VertexSemanticMask decodeSemantics=AllVertexSemantics;
+  VertexLayout gpuLayout{};
+  size_t gpuStride=0;
+};
+DrawRecipe build_draw_recipe(const PipelineDesc& pipeline) noexcept;
+
 DrawFootprint estimate_draw_footprint(SourcePrimitive source,uint32_t vertexCount,uint32_t explicitIndexCount=0,
                                       size_t vertexStride=sizeof(GpuVertex)) noexcept;
 void pack_gpu_vertex_bytes(uint8_t* dst,const CanonicalVertex& vertex,const VertexLayout& layout) noexcept;
@@ -78,7 +87,7 @@ bool prepare_draw_into(PreparedDraw& out,const uint8_t* rawVertices,size_t rawBy
                        const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
                        const VertexTransformState& state,DrawUniforms* uniforms=nullptr,
                        const PrimitiveExpansionState& expansion={},Telemetry* telemetry=nullptr,
-                       bool deduplicateTriangles=false) noexcept;
+                       bool deduplicateTriangles=false,const DrawRecipe* recipe=nullptr) noexcept;
 
 // Direct streaming path for triangles/quads/fans/strips. Lines and points still
 // use PreparedDraw because their Vita representation expands the vertex count.
@@ -87,7 +96,7 @@ bool prepare_streamed_draw_into(StreamedDraw& out,StreamingArena& arena,
                                 SourcePrimitive source,const uint16_t* rawIndices,uint32_t rawIndexCount,
                                 const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
                                 const VertexTransformState& state,DrawUniforms* uniforms=nullptr,
-                                Telemetry* telemetry=nullptr) noexcept;
+                                Telemetry* telemetry=nullptr,const DrawRecipe* recipe=nullptr) noexcept;
 
 // Resolves the effective post-conversion pipeline once. Callers submitting a
 // consecutive run with unchanged GX state may reuse the returned key.
@@ -107,6 +116,7 @@ bool enqueue_streamed_draw(CommandStream& stream,const StreamedDraw& prepared,ui
                            const DrawUniforms& uniforms,const Viewport& viewport,const Scissor& scissor,
                            const std::array<TextureBinding,MaxTextures>& textures={},
                            PrepareDrawError* error=nullptr,uint64_t uniformRevision=0,
-                           const FixedVertexUniforms* fixedVertexUniforms=nullptr) noexcept;
+                           const FixedVertexUniforms* fixedVertexUniforms=nullptr,
+                           StreamingArena* batchArena=nullptr,Telemetry* telemetry=nullptr) noexcept;
 
 } // namespace aurora::vita::gfx

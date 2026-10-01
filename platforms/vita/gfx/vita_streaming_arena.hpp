@@ -37,6 +37,10 @@ public:
   // Writes U16 indices directly into the staging arena while adding a
   // frame-global vertex base. This avoids a temporary heap allocation per draw.
   BufferSlice upload_rebased_indices(const uint16_t* data, size_t count, uint32_t vertexBase) noexcept;
+  // Validate every index before touching an unflushed range of this slot.
+  bool rebase_pending_indices(const BufferSlice& slice,uint32_t count,
+                              uint32_t vertexBase,uint32_t localVertexCount) noexcept;
+  bool indices_pending(const BufferSlice& slice) const noexcept;
   bool flush() noexcept;
   void mark_current_submitted() noexcept;
   bool can_reserve(size_t vertexBytes,size_t vertexAlignment,size_t indexBytes,size_t indexAlignment) const noexcept;

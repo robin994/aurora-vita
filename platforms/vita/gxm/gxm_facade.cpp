@@ -45,7 +45,7 @@ void* BufferPool::writable(Handle h,size_t bytes,size_t offset) noexcept {
   if(!native_ || it==map_.end() || !it->second.dynamic)return nullptr;
   return native_->writable_buffer(h,bytes,offset);
 }
-void BufferPool::wait_idle() noexcept { if(native_) native_->finish(); }
+void BufferPool::wait_idle() noexcept { if(native_) native_->finish(FinishReason::StreamReuse); }
 void BufferPool::destroy_retired(Handle h) noexcept {
   if(map_.erase(h) && native_) native_->destroy_buffer(h,true);
 }
@@ -53,7 +53,7 @@ void BufferPool::destroy(Handle h) noexcept {
   if(map_.erase(h) && native_) native_->destroy_buffer(h);
 }
 void BufferPool::clear() noexcept {
-  if(native_) { native_->finish(); for(const auto& [h,_]:map_) native_->destroy_buffer(h); }
+  if(native_) { native_->finish(FinishReason::ResourceDestroy); for(const auto& [h,_]:map_) native_->destroy_buffer(h); }
   map_.clear();
 }
 
@@ -148,7 +148,7 @@ void TextureCache::erase(Handle h) noexcept {
   byHandle_.erase(it);byKey_.erase(key);
 }
 void TextureCache::clear() noexcept {
-  if(native_) {native_->finish();for(const auto& [h,_]:byHandle_)native_->destroy_texture(h);}
+  if(native_) {native_->finish(FinishReason::ResourceDestroy);for(const auto& [h,_]:byHandle_)native_->destroy_texture(h);}
   byHandle_.clear();byKey_.clear();bytes_=0;failedKeys_.clear();failedFrame_=~uint64_t{0};
 }
 void TextureCache::trim(uint64_t frame) noexcept {
@@ -294,7 +294,7 @@ void PipelineCache::bind(const CompiledPipeline& p,const GpuDrawUniforms& u,Fram
 void PipelineCache::clear() noexcept {
   if(!hot_.empty())hotDirty_=true; // persist the final hit ordering once
   save_hot_manifest();
-  if(native_)native_->finish();
+  if(native_)native_->finish(FinishReason::ResourceDestroy);
   for(auto& [_,p]:map_)destroy_pipeline(p);
   map_.clear();pinned_.clear();failedKeys_.clear();blockedKeys_.clear();invalidate_bound();
 }
@@ -393,7 +393,7 @@ void EfbManager::destroy(Handle h) noexcept {
   if(boundFbo_==h)boundFbo_=0;
 }
 void EfbManager::clear() noexcept {
-  if(native_) {native_->finish();for(const auto& [h,_]:map_)native_->destroy_texture(h);}
+  if(native_) {native_->finish(FinishReason::ResourceDestroy);for(const auto& [h,_]:map_)native_->destroy_texture(h);}
   map_.clear();bytes_=0;boundFbo_=0;
 }
 
@@ -437,7 +437,7 @@ bool Renderer::initialize() noexcept {
 }
 void Renderer::shutdown() noexcept {
   if(!initialized_)return;
-  native_->finish();pipelines_.clear();textures_.clear();buffers_.clear();efb_.clear();
+  native_->finish(FinishReason::ResourceDestroy);pipelines_.clear();textures_.clear();buffers_.clear();efb_.clear();
   mainEfb_=InvalidHandle;boundEfb_=InvalidHandle;
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=nullptr;
   native_->shutdown();initialized_=false;
@@ -501,6 +501,9 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeFragmentPrepareHits=s.nativeFragmentPrepareHits;
   stats_.nativeFragmentPrepareMisses=s.nativeFragmentPrepareMisses;
   stats_.nativeSceneCount=s.nativeSceneCount;
+  stats_.nativeFinishReasonCalls=s.nativeFinishReasonCalls;stats_.nativeFinishReasonWaitUs=s.nativeFinishReasonWaitUs;
+  stats_.nativePipelineSetters=s.nativePipelineSetters;stats_.nativePipelineSettersSkipped=s.nativePipelineSettersSkipped;
+  stats_.nativeUniformUploadCalls=s.nativeUniformUploadCalls;stats_.nativeUniformUploadBytes=s.nativeUniformUploadBytes;
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
   stats_.nativeEfbCopies=s.nativeEfbCopies;stats_.nativeEfbEndSceneUs=s.nativeEfbEndSceneUs;
@@ -593,6 +596,9 @@ void Renderer::draw(const DrawPacket& packet) noexcept {
   stats_.nativeFragmentPrepareHits=s.nativeFragmentPrepareHits;
   stats_.nativeFragmentPrepareMisses=s.nativeFragmentPrepareMisses;
   stats_.nativeSceneCount=s.nativeSceneCount;
+  stats_.nativeFinishReasonCalls=s.nativeFinishReasonCalls;stats_.nativeFinishReasonWaitUs=s.nativeFinishReasonWaitUs;
+  stats_.nativePipelineSetters=s.nativePipelineSetters;stats_.nativePipelineSettersSkipped=s.nativePipelineSettersSkipped;
+  stats_.nativeUniformUploadCalls=s.nativeUniformUploadCalls;stats_.nativeUniformUploadBytes=s.nativeUniformUploadBytes;
 }
 void Renderer::execute(const CommandStream& stream) noexcept {
   execute_range(stream,0,stream.size(),true);

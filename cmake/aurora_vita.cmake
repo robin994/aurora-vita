@@ -60,11 +60,29 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_regression_test.cpp)
     target_link_libraries(aurora_vita_regression_test PRIVATE aurora::vita_backend)
     add_test(NAME vita_regression COMMAND aurora_vita_regression_test)
+    # Compile the real Dawn-free GX bridge on the host, rather than relying on
+    # a stub ShaderConfig whose layout could hide frontend regressions.
+    if(AURORA_VITA_WITH_GX_FRONTEND)
+        find_package(Threads REQUIRED)
+        target_sources(aurora_vita_backend PRIVATE
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_frontend_thread_stubs.cpp)
+        target_include_directories(aurora_vita_backend PRIVATE
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_stubs)
+        target_link_libraries(aurora_vita_backend PRIVATE Threads::Threads)
+        add_executable(aurora_vita_frontend_translation_test
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_frontend_translation_test.cpp)
+        target_link_libraries(aurora_vita_frontend_translation_test PRIVATE aurora::vita_backend)
+        add_test(NAME vita_frontend_translation COMMAND aurora_vita_frontend_translation_test)
+    endif()
     add_executable(aurora_vita_command_stream_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_command_stream_test.cpp)
     target_link_libraries(aurora_vita_command_stream_test PRIVATE aurora::vita_common)
     add_test(NAME vita_command_stream COMMAND aurora_vita_command_stream_test)
     find_package(Threads REQUIRED)
+    add_executable(aurora_vita_submission_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_submission_test.cpp)
+    target_link_libraries(aurora_vita_submission_test PRIVATE aurora::vita_backend Threads::Threads)
+    add_test(NAME vita_submission COMMAND aurora_vita_submission_test)
     add_executable(aurora_vita_cpu_workers_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_cpu_workers_test.cpp
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_cpu_workers.cpp)
@@ -84,6 +102,8 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
             -P ${AURORA_VITA_SOURCE_DIR}/tests/vita_renderer_selection_test.cmake)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME vita_performance_compare
+            COMMAND ${Python3_EXECUTABLE} ${AURORA_VITA_SOURCE_DIR}/tests/vita_performance_compare_test.py)
         add_test(NAME vita_binary_audit_contract
             COMMAND ${Python3_EXECUTABLE} ${AURORA_VITA_SOURCE_DIR}/tests/vita_binary_audit_test.py)
     endif()

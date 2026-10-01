@@ -55,6 +55,7 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   verboseGeometryDiagnostics_ = config.verboseGeometryDiagnostics;
   strictUnsupported_ = config.strictUnsupported;
   allowLitFixedVertexGpu_ = config.allowLitFixedVertexGpu;
+  localDrawBatching_=config.localDrawBatching;
   allowStreamedFixedVertexGpu_ = config.allowStreamedFixedVertexGpu;
   allowDynamicTexMatrixGpu_ = config.allowDynamicTexMatrixGpu;
   allowBumpFixedVertexGpu_ = config.allowBumpFixedVertexGpu;
@@ -88,6 +89,7 @@ uint32_t DrawSink::runtime_feature_flags() const noexcept {
   if(allowBumpFixedVertexGpu_)flags|=RuntimeBumpFixedVertex;
   if(allowPrimitiveExpansionGpu_)flags|=RuntimePrimitiveExpansion;
   if(staticGeometryStableOnly_)flags|=RuntimeStaticStableOnly;
+  if(localDrawBatching_)flags|=RuntimeLocalDrawBatching;
   return flags;
 }
 
@@ -95,6 +97,7 @@ uint32_t DrawSink::runtime_feature_capabilities() const noexcept {
   uint32_t flags=RuntimeStreamedFixedVertex|RuntimeLitFixedVertex|RuntimeDynamicTexMatrix|
       RuntimeBumpFixedVertex|RuntimePrimitiveExpansion|RuntimeStaticStableOnly;
   if(staticGeometry_)flags|=RuntimeStaticGeometry;
+  if(renderer_&&renderer_->uses_local_stream_indices())flags|=RuntimeLocalDrawBatching;
   return flags;
 }
 
@@ -107,6 +110,7 @@ void DrawSink::set_runtime_feature_flags(uint32_t flags) noexcept {
   allowBumpFixedVertexGpu_=(flags&RuntimeBumpFixedVertex)!=0;
   allowPrimitiveExpansionGpu_=(flags&RuntimePrimitiveExpansion)!=0;
   staticGeometryStableOnly_=(flags&RuntimeStaticStableOnly)!=0;
+  localDrawBatching_=(flags&RuntimeLocalDrawBatching)!=0;
   translatedVertexStateValid_=false;
   translatedVertexStateLightweight_=false;
 #if defined(AURORA_VITA_UPSTREAM)
@@ -183,6 +187,7 @@ void DrawSink::flush() noexcept {
   // outside Renderer::draw and changes raw GL bindings. Invalidate only resource
   // bindings once per chunk; pipeline/fixed/viewport state stays hot across flushes.
   renderer_->invalidate_resource_bindings();
+  if(telemetry_)telemetry_->shared_state_copies(stream_.state_snapshot_count());
   { gfx::ScopedTelemetryPhase phase(telemetry_, gfx::TelemetryPhase::Submit); renderer_->execute(stream_); }
   if(renderer_->failed()) {
     if(telemetry_) telemetry_->unsupported();
@@ -232,7 +237,6 @@ uint64_t fixed_vertex_program_signature(const gfx::PipelineDesc& pipeline) noexc
   }
   return h;
 }
-#if defined(__vita__)
 const char* prepare_draw_error_name(gfx::PrepareDrawError error) noexcept {
   switch(error){
   case gfx::PrepareDrawError::None:return "none";
@@ -246,7 +250,6 @@ const char* prepare_draw_error_name(gfx::PrepareDrawError error) noexcept {
   }
   return "unknown draw failure";
 }
-#endif
 #if defined(__vita__)
 struct ClipPoint { float x=0.f,y=0.f,z=0.f,w=1.f; };
 
@@ -519,6 +522,11 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     coverage_->observe(integration::FeatureClass::Primitive, primitive, "GX primitive");
     coverage_->observe(integration::FeatureClass::VertexFormat, fmt, "GX vertex format");
   }
+  const auto& revisions=aurora::gx::g_gxState.stateRevisions;
+  // Direct legacy stateDirty writes have no published domain: retain the full
+  // rebuild whenever no tracked write explains the dirty flag.
+  const bool untrackedDirty=aurora::gx::g_gxState.stateDirty && revisions.serial==consumedStateSerial_;
+  const bool broadDirty=untrackedDirty || gfx::gxm_disabled(gfx::GxmDisableStateDomains);
   const uint32_t stateGeneration = aurora::gx::g_gxState.pipelineStateGeneration;
   const uint32_t layoutGeneration = aurora::gx::g_gxState.layoutStateGeneration;
   const uint32_t vertexProgramGeneration = aurora::gx::g_gxState.vertexProgramStateGeneration;
@@ -544,6 +552,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
     refresh_current_vertex_program_state(translatedPipeline_);
     translatedPipelineKey_ = translatedBaseKey_;
+    cpuRecipe_=gfx::build_draw_recipe(translatedPipeline_);
+    gpuRecipeValid_=false;
     // Streamed fixed-vertex draws need their own translated GPU pipeline too.
     // Leaving this stale meant dynamic draws could inherit layout/indexed-PN
     // flags from an unrelated earlier static draw and eventually poison the
@@ -608,7 +618,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto white = white_texture();
   uint8_t nativeWrapMask = 0;
   const bool reuseResolvedTextures=resolvedTextureBindingsValid_&&
-                                   !aurora::gx::g_gxState.stateDirty&&resolvedTextureMask_==textureMask&&
+                                   resolvedTextureStateIdentity_==aurora::gx::g_gxState.stateIdentity&&
+                                   !broadDirty&&resolvedTextureRevision_==revisions.textures&&resolvedTextureMask_==textureMask&&
                                    resolvedVolatileTextureMask_==0;
   if(reuseResolvedTextures){
     bindings=resolvedTextureBindings_;
@@ -678,6 +689,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
     (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
   resolvedTextureBindingsValid_=true;
+  resolvedTextureRevision_=revisions.textures;
+  resolvedTextureStateIdentity_=aurora::gx::g_gxState.stateIdentity;
   }
   if (result.fallbackTextureMask != 0) {
     uint32_t fallbackCount = 0;
@@ -751,8 +764,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto expansion = translate_primitive_expansion(translate_line_mode(primitive));
   const bool pointPrimitive=source==gfx::SourcePrimitive::Points;
   const bool linePrimitive=source==gfx::SourcePrimitive::Lines||source==gfx::SourcePrimitive::LineStrip;
-  const auto requirements=gfx::vertex_pipeline_requirements(pipeline);
-  const uint8_t generatedTexgens=gfx::pipeline_texgen_compute_mask(pipeline);
+  const auto requirements=cpuRecipe_.requirements;
+  const uint8_t generatedTexgens=requirements.texgenMask;
   uint8_t dynamicTexMtxMask=0;
   for(unsigned i=0;i<pipeline.texgenCount&&i<gfx::MaxTextures;++i)
     if((generatedTexgens&(1u<<i))&&pipeline.texgens[i].matrixFromVertex)
@@ -766,7 +779,14 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         expansion.pointTexcoordMask:(linePrimitive?expansion.lineTexcoordMask:0);
     if(translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite)
       translatedGpuPipeline_.primitive=gfx::Primitive::Triangles;
-    translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
+    const uint32_t recipeFlags=uint32_t(translatedGpuPipeline_.fixedVertexTexMtxMask)|
+        (uint32_t(translatedGpuPipeline_.fixedPrimitiveTexcoordMask)<<8)|
+        (uint32_t(translatedGpuPipeline_.fixedPointSprite)<<16)|(uint32_t(translatedGpuPipeline_.fixedLineSprite)<<17);
+    if(!gpuRecipeValid_||gpuRecipeFlags_!=recipeFlags){
+      translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
+      gpuRecipe_=gfx::build_draw_recipe(translatedGpuPipeline_);
+      gpuRecipeFlags_=recipeFlags;gpuRecipeValid_=true;
+    }
   }
   translatedVertexState_.currentPnMatrix=static_cast<uint8_t>(std::min<u32>(
       aurora::gx::g_gxState.currentPnMtx,translatedVertexState_.postexMatrices.size()-1));
@@ -790,21 +810,33 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // The GPU vertex path copies only the state its generated shader can consume.
   // Indexed-PN and lit draws include their position/normal palettes and lights;
   // unsupported bump/dynamic-tex-matrix cases remain on the CPU path.
-  if(!translatedVertexStateValid_||aurora::gx::g_gxState.stateDirty||
-     (translatedVertexStateLightweight_&&!fixedCandidate&&!fixedStreamCandidate)){
+  const bool rebuildVertex=!translatedVertexStateValid_ || !translatedCacheHit || broadDirty ||
+      translatedVertexRevision_!=revisions.vertex ||
+      (translatedVertexStateLightweight_&&!fixedCandidate&&!fixedStreamCandidate);
+  const bool rebuildFragment=!translatedVertexStateValid_ || !translatedCacheHit || broadDirty ||
+      translatedFragmentRevision_!=revisions.fragment;
+  if(rebuildVertex||rebuildFragment){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateVertex);
-    if (telemetry_) telemetry_->count_vertex_translation();
-    ++vertexStateVersion_;
-    if(fixedCandidate||fixedStreamCandidate) {
-      translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_);
-      translatedVertexStateLightweight_=true;
-    } else {
-      translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout);
-      translatedVertexStateLightweight_=false;
+    if(telemetry_){
+      if(rebuildVertex)telemetry_->count_vertex_translation();
+      if(rebuildFragment)telemetry_->count_fragment_translation();
     }
+    ++vertexStateVersion_;
+    if(rebuildVertex){
+      if(fixedCandidate||fixedStreamCandidate){
+        translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_,rebuildFragment);
+        translatedVertexStateLightweight_=true;
+      }else{
+        translate_vertex_state(translatedVertexState_,translatedUniforms_,pipeline,layout,rebuildFragment);
+        translatedVertexStateLightweight_=false;
+      }
+    }else translate_fragment_uniforms(translatedUniforms_,pipeline);
+    translatedVertexRevision_=revisions.vertex;
+    translatedFragmentRevision_=revisions.fragment;
     translatedVertexStateValid_=true;
   }
+  consumedStateSerial_=revisions.serial;
   const auto& vertexState=translatedVertexState_;
   auto& uniforms=translatedUniforms_;
   gfx::StaticGeometryCache::Entry* gpuGeometry=nullptr;
@@ -886,8 +918,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     translatedVertexStateLightweight_=false;
     ++vertexStateVersion_;
   }
-  const auto gpuLayout=streamFixed?gfx::effective_gpu_vertex_layout(translatedGpuPipeline_):
-      gfx::gpu_vertex_layout(gfx::pipeline_texcoord_mask(pipeline),gfx::pipeline_raster_color_mask(pipeline));
+  const auto& drawRecipe=streamFixed?gpuRecipe_:cpuRecipe_;
+  const auto& gpuLayout=drawRecipe.gpuLayout;
   const auto& streamedPipeline=streamFixed?translatedGpuPipeline_:pipeline;
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
   const bool useStreamed=!gpuGeometry&&!(telemetry_&&telemetry_->split_vertex_phases())&&
@@ -954,10 +986,10 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   gfx::StreamedDraw streamed{};
   if(useStreamed) {
     (void)gfx::prepare_streamed_draw_into(streamed,*arena_,rawVertices,rawBytes,vertexCount,
-        source,rawIndices,indexCount,layout,streamedPipeline,vertexState,&uniforms,telemetry_);
+        source,rawIndices,indexCount,layout,streamedPipeline,vertexState,&uniforms,telemetry_,&drawRecipe);
   } else if(!gpuGeometry) {
     (void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
-                                pipeline,vertexState,&uniforms,expansion,telemetry_,exactTriangleDedup);
+                                pipeline,vertexState,&uniforms,expansion,telemetry_,exactTriangleDedup,&cpuRecipe_);
   }
   if (!useStreamed && prepared.ok() && rawIndices && indexCount) {
     prepared.indices.assign(rawIndices, rawIndices + indexCount);
@@ -1057,16 +1089,25 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if(gpuGeometry){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::CommandBuild);
     gfx::FixedVertexUniforms& shared=buildFixedUniforms();
-    gfx::DrawPacket& packet=stream_.emplace_draw();
+    gfx::DrawPacket& packet=stream_.emplace_geometry_draw();
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
-    packet.textures=bindings;packet.uniforms=uniforms;packet.uniformRevision=vertexStateVersion_;
+    packet.firstVertex=0;packet.instanceCount=1;packet.absoluteVertexIndices=false;
+    stream_.share_draw_state(packet,uniforms,bindings,vertexStateVersion_);
     packet.viewport=translate_viewport();packet.scissor=translate_scissor();
     packet.fixedVertexUniforms=&shared;
     enqueued=true;
     queuedPipelineValid_=false;
   }else if(useStreamed) {
+    const auto queueStreamed=[&]() noexcept {
+      return gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
+          translate_viewport(),translate_scissor(),bindings,&error,vertexStateVersion_,
+          streamFixed?&buildFixedUniforms():nullptr,
+          localDrawBatching_&&renderer_->uses_local_stream_indices()&&!gfx::gxm_disabled(gfx::GxmDisableLocalBatch)?arena_.get():nullptr,telemetry_);
+    };
 #if defined(AURORA_VITA_RENDERER_GXM) && AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT
+    if(localDrawBatching_&&!gfx::gxm_disabled(gfx::GxmDisableLocalBatch))enqueued=queueStreamed();
+    else {
     // The native GXM backend is synchronous on the GX thread.  For the common
     // streamed path the CommandStream only stores a DrawPacket so execute()
     // can immediately recover it and call Renderer::draw().  Keep ordering by
@@ -1109,10 +1150,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         }
       }
     }
+    }
 #else
-    enqueued=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
-                         translate_viewport(),translate_scissor(),bindings,&error,vertexStateVersion_,
-                         streamFixed?&buildFixedUniforms():nullptr);
+    enqueued=queueStreamed();
 #endif
   }else enqueued=gfx::enqueue_draw(*renderer_, *arena_, stream_, prepared, pipeline, uniforms,
                          translate_viewport(), translate_scissor(), bindings, &error, telemetry_,
