@@ -342,7 +342,7 @@ VertexDecodeResult decode_vertices(const uint8_t* stream, size_t streamSize, uin
 
   r.vertices.resize(vertexCount);
   DecodeContext ctx{stream, streamSize, &layout, r.vertices.data()};
-  if (!cpu_parallel_for(vertexCount, decode_range, &ctx)) {
+  if (!cpu_parallel_for_vertex(vertexCount, decode_range, &ctx)) {
     size_t bad = std::numeric_limits<size_t>::max();
     for (const size_t candidate : ctx.badVertex) bad = std::min(bad, candidate);
     r.badVertex = bad == std::numeric_limits<size_t>::max() ? 0 : bad;

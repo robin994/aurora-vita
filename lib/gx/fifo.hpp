@@ -20,6 +20,7 @@ extern uint8_t* sBufferData;
 extern uint32_t sBufferSize;
 extern uint32_t sBufferCapacity;
 extern bool sInDisplayList;
+extern bool sBpWriteCacheEnabled;
 extern uint8_t* sDlBuffer;
 extern uint32_t sDlSize;
 extern uint32_t sDlWritePos;
@@ -29,6 +30,12 @@ extern uint32_t sStableSourceSpanCount;
 
 void init();
 void drain();
+
+// Opt-in suppression of identical side-effect-free material BP writes. Raw
+// command producers must invalidate this cache before bypassing write_bp().
+void set_bp_write_cache_enabled(bool enabled);
+void invalidate_bp_write_cache();
+bool bp_write_unchanged(uint32_t value);
 
 #if defined(MKW_TARGET_VITA) || defined(TARGET_VITA)
 using VitaWorkerTask = void (*)(void*);
@@ -53,8 +60,8 @@ uint64_t run_async(VitaWorkerTask task, const void* context, size_t contextBytes
 // the GX draw-done token without the CPU blocking at the point it is set.
 uint64_t submit_marker();
 void wait_marker(uint64_t serial);
-// Cached-RAM shadows of CDRAM display lists (default on). They rely on the
-// guest publishing writes (DCFlush/DCStore/DCInvalidate, DVD reads).
+// Cached-RAM shadows of CDRAM display lists (default on). Diagnostic exact-byte
+// validation guards reuse and reports writes missed by the revision contract.
 void set_display_list_shadow_enabled(bool enabled);
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian);
 // Cumulative wall time spent in top-level (non-nested) command processing.
@@ -110,6 +117,12 @@ inline void write_u16(const uint16_t val) {
 inline void write_u32(const uint32_t val) {
   const auto out = bswap(val);
   write_data(&out, sizeof(out));
+}
+
+inline void write_bp(uint32_t value) {
+  if (detail::sBpWriteCacheEnabled && !detail::sInDisplayList && bp_write_unchanged(value)) return;
+  write_u8(0x61);
+  write_u32(value);
 }
 
 inline void write_u64(const uint64_t val) {

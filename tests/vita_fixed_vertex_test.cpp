@@ -4,6 +4,7 @@
 #include "../platforms/vita/gfx/vita_pipeline_key.hpp"
 #include "../platforms/vita/gfx/vita_program_binary_cache.hpp"
 #include "../platforms/vita/gxm/gxm_shader_gen.hpp"
+#include "gx/display_list_shadow.hpp"
 #include <gtest/gtest.h>
 #include <array>
 #include <cmath>
@@ -189,6 +190,32 @@ TEST(VitaFixedVertex, StableCacheInvalidatesAfterTrackedSourceWrite) {
   EXPECT_EQ(cache.hits(),1u);
 }
 
+TEST(VitaFixedVertex, ShadowDetectsUntrackedIndicesBeforeReusingStaticGeometry) {
+  IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache geometry(renderer,1024*1024);
+  aurora::gx::fifo::DisplayListShadowCache shadows;
+  note_memory_write(f.raw.data(),f.raw.size());
+  note_memory_write(f.positions.data(),sizeof(f.positions));
+  const auto* raw=shadows.get(f.raw.data(),f.raw.size());
+  ASSERT_NE(raw,nullptr);
+  auto* first=geometry.get(raw,f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                           f.layout,f.pipeline,f.state,nullptr,f.raw.data());
+  ASSERT_NE(first,nullptr);
+  raw=shadows.get(f.raw.data(),f.raw.size());
+  ASSERT_NE(geometry.get(raw,f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                         f.layout,f.pipeline,f.state,nullptr,f.raw.data()),nullptr);
+  EXPECT_EQ(geometry.hits(),1u);
+
+  f.raw[0]=2; // Same guest identity, missing DCFlush, different geometry.
+  raw=shadows.get(f.raw.data(),f.raw.size());
+  ASSERT_NE(raw,nullptr);
+  EXPECT_EQ(raw[0],2);
+  EXPECT_EQ(shadows.untracked_writes(),1u);
+  EXPECT_EQ(geometry.get(raw,f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                         f.layout,f.pipeline,f.state,nullptr,f.raw.data()),nullptr);
+  EXPECT_EQ(geometry.hits(),1u);
+}
+
 TEST(VitaFixedVertex, PersistentCacheAcceptsExplicitTriangleIndices) {
   IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
   StaticGeometryCache cache(renderer,1024*1024);
@@ -303,6 +330,7 @@ TEST(VitaFixedVertex, ChangedArrayDataCannotReuseAnInFlightImmutableBuffer) {
   f.positions[4]-=1.f;
   EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,f.layout,f.pipeline,f.state,nullptr),nullptr);
   EXPECT_EQ(cache.hits(),0u);
+  EXPECT_EQ(cache.lookup_fallbacks(),2u);
 }
 
 TEST(VitaFixedVertex, SnapshotBoundsAndMemoryBudgetAreEnforced) {
@@ -318,6 +346,21 @@ TEST(VitaFixedVertex, SnapshotBoundsAndMemoryBudgetAreEnforced) {
   Renderer renderer;ASSERT_TRUE(renderer.initialize());StaticGeometryCache cache(renderer,1);
   EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,f.layout,f.pipeline,f.state,nullptr),nullptr);
   EXPECT_EQ(cache.bytes(),0u);EXPECT_EQ(cache.size(),0u);
+  EXPECT_EQ(cache.lookup_fallbacks(),1u);
+}
+
+TEST(VitaFixedVertex, GeometryFallbackCounterExcludesSuccessfulHitsAndResetsWithCache) {
+  IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache cache(renderer,1024*1024);
+  ASSERT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  ASSERT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  EXPECT_EQ(cache.hits(),1u);EXPECT_EQ(cache.lookup_fallbacks(),0u);
+  EXPECT_EQ(cache.get(nullptr,0,0,SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  EXPECT_EQ(cache.lookup_fallbacks(),1u);
+  cache.clear();EXPECT_EQ(cache.lookup_fallbacks(),0u);
 }
 
 TEST(VitaFixedVertex, RetiredGeometryStaysBudgetedUntilSynchronizedReclaim) {
@@ -360,6 +403,218 @@ TEST(VitaFixedVertex, RetiredGeometryStaysBudgetedUntilSynchronizedReclaim) {
 TEST(VitaFixedVertex, PipelineKeySeparatesCpuAndGpuVertexConventions) {
   PipelineDesc p{};const auto cpu=pipeline_key(p);p.fixedVertexOnGpu=true;
   EXPECT_NE(cpu,pipeline_key(p));
+}
+
+struct GeometryDisableMaskScope {
+  uint32_t previous=gxm_disable_mask();
+  explicit GeometryDisableMaskScope(uint32_t mask) { gxm_disable_mask()=mask; }
+  ~GeometryDisableMaskScope() { gxm_disable_mask()=previous; }
+};
+
+TEST(VitaGeometryPreflight, RetirementSkipsRedundantDedupAndRetriesAfterReclaim) {
+  GeometryDisableMaskScope mask(0);
+  IndexedFixture probeFixture;Renderer probeRenderer;ASSERT_TRUE(probeRenderer.initialize());
+  StaticGeometryCache probe(probeRenderer,1024*1024);
+  ASSERT_NE(probe.get(probeFixture.raw.data(),probeFixture.raw.size(),probeFixture.raw.size(),
+                      SourcePrimitive::Triangles,probeFixture.layout,probeFixture.pipeline,
+                      probeFixture.state,nullptr),nullptr);
+  const size_t budget=probe.bytes()+1u;
+  for(const bool enabled:{false,true}) {
+    SCOPED_TRACE(enabled);
+    IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
+    StaticGeometryCache cache(renderer,budget,enabled);
+    cache.begin_frame(1);
+    ASSERT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                        f.layout,f.pipeline,f.state,nullptr),nullptr);
+    cache.begin_frame(2);
+    for(auto& index:f.raw)index=static_cast<uint8_t>((index+1u)%3u);
+    EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                        f.layout,f.pipeline,f.state,nullptr),nullptr);
+    ASSERT_GT(cache.retired_bytes(),0u);
+    const auto sourceBefore=f.raw;
+    const size_t retiredBefore=cache.retired_bytes();
+    const uint64_t evictionsBefore=cache.evictions();
+    Telemetry telemetry;
+    EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                        f.layout,f.pipeline,f.state,&telemetry),nullptr);
+    EXPECT_EQ(telemetry.frame().counters.vertexDedupInput,enabled?0u:f.raw.size());
+    EXPECT_EQ(cache.budget_preflight_rejects(),enabled?1u:0u);
+    EXPECT_EQ(cache.retired_bytes(),retiredBefore);
+    EXPECT_EQ(cache.evictions(),evictionsBefore);
+    EXPECT_EQ(f.raw,sourceBefore);
+    EXPECT_EQ(cache.lookup_fallbacks(),2u);
+    cache.begin_frame(2+StaticGeometryCache::RetireFrames);
+    EXPECT_EQ(cache.retired_bytes(),0u);
+    auto* replacement=cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                                f.layout,f.pipeline,f.state,nullptr);
+    ASSERT_NE(replacement,nullptr);
+    EXPECT_EQ(replacement->vertexCount,3u);
+    EXPECT_EQ(replacement->indexCount,f.raw.size());
+    EXPECT_LE(cache.bytes(),budget);
+    cache.clear();
+    EXPECT_EQ(cache.budget_preflight_rejects(),0u);
+  }
+}
+
+TEST(VitaGeometryPreflight, DeduplicatedGeometryStillFitsBelowWorstCaseVertexSize) {
+  GeometryDisableMaskScope mask(GxmDisableGeometryEviction);
+  IndexedFixture f;Renderer probeRenderer;ASSERT_TRUE(probeRenderer.initialize());
+  StaticGeometryCache probe(probeRenderer,1024*1024);
+  auto* expected=probe.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                           f.layout,f.pipeline,f.state,nullptr);
+  ASSERT_NE(expected,nullptr);
+  const size_t budget=probe.bytes();
+  ASSERT_LT(budget,size_t(f.raw.size())*16u+f.raw.size()*sizeof(uint16_t));
+  Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache cache(renderer,budget,true);
+  auto* actual=cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                         f.layout,f.pipeline,f.state,nullptr);
+  ASSERT_NE(actual,nullptr);
+  EXPECT_EQ(actual->vertexCount,expected->vertexCount);
+  EXPECT_EQ(actual->indexCount,expected->indexCount);
+  EXPECT_EQ(cache.bytes(),budget);
+  EXPECT_EQ(cache.budget_preflight_rejects(),0u);
+  EXPECT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  EXPECT_EQ(cache.hits(),1u);
+}
+
+TEST(VitaGeometryPreflight, PackedLowerBoundCoversTopologyAndExplicitIndices) {
+  GeometryDisableMaskScope mask(GxmDisableGeometryEviction);
+  struct Case { SourcePrimitive primitive; uint32_t count; size_t minimumGpuBytes; bool explicitIndices; };
+  const std::array<Case,9> cases{{
+    {SourcePrimitive::Triangles,60,136,false},
+    {SourcePrimitive::Triangles,3,54,false},
+    {SourcePrimitive::Quads,60,1140,false},
+    {SourcePrimitive::TriangleFan,60,1308,false},
+    {SourcePrimitive::TriangleStrip,60,1308,false},
+    {SourcePrimitive::Points,60,4560,false},
+    {SourcePrimitive::Lines,60,3720,false},
+    {SourcePrimitive::LineStrip,60,7316,false},
+    {SourcePrimitive::Triangles,60,966,true},
+  }};
+  const std::array<uint16_t,3> indices{{2,1,0}};
+  for(const auto& test:cases) {
+    SCOPED_TRACE(static_cast<unsigned>(test.primitive));
+    IndexedFixture f;
+    f.pipeline.fixedPointSprite=test.primitive==SourcePrimitive::Points;
+    f.pipeline.fixedLineSprite=test.primitive==SourcePrimitive::Lines||test.primitive==SourcePrimitive::LineStrip;
+    Renderer renderer;ASSERT_TRUE(renderer.initialize());
+    StaticGeometryCache cache(renderer,test.minimumGpuBytes-1u,true);
+    EXPECT_EQ(cache.get(f.raw.data(),test.count,test.count,test.primitive,f.layout,f.pipeline,
+                        f.state,nullptr,nullptr,test.explicitIndices?indices.data():nullptr,
+                        test.explicitIndices?indices.size():0),nullptr);
+    EXPECT_EQ(cache.budget_preflight_rejects(),1u);
+    EXPECT_EQ(cache.bytes(),0u);
+    EXPECT_EQ(cache.size(),0u);
+  }
+}
+
+TEST(VitaGeometryPreflight, AvailableEvictionRetainsOriginalAdmissionAttempt) {
+  GeometryDisableMaskScope mask(0);
+  IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache probe(renderer,1024*1024);
+  ASSERT_NE(probe.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  StaticGeometryCache cache(renderer,probe.bytes()+1u,true);
+  cache.begin_frame(1);
+  ASSERT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  cache.begin_frame(2);
+  for(auto& index:f.raw)index=static_cast<uint8_t>((index+1u)%3u);
+  Telemetry telemetry;
+  EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,&telemetry),nullptr);
+  EXPECT_EQ(telemetry.frame().counters.vertexDedupInput,f.raw.size());
+  EXPECT_EQ(cache.budget_preflight_rejects(),0u);
+  EXPECT_EQ(cache.evictions(),1u);
+  EXPECT_GT(cache.retired_bytes(),0u);
+}
+
+TEST(VitaGeometryPreflight, LiveHitsRemainAvailableWhileRetirementBlocksMisses) {
+  GeometryDisableMaskScope mask(0);
+  IndexedFixture f;Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache probe(renderer,1024*1024);
+  ASSERT_NE(probe.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  StaticGeometryCache cache(renderer,probe.bytes()*2u+1u,true);
+  cache.begin_frame(1);
+  ASSERT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  for(auto& index:f.raw)index=static_cast<uint8_t>((index+1u)%3u);
+  const auto liveSource=f.raw;
+  auto* live=cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                       f.layout,f.pipeline,f.state,nullptr);
+  ASSERT_NE(live,nullptr);
+  const auto liveBuffer=live->vertices.buffer;
+  cache.begin_frame(2);
+  ASSERT_NE(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  for(auto& index:f.raw)index=static_cast<uint8_t>((index+1u)%3u);
+  const auto rejectedSource=f.raw;
+  EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr),nullptr);
+  ASSERT_GT(cache.retired_bytes(),0u);
+  f.raw=liveSource;
+  auto* hit=cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,nullptr);
+  ASSERT_NE(hit,nullptr);
+  EXPECT_EQ(hit->vertices.buffer,liveBuffer);
+  EXPECT_EQ(cache.budget_preflight_rejects(),0u);
+  f.raw=rejectedSource;
+  Telemetry telemetry;
+  EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                      f.layout,f.pipeline,f.state,&telemetry),nullptr);
+  EXPECT_EQ(telemetry.frame().counters.vertexDedupInput,0u);
+  EXPECT_EQ(cache.budget_preflight_rejects(),1u);
+}
+
+TEST(VitaFixedVertex, PipelineKeySeparatesFixedVertexLightMasks) {
+  PipelineDesc p{};p.fixedVertexOnGpu=true;p.colorChannels[0].lightingEnabled=true;
+  p.colorChannels[0].lightMask=0x01;const auto light0=pipeline_key(p);
+  p.colorChannels[0].lightMask=0x02;
+  EXPECT_NE(light0,pipeline_key(p));
+}
+
+TEST(VitaFixedVertex, CpuPipelineKeyCanonicalizesVertexProgramState) {
+  PipelineDesc p{};
+  p.texgenCount=1;
+  p.texgens[0].type=TexGenType::Matrix2x4;
+  const auto base=pipeline_key(p);
+
+  p.texgens[0].source=TexGenSource::Normal;
+  p.texgens[0].matrix=3;
+  p.texgens[0].postMatrix=5;
+  p.texgens[0].embossSource=1;
+  p.texgens[0].normalize=true;
+  p.texgens[0].matrixFromVertex=true;
+  p.colorChannels[0].materialSource=ColorSource::Vertex;
+  p.colorChannels[0].ambientSource=ColorSource::Vertex;
+  p.colorChannels[0].diffuse=DiffuseFn::Clamp;
+  p.colorChannels[0].attenuation=AttenuationFn::Spot;
+  p.colorChannels[0].lightingEnabled=true;
+  p.colorChannels[0].lightMask=0x5a;
+  EXPECT_EQ(base,pipeline_key(p));
+
+  p.texgens[0].type=TexGenType::Matrix3x4;
+  EXPECT_NE(base,pipeline_key(p));
+}
+
+TEST(VitaFixedVertex, FixedPipelineKeyKeepsVertexProgramStateExact) {
+  PipelineDesc p{};
+  p.fixedVertexOnGpu=true;
+  p.texgenCount=1;
+  p.texgens[0].type=TexGenType::Matrix2x4;
+  const auto base=pipeline_key(p);
+
+  p.texgens[0].source=TexGenSource::Normal;
+  EXPECT_NE(base,pipeline_key(p));
+  const auto sourceKey=pipeline_key(p);
+  p.texgens[0].matrix=3;
+  EXPECT_NE(sourceKey,pipeline_key(p));
+  const auto matrixKey=pipeline_key(p);
+  p.colorChannels[0].lightingEnabled=true;
+  EXPECT_NE(matrixKey,pipeline_key(p));
 }
 
 TEST(VitaProgramCache, KeysCoverBothShaderStagesAndTheirBoundary) {

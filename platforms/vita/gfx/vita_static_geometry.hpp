@@ -46,7 +46,8 @@ public:
   };
   static constexpr uint64_t RetireFrames=4;
 
-  explicit StaticGeometryCache(Renderer& renderer,size_t budget) : renderer_(renderer),budget_(budget) {}
+  explicit StaticGeometryCache(Renderer& renderer,size_t budget,bool budgetPreflight=false)
+      : renderer_(renderer),budget_(budget),budgetPreflight_(budgetPreflight) {}
   ~StaticGeometryCache() { clear(); }
   StaticGeometryCache(const StaticGeometryCache&)=delete;
   StaticGeometryCache& operator=(const StaticGeometryCache&)=delete;
@@ -56,8 +57,11 @@ public:
   size_t size() const noexcept { return entries_.size(); }
   uint64_t hits() const noexcept { return hits_; }
   uint64_t misses() const noexcept { return misses_; }
+  // Counts every rejected get(), including existing volatile entries. Misses
+  // above count absent keys and can overlap this counter; do not sum them.
   uint64_t lookup_fallbacks() const noexcept { return lookupFallbacks_; }
   uint64_t evictions() const noexcept { return evictions_; }
+  uint64_t budget_preflight_rejects() const noexcept { return budgetPreflightRejects_; }
 
   // Called once per frame before any lookup. Retired buffers are destroyed in
   // one synchronized batch: do not rely on per-buffer inFlight bookkeeping for
@@ -86,9 +90,9 @@ public:
              const uint8_t* stableSource=nullptr,
              const uint16_t* sourceIndices=nullptr,uint32_t sourceIndexCount=0) noexcept {
     if(!raw||!count||!layout.streamStride||layout.count>layout.attributes.size()||
-       count>bytes/layout.streamStride||!pipeline.fixedVertexOnGpu)return nullptr;
+       count>bytes/layout.streamStride||!pipeline.fixedVertexOnGpu)return lookup_fallback();
     if(sourceIndexCount&&(!sourceIndices||primitive!=SourcePrimitive::Triangles||
-                         pipeline.fixedPointSprite||pipeline.fixedLineSprite))return nullptr;
+                         pipeline.fixedPointSprite||pipeline.fixedLineSprite))return lookup_fallback();
     bytes=static_cast<size_t>(count)*layout.streamStride;
     const VertexLayout gpuLayout=fixed_vertex_gpu_layout(pipeline);
     const VertexSemanticMask used=fixed_vertex_gpu_inputs(pipeline);
@@ -102,23 +106,23 @@ public:
     if(it!=entries_.end()) {
       ScopedTelemetryPhase phase(detailed,TelemetryPhase::GeometryValidate);
       auto& e=*it->second;
-      if(e.volatileSource)return nullptr;
+      if(e.volatileSource)return lookup_fallback();
       // Hashes select a candidate only. Every byte that could influence a
       // decoded attribute is checked before an immutable GPU buffer is reused.
-      if(!same_layout(layout,e.sourceLayout)||!same_gpu_layout(gpuLayout,e.gpuLayout))return nullptr;
+      if(!same_layout(layout,e.sourceLayout)||!same_gpu_layout(gpuLayout,e.gpuLayout))return lookup_fallback();
       if(e.sourceIndices.size()!=sourceIndexCount||
          (sourceIndexCount&&!byte_spans_equal(sourceIndices,e.sourceIndices.data(),
-                                              size_t(sourceIndexCount)*sizeof(uint16_t))))return nullptr;
+                                              size_t(sourceIndexCount)*sizeof(uint16_t))))return lookup_fallback();
       if(stableSource) {
         if(e.stableSource!=stableSource||e.stableSourceBytes!=bytes) {
           e.volatileSource=true;
-          return nullptr;
+          return lookup_fallback();
         }
         const uint64_t epoch=memory_write_epoch();
         if(epoch!=e.validationEpoch) {
           if(memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
             e.volatileSource=true;
-            return nullptr;
+            return lookup_fallback();
           }
           for(const auto& s:e.snapshots) {
             const bool changed=s.revisionTracked?
@@ -126,20 +130,20 @@ public:
               !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
             if(changed) {
               e.volatileSource=true;
-              return nullptr;
+              return lookup_fallback();
             }
           }
           e.validationEpoch=epoch;
         }
       } else {
-        if(e.raw.size()!=bytes||!byte_spans_equal(raw,e.raw.data(),bytes))return nullptr;
+        if(e.raw.size()!=bytes||!byte_spans_equal(raw,e.raw.data(),bytes))return lookup_fallback();
         for(const auto& s:e.snapshots) {
           const bool changed=s.revisionTracked?
             memory_range_revision(s.source,s.size)!=s.revision:
             !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
           if(changed) {
             e.volatileSource=true;
-            return nullptr;
+            return lookup_fallback();
           }
         }
       }
@@ -150,13 +154,36 @@ public:
     ++misses_;
     const bool evict=!gxm_disabled(GxmDisableGeometryEviction);
     if(evict&&retiredBytes_==0&&(entries_.size()>=1024||this->bytes()>=budget_))evict_for(budget_/8u);
-    if(entries_.size()>=1024||this->bytes()>=budget_)return nullptr;
+    if(entries_.size()>=1024||this->bytes()>=budget_)return lookup_fallback();
+    // Retired GPU storage cannot make room until begin_frame's idle barrier.
+    // Reject impossible admissions before scanning source arrays or decoding
+    // vertices. While eviction is available, preserve the existing exact-size
+    // admission/eviction path instead of changing which entries it retires.
+    if(budgetPreflight_&&(retiredBytes_!=0||!evict)) {
+      const auto footprintPrimitive=pipeline.fixedPointSprite?SourcePrimitive::Points:
+        (pipeline.fixedLineSprite&&primitive!=SourcePrimitive::Lines?SourcePrimitive::LineStrip:primitive);
+      const auto footprint=estimate_draw_footprint(footprintPrimitive,count,sourceIndexCount,
+                                                  gpuLayout.attributes[0].stride);
+      if(footprint.valid) {
+        // Triangle deduplication can shrink vertices to one record but never
+        // removes indices. A worst-case vertex estimate would reject meshes
+        // whose actual deduplicated representation still fits the budget.
+        const bool mayDeduplicate=!pipeline.fixedPointSprite&&!pipeline.fixedLineSprite&&
+          primitive==SourcePrimitive::Triangles&&sourceIndexCount==0&&count>=48u;
+        const uint64_t minimumVertexBytes=mayDeduplicate?gpuLayout.attributes[0].stride:footprint.vertexBytes;
+        const uint64_t minimumGpuBytes=minimumVertexBytes+footprint.indexBytes;
+        if(minimumGpuBytes>budget_-this->bytes()) {
+          ++budgetPreflightRejects_;
+          return lookup_fallback();
+        }
+      }
+    }
     auto entry=std::make_unique<Entry>();
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
     entry->stableSource=stableSource;entry->stableSourceBytes=stableSource?bytes:0;
     const uint64_t validationEpochBefore=stableSource?memory_write_epoch():0;
     entry->stableSourceRevision=stableSource?memory_range_revision(stableSource,bytes):0;
-    if(!snapshot_sources(raw,bytes,count,layout,used,entry->snapshots,stableSource!=nullptr))return nullptr;
+    if(!snapshot_sources(raw,bytes,count,layout,used,entry->snapshots,stableSource!=nullptr))return lookup_fallback();
     if(stableSource) {
       const uint64_t validationEpochAfter=memory_write_epoch();
       entry->validationEpoch=validationEpochBefore==validationEpochAfter?validationEpochAfter:0;
@@ -171,16 +198,16 @@ public:
     if(committedBefore>budget_||storedBytes>budget_-committedBefore) {
       if(evict&&retiredBytes_==0)evict_for(storedBytes);
       committedBefore=this->bytes();
-      if(committedBefore>budget_||storedBytes>budget_-committedBefore)return nullptr;
+      if(committedBefore>budget_||storedBytes>budget_-committedBefore)return lookup_fallback();
     }
     if(pipeline.fixedPointSprite||pipeline.fixedLineSprite) {
       scratch_.error=PrepareDrawError::None;
       scratch_.vertices.clear();scratch_.indices.clear();scratch_.scratch.clear();
       scratch_.scratch.resize(count);
       for(uint32_t i=0;i<count;++i)
-        if(!decode_vertex_into(raw,bytes,i,layout,scratch_.scratch[i],used))return nullptr;
+        if(!decode_vertex_into(raw,bytes,i,layout,scratch_.scratch[i],used))return lookup_fallback();
       if(pipeline.fixedPointSprite) {
-        if(count>std::numeric_limits<uint16_t>::max()/4u)return nullptr;
+        if(count>std::numeric_limits<uint16_t>::max()/4u)return lookup_fallback();
         scratch_.vertices.reserve(size_t(count)*4u);
         scratch_.indices.reserve(size_t(count)*6u);
         for(uint32_t i=0;i<count;++i){
@@ -196,7 +223,7 @@ public:
       } else {
         const uint32_t segments=primitive==SourcePrimitive::Lines?count/2u:(count>1u?count-1u:0u);
         if((primitive==SourcePrimitive::Lines&&(count&1u))||
-           segments>std::numeric_limits<uint16_t>::max()/4u)return nullptr;
+           segments>std::numeric_limits<uint16_t>::max()/4u)return lookup_fallback();
         scratch_.vertices.reserve(size_t(segments)*4u);
         scratch_.indices.reserve(size_t(segments)*6u);
         for(uint32_t s=0;s<segments;++s){
@@ -219,13 +246,13 @@ public:
       scratch_.primitive=Primitive::Triangles;scratch_.positionIsClipSpace=false;
     } else {
       if(!prepare_draw_into(scratch_,raw,bytes,count,primitive,layout,pipeline,state,nullptr,{},telemetry,
-                            sourceIndexCount==0))return nullptr;
+                            sourceIndexCount==0))return lookup_fallback();
       if(sourceIndexCount){
-        for(uint32_t i=0;i<sourceIndexCount;++i)if(sourceIndices[i]>=scratch_.vertices.size())return nullptr;
+        for(uint32_t i=0;i<sourceIndexCount;++i)if(sourceIndices[i]>=scratch_.vertices.size())return lookup_fallback();
         scratch_.indices.assign(sourceIndices,sourceIndices+sourceIndexCount);
       }
     }
-    if(scratch_.vertices.empty()||scratch_.indices.empty())return nullptr;
+    if(scratch_.vertices.empty()||scratch_.indices.empty())return lookup_fallback();
     const size_t stride=gpuLayout.attributes[0].stride;
     const size_t vertexBytes=scratch_.vertices.size()*stride;
     const size_t indexBytes=scratch_.indices.size()*sizeof(uint16_t);
@@ -236,15 +263,15 @@ public:
         evict_for(storedBytes+vertexBytes+indexBytes);
       committed=this->bytes();
       if(committed>budget_||storedBytes>budget_-committed||
-         vertexBytes+indexBytes>budget_-committed-storedBytes)return nullptr;
+         vertexBytes+indexBytes>budget_-committed-storedBytes)return lookup_fallback();
     }
     packed_.resize(vertexBytes);
     for(size_t i=0;i<scratch_.vertices.size();++i)
       pack_gpu_vertex_bytes(packed_.data()+i*stride,scratch_.vertices[i],gpuLayout);
     const Handle vb=renderer_.create_vertex_buffer(packed_.data(),vertexBytes,false);
-    if(!vb)return nullptr;
+    if(!vb)return lookup_fallback();
     const Handle ib=renderer_.create_index_buffer(scratch_.indices.data(),indexBytes,false);
-    if(!ib) {renderer_.buffers().destroy(vb);return nullptr;}
+    if(!ib) {renderer_.buffers().destroy(vb);return lookup_fallback();}
     entry->vertices={vb,0,static_cast<uint32_t>(vertexBytes)};
     entry->indices={ib,0,static_cast<uint32_t>(indexBytes)};
     entry->vertexCount=static_cast<uint32_t>(scratch_.vertices.size());
@@ -269,7 +296,7 @@ public:
       renderer_.buffers().destroy(pair.second->vertices.buffer);
       renderer_.buffers().destroy(pair.second->indices.buffer);
     }
-    entries_.clear();bytes_=retiredBytes_=0;hits_=misses_=lookupFallbacks_=0;
+    entries_.clear();bytes_=retiredBytes_=0;hits_=misses_=lookupFallbacks_=budgetPreflightRejects_=0;
   }
 
   static bool same_layout(const VertexDecodeLayout& a,const VertexDecodeLayout& b) noexcept {
@@ -324,6 +351,11 @@ public:
   }
 
 private:
+  Entry* lookup_fallback() noexcept {
+    ++lookupFallbacks_;
+    return nullptr;
+  }
+
   static size_t component_bytes(const VertexDecodeAttribute& a) noexcept {
     if(a.components<1||a.components>4)return 0;
     switch(a.component) {
@@ -390,6 +422,8 @@ private:
   }
   Renderer& renderer_;
   size_t budget_=0,bytes_=0,retiredBytes_=0;
+  bool budgetPreflight_=false;
+  uint64_t budgetPreflightRejects_=0;
   uint64_t hits_=0,misses_=0,lookupFallbacks_=0;
   FlatHashMap<uint64_t,std::unique_ptr<Entry>> entries_{};
   struct Retired {

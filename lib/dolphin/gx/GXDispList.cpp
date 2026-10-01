@@ -64,6 +64,13 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
     return;
   }
 
+#if defined(MKW_TARGET_VITA)
+  // Strikers' compiled model lists are normally one draw plus zero padding.
+  // Submit those current bytes directly; unlike the old CDRAM shadow this never
+  // reuses stale list contents. Complex/nested lists fall through unchanged.
+  if (aurora::gx::fifo::submit_simple_display_list(static_cast<const u8*>(data), nbytes)) return;
+#endif
+
   // Keep state writes and the display-list draw in one FIFO stream. On Vita the
   // game's permanent display lists live in CDRAM, which is a poor CPU decode
   // source. The Vita FIFO batches several stable spans per consumer job instead
@@ -75,6 +82,7 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
 }
 
 void GXCallDisplayListLE(const void* data, u32 nbytes) {
+  aurora::gx::fifo::invalidate_bp_write_cache();
   // Flush any pending dirty state before calling
   if (__gx->dirtyState != 0) {
     __GXSetDirtyState();

@@ -6,11 +6,11 @@
 #include "../gfx/vita_telemetry.hpp"
 #include "../gfx/vita_memory_budget.hpp"
 #include "../gfx/vita_static_geometry.hpp"
+#include "../gfx/vita_fixed_uniform_pool.hpp"
 #include "../integration/vita_feature_coverage.hpp"
 #include "../integration/vita_frame_trace.hpp"
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include "../gfx/vita_hash_map.hpp"
 
@@ -51,6 +51,9 @@ struct DrawSinkConfig {
   bool verboseGeometryDiagnostics = false;
   bool strictUnsupported = false;
   size_t staticGeometryBudget = 0; // Zero keeps the established CPU vertex path.
+  bool staticGeometryBudgetPreflight = false;
+  // Zero uses the original deque; retained CPU snapshots are capped at 1 MiB.
+  size_t fixedUniformPoolBytes = 0;
   uint32_t staticGeometryMinVertices = 48;
   // Restrict the persistent fixed-vertex cache to sources whose lifetime is
   // explicitly tracked by the GX display-list path. Dynamic GXBegin/GXEnd
@@ -85,7 +88,7 @@ public:
   void shutdown() noexcept;
   void begin_frame(uint64_t frame) noexcept;
   void flush() noexcept;
-  void reset_commands() noexcept { stream_.reset(); fixedVertexUniforms_.clear(); lastFixedUniforms_ = nullptr; reset_pipeline_run_cache(); }
+  void reset_commands() noexcept { stream_.reset(); fixedVertexUniforms_.reset(); lastFixedUniforms_ = nullptr; reset_pipeline_run_cache(); }
   void invalidate_texture_resolve_cache() noexcept {
 #if defined(AURORA_VITA_UPSTREAM)
     resolvedTextureBindingsValid_ = false;
@@ -108,6 +111,10 @@ public:
   gfx::CommandStream& stream() noexcept { return stream_; }
   const gfx::CommandStream& stream() const noexcept { return stream_; }
   uint64_t submitted_draws() const noexcept { return submittedDraws_; }
+  gfx::FixedUniformPool::Stats fixed_uniform_pool_stats() const noexcept { return fixedVertexUniforms_.stats(); }
+  uint64_t geometry_preflight_rejects() const noexcept {
+    return staticGeometry_?staticGeometry_->budget_preflight_rejects():0;
+  }
   bool strict_failed() const noexcept { return strictFailed_; }
   gfx::MemoryBudgetSnapshot memory_budget() const noexcept;
   uint32_t runtime_feature_flags() const noexcept;
@@ -126,7 +133,7 @@ private:
   gfx::CommandStream stream_{};
   gfx::PreparedDraw preparedScratch_{};
   std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
-  std::deque<gfx::FixedVertexUniforms> fixedVertexUniforms_{};
+  gfx::FixedUniformPool fixedVertexUniforms_{};
   // Snapshot reuse across consecutive GPU-geometry draws (see submit()).
   gfx::FixedVertexUniforms* lastFixedUniforms_ = nullptr;
   uint64_t vertexStateVersion_ = 0;
@@ -141,12 +148,14 @@ private:
 #if defined(AURORA_VITA_UPSTREAM)
   uint32_t translatedStateGeneration_ = 0;
   uint32_t translatedLayoutGeneration_ = 0;
+  uint32_t translatedVertexProgramStateGeneration_ = 0;
   uint8_t translatedPrimitive_ = 0;
   uint8_t translatedFmt_ = 0;
   gfx::PipelineDesc translatedPipeline_{};
   gfx::VertexDecodeLayout translatedLayout_{};
   uint64_t translatedPipelineKey_ = 0;
   uint64_t translatedBaseKey_ = 0;
+  uint64_t translatedFixedVertexProgramKey_ = 0;
   uint8_t translatedTextureMask_ = 0;
   bool translatedUsesOrigLod_ = false;
   bool translatedHasIndirect_ = false;

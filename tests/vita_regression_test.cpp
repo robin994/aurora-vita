@@ -123,6 +123,7 @@ int main() {
 #endif
   CHECK(defaults.render_width==0&&defaults.render_height==0);
   CHECK(!defaults.gxm_d16_depth);
+  CHECK(!defaults.gxm_geometry_preflight);
   CHECK(!defaults.gxm_preload_program_cache);
   CHECK(defaults.gxm_program_cache_preload_limit==1024);
   CHECK(!defaults.gxm_seal_shader_cache_after_prewarm);

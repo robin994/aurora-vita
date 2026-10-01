@@ -29,6 +29,10 @@ if (AURORA_ENABLE_GX)
   # Compile GX sources directly to avoid pulling in the full renderer/WebGPU runtime
   add_executable(gx_fifo_tests
     gx_fifo_test.cpp
+    bp_write_cache_test.cpp
+    display_list_shadow_test.cpp
+    gxm_fragment_prepare_cache_test.cpp
+    vita_fixed_uniform_pool_test.cpp
     gx_test_stubs.cpp
     texture_bind_group_cache_key_test.cpp
     ../lib/gfx/efb_ram_encoder.cpp

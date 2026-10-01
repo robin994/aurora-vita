@@ -13,6 +13,7 @@
 #if defined(MKW_TARGET_VITA)
 #include "../../lib/gx/fifo.hpp"
 #endif
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <type_traits>
@@ -299,8 +300,13 @@ bool initialize(const BackendConfig& c) noexcept {
   gfx::gxm_disable_mask()=c.gxm_disable_mask;
 #endif
   g_telemetryEnabled=c.diagnostics||c.telemetry_log_path||gfx::gxm_disabled(gfx::GxmDiagPhases);
-  gfx::set_fifo_profile_enabled(c.diagnostics||c.telemetry_log_path);
+  // GxmDiagPhases is the lightweight shipping-style profiling switch used by
+  // Strikers.  Keep FIFO timing in the same diagnostic envelope so per-view
+  // phase snapshots can attribute display-list/command-processor cost without
+  // enabling full diagnostics or file telemetry.
+  gfx::set_fifo_profile_enabled(g_telemetryEnabled);
 #if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::set_bp_write_cache_enabled(c.bp_write_cache);
   aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow&&
       !gfx::gxm_disabled(gfx::GxmDisableDisplayListShadow));
 #endif
@@ -397,6 +403,7 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.displayBuffers=c.vgl_display_buffer_count;
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
+  rc.nativeFragmentPrepareCache=c.gxm_fragment_prepare_cache;
   rc.nativeScenesPerFrame=std::max(c.gxm_scenes_per_frame,1u);
   rc.nativeParameterBufferBytes=c.gxm_parameter_buffer_bytes;
   // The native budget covers persistent streaming buffers as well as textures.
@@ -425,8 +432,16 @@ bool initialize(const BackendConfig& c) noexcept {
     g_renderer.reset();
     return false;
   }
+  gfx::CpuCore3BudgetConfig core3Budget{};
+  core3Budget.enabled=c.cpu_core3_budget_enabled;
+  core3Budget.maxTotalPercent=c.cpu_core3_max_total_percent;
+  core3Budget.guardPercent=c.cpu_core3_guard_percent;
+  core3Budget.shortWindowMs=c.cpu_core3_window_ms;
+  core3Budget.longWindowMs=c.cpu_core3_long_window_ms;
+  core3Budget.chunkTargetUs=c.cpu_core3_chunk_target_us;
+  core3Budget.samplePeriodUs=c.cpu_core3_sample_period_us;
   if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices,
-                                   c.cpu_renderer_execution_lanes)) {
+                                   c.cpu_renderer_execution_lanes,core3Budget)) {
     AURORA_VITA_LOG_ERROR(
         "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
@@ -437,17 +452,67 @@ bool initialize(const BackendConfig& c) noexcept {
   if(!cpuProbePath.empty()) {
     SceKernelSystemInfo system{};system.size=sizeof(system);
     const int systemRc=sceKernelGetSystemInfo(&system);
+    uint64_t calibrationWallUs=0,calibrationIdleRaw=0;
+    uint32_t calibrationIdlePercentX100=0;
+    bool calibrationComparable=false;
+    if(c.cpu_core3_budget_enabled&&gfx::cpu_core3_available()&&systemRc>=0) {
+      const int64_t wallBefore=sceKernelGetSystemTimeWide();
+      const uint64_t idleBefore=static_cast<uint64_t>(system.cpuInfo[3].idleClock);
+      sceKernelDelayThread(10000);
+      SceKernelSystemInfo after{};after.size=sizeof(after);
+      const int afterRc=sceKernelGetSystemInfo(&after);
+      const int64_t wallAfter=sceKernelGetSystemTimeWide();
+      if(afterRc>=0&&wallAfter>wallBefore&&
+         static_cast<uint64_t>(after.cpuInfo[3].idleClock)>=idleBefore) {
+        calibrationWallUs=static_cast<uint64_t>(wallAfter-wallBefore);
+        calibrationIdleRaw=static_cast<uint64_t>(after.cpuInfo[3].idleClock)-idleBefore;
+        const uint64_t tolerance=std::max<uint64_t>(100,calibrationWallUs/20u);
+        calibrationComparable=calibrationIdleRaw<=calibrationWallUs+tolerance;
+        if(calibrationWallUs)
+          calibrationIdlePercentX100=static_cast<uint32_t>(std::min<uint64_t>(
+              10000u,(calibrationIdleRaw*10000u)/calibrationWallUs));
+        system=after;
+      }
+    }
     if(FILE* probe=std::fopen(cpuProbePath.c_str(),"w")) {
+      const auto budget=gfx::cpu_core3_budget_snapshot();
+      const auto workerProbe=gfx::cpu_worker_probe_snapshot();
       std::fprintf(probe,
           "requested_workers=%u\nworkers=%u\nlanes=%u\nrenderer_cap=%u\ngame_cap=%u\n"
           "core3_available=%u\ncore3_cpu=%d\ncore3_affinity=0x%08x\n"
+          "budget_enabled=%u\nbudget_target_pct=%u\nbudget_short_us=%llu\nbudget_long_us=%llu\n"
+          "calibration_wall_us=%llu\ncalibration_idle_raw=%llu\ncalibration_idle_pct_x100=%u\n"
+          "calibration_comparable=%u\n"
           "system_info_rc=0x%08x\nactive_cpu_mask=0x%08x\ncore3_idle_raw=%llu\n",
           c.cpu_worker_threads,gfx::cpu_worker_threads(),gfx::cpu_execution_lanes(),
           c.cpu_renderer_execution_lanes,c.cpu_game_execution_lanes,
           gfx::cpu_core3_available()?1u:0u,gfx::cpu_core3_cpu_id(),
-          static_cast<unsigned>(gfx::cpu_core3_affinity_mask()),static_cast<unsigned>(systemRc),
+          static_cast<unsigned>(gfx::cpu_core3_affinity_mask()),budget.configured?1u:0u,budget.targetPercent,
+          static_cast<unsigned long long>(budget.shortCapacityUs),
+          static_cast<unsigned long long>(budget.longCapacityUs),
+          static_cast<unsigned long long>(calibrationWallUs),
+          static_cast<unsigned long long>(calibrationIdleRaw),calibrationIdlePercentX100,
+          calibrationComparable?1u:0u,static_cast<unsigned>(systemRc),
           systemRc>=0?static_cast<unsigned>(system.activeCpuMask):0u,
           systemRc>=0?static_cast<unsigned long long>(system.cpuInfo[3].idleClock):0ull);
+      for(uint32_t i=0;i<gfx::MaxWorkerThreads;++i) {
+        const auto& lane=workerProbe.lanes[i];
+        std::fprintf(probe,
+            "lane%u_requested_affinity=0x%08x\nlane%u_priority=0x%08x\n"
+            "lane%u_wake_rc=0x%08x\nlane%u_done_rc=0x%08x\n"
+            "lane%u_create_rc=0x%08x\nlane%u_start_rc=0x%08x\nlane%u_wait_rc=0x%08x\n"
+            "lane%u_actual_cpu=%d\nlane%u_actual_affinity=0x%08x\nlane%u_created=%u\n",
+            i+1,static_cast<unsigned>(lane.requestedAffinity),
+            i+1,static_cast<unsigned>(lane.priority),
+            i+1,static_cast<unsigned>(lane.wakeResult),
+            i+1,static_cast<unsigned>(lane.doneResult),
+            i+1,static_cast<unsigned>(lane.createResult),
+            i+1,static_cast<unsigned>(lane.startResult),
+            i+1,static_cast<unsigned>(lane.waitResult),
+            i+1,lane.actualCpu,
+            i+1,static_cast<unsigned>(lane.actualAffinity),
+            i+1,lane.created?1u:0u);
+      }
       std::fclose(probe);
     }
   }
@@ -457,6 +522,13 @@ bool initialize(const BackendConfig& c) noexcept {
       gfx::cpu_worker_threads(),gfx::cpu_execution_lanes(),c.cpu_renderer_execution_lanes,
       c.cpu_game_execution_lanes,gfx::cpu_core3_available()?1u:0u,gfx::cpu_core3_cpu_id(),
       static_cast<unsigned>(gfx::cpu_core3_affinity_mask()));
+  AURORA_VITA_LOG_INFO(
+      "[aurora-vita] cpu3 budget enabled=%u max_total=%u guard=%u target=%u short_ms=%u long_ms=%u chunk_us=%u sample_us=%u\n",
+      c.cpu_core3_budget_enabled?1u:0u,c.cpu_core3_max_total_percent,c.cpu_core3_guard_percent,
+      core3Budget.maxTotalPercent>core3Budget.guardPercent?
+          core3Budget.maxTotalPercent-core3Budget.guardPercent:0u,
+      c.cpu_core3_window_ms,c.cpu_core3_long_window_ms,c.cpu_core3_chunk_target_us,
+      c.cpu_core3_sample_period_us);
   AURORA_VITA_LOG_INFO(
       "[aurora-vita] render config display=%ux%u internal=%ux%u native_cmpr=%u direct_stream=%u scratch_dynamic=%u scratch_stream=%u gpu_vertex_stride=%u gpu_geometry_mb=%llu stream_v=%llu stream_i=%llu slots=%u\n",
       c.width,c.height,renderWidth,renderHeight,
@@ -479,6 +551,10 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.verboseGeometryDiagnostics=c.diagnostics;
   dc.strictUnsupported=c.strict_unsupported;
   dc.staticGeometryBudget=c.static_geometry_budget;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  dc.fixedUniformPoolBytes=c.gxm_fixed_uniform_pool?gfx::FixedUniformPool::MaxRetainedBytes:0;
+  dc.staticGeometryBudgetPreflight=c.gxm_geometry_preflight;
+#endif
   dc.staticGeometryMinVertices=c.static_geometry_min_vertices;
   dc.staticGeometryStableOnly=c.static_geometry_stable_only;
   dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
@@ -689,6 +765,33 @@ PerformanceSnapshot performance_snapshot_now() noexcept {
   out.displayQueueBlockedPercent=g_displayQueueSamples?
       static_cast<uint32_t>((g_displayQueueBlockedSamples*100u)/g_displayQueueSamples):0u;
   out.gpuBackpressureLikely=out.displayQueueSamples>=30u&&out.displayQueueBlockedPercent>=10u;
+  {
+    const auto core3=gfx::cpu_core3_budget_snapshot();
+    const auto vertex=gfx::cpu_vertex_parallel_snapshot();
+    out.core3Available=gfx::cpu_core3_available();
+    out.core3BudgetConfigured=core3.configured;
+    out.core3TelemetryValid=core3.telemetryValid;
+    out.core3DispatchAllowed=core3.dispatchAllowed;
+    out.core3TargetPercent=core3.targetPercent;
+    out.core3LastTotalPercentX100=core3.lastTotalPercentX100;
+    out.core3ShortCreditUs=core3.shortCreditUs;
+    out.core3LongCreditUs=core3.longCreditUs;
+    out.core3Chunks=core3.chunks;
+    out.core3Denied=core3.denied;
+    out.core3TelemetryFailures=core3.telemetryFailures;
+    out.core3Overruns=core3.overruns;
+    out.core3TotalChunkUs=core3.totalChunkUs;
+    out.core3MaxChunkUs=core3.maxChunkUs;
+    out.vertexParallelCalls=vertex.calls;
+    out.vertexParallelDynamicCalls=vertex.dynamicCalls;
+    out.vertexParallelTotalWallUs=vertex.totalWallUs;
+    out.vertexParallelCallerWaitUs=vertex.callerWaitUs;
+    for(uint32_t lane=0;lane<gfx::MaxExecutionLanes;++lane) {
+      out.vertexLaneItems[lane]=vertex.laneItems[lane];
+      out.vertexLaneChunks[lane]=vertex.laneChunks[lane];
+      out.vertexLaneWorkUs[lane]=vertex.laneWorkUs[lane];
+    }
+  }
   if(!g_renderer)return out;
   const auto& stats=g_renderer->stats();
   out.rendererCpuFrameUs=stats.cpuFrameUs;
@@ -696,6 +799,8 @@ PerformanceSnapshot performance_snapshot_now() noexcept {
   out.nativePipelineUs=stats.nativePipelineUs;
   out.nativeTextureUs=stats.nativeTextureUs;
   out.nativeDrawUs=stats.nativeDrawUs;
+  out.nativeFragmentPrepareHits=stats.nativeFragmentPrepareHits;
+  out.nativeFragmentPrepareMisses=stats.nativeFragmentPrepareMisses;
   out.nativeSceneCount=stats.nativeSceneCount;
   for(unsigned i=0;i<4;++i)out.diagSceneGpuUs[i]=stats.diagSceneGpuUs[i];
   out.nativeEfbCopies=stats.nativeEfbCopies;
@@ -715,6 +820,14 @@ PerformanceSnapshot performance_snapshot_now() noexcept {
   out.shaderDiskCacheHits=g_renderer->program_cache_hits();
   out.shaderDiskCacheMisses=g_renderer->program_cache_misses();
   if(g_drawSink) {
+    out.geometryPreflightEnabled=g_config.gxm_geometry_preflight;
+    out.geometryPreflightRejects=g_drawSink->geometry_preflight_rejects();
+    const auto pool=g_drawSink->fixed_uniform_pool_stats();
+    out.fixedUniformPoolEnabled=pool.enabled;
+    out.fixedUniformPoolAllocations=pool.allocations;
+    out.fixedUniformPoolReuses=pool.reuses;
+    out.fixedUniformPoolFallbacks=pool.fallbacks;
+    out.fixedUniformPoolBytes=pool.retainedBytes;
     const auto memory=g_drawSink->memory_budget();
     out.staticGeometryHits=memory.staticGeometryHits;
     out.staticGeometryMisses=memory.staticGeometryMisses;

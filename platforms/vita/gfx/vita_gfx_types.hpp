@@ -523,7 +523,7 @@ enum GxmDisableBits : uint32_t {
   GxmDisableScissorVariant = 1u << 1,   // discard-free full-scissor pipeline variant
   GxmDisablePersistentState = 1u << 2,  // texture-binding fast path (state is always reset per scene)
   GxmDisableFixedSnapshot = 1u << 3,    // shared/revisioned fixed-vertex uniform snapshots
-  GxmDisableUniformRevision = 1u << 4,  // disable fragment-uniform reuse entirely
+  GxmDisableUniformRevision = 1u << 4,  // disable fragment default-buffer reservation reuse
   GxmDisableNativeWrap = 1u << 5,       // hardware texture wrap in shaders
   GxmDisableGeometryEviction = 1u << 6, // static-geometry LRU eviction
   GxmDisableDisplayListShadow = 1u << 7,
@@ -537,6 +537,9 @@ enum GxmDisableBits : uint32_t {
   // Diagnostic: DrawSink phase timers only (no FIFO profile, coverage, trace or
   // logs); averages every 120 frames go to diagnostics/phase_profile.log.
   GxmDiagPhases = 1u << 10,
+  // Bypass FIFO copy/parsing for a validated single-draw display list. The
+  // current guest bytes remain the source; no display-list contents are cached.
+  GxmDisableDirectDisplayList = 1u << 11,
 };
 inline uint32_t& gxm_disable_mask() noexcept { static uint32_t mask = 0; return mask; }
 inline bool gxm_disabled(uint32_t bit) noexcept { return (gxm_disable_mask() & bit) != 0; }
@@ -561,6 +564,9 @@ struct FrameStats {
   uint64_t nativeDisplayQueueAddUs = 0;
   uint32_t nativeVertexUniformReuses = 0;
   uint32_t nativeFragmentUniformReuses = 0;
+  // Cumulative preparation-cache counters, retained across frame resets.
+  uint64_t nativeFragmentPrepareHits = 0;
+  uint64_t nativeFragmentPrepareMisses = 0;
   uint32_t nativeSceneCount = 0;
   uint32_t nativeEfbCopies = 0;
   uint64_t nativeEfbEndSceneUs = 0;

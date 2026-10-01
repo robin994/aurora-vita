@@ -190,11 +190,7 @@ aurora::gx::PipelineConfig build_current_pipeline_config(GXPrimitive primitive, 
 }
 
 gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noexcept {
-  auto out=translate_pipeline(build_current_pipeline_config(static_cast<GXPrimitive>(primitive), static_cast<GXVtxFmt>(fmt)));
-  const auto& g=aurora::gx::g_gxState;
-  for(unsigned ch=0;ch<out.colorChannels.size();++ch)
-    out.colorChannels[ch].lightMask=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
-  return out;
+  return translate_pipeline(build_current_pipeline_config(static_cast<GXPrimitive>(primitive), static_cast<GXVtxFmt>(fmt)));
 }
 
 bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
@@ -212,8 +208,6 @@ bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::
   pc.dstAlpha=g.dstAlpha;pc.depthCompare=g.depthCompare;pc.depthUpdate=g.depthUpdate;
   pc.colorUpdate=g.colorUpdate;pc.alphaUpdate=g.alphaUpdate;
   pipeline=translate_pipeline(pc);
-  for(unsigned ch=0;ch<pipeline.colorChannels.size();++ch)
-    pipeline.colorChannels[ch].lightMask=static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
   {
     // The vertex layout does not depend on the line mode used for the pipeline.
     gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateLayout);
@@ -224,6 +218,35 @@ bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::
     key=gfx::pipeline_key(pipeline);
   }
   return false;
+}
+
+void refresh_current_vertex_program_state(gfx::PipelineDesc& pipeline) noexcept {
+  const auto& g = aurora::gx::g_gxState;
+  for (unsigned ch = 0; ch < pipeline.colorChannels.size() && ch < g.colorChannelConfig.size(); ++ch) {
+    const auto& s = g.colorChannelConfig[ch];
+    auto& d = pipeline.colorChannels[ch];
+    d.materialSource = color_source(s.matSrc);
+    d.ambientSource = color_source(s.ambSrc);
+    d.diffuse = diffuse(s.diffFn);
+    d.attenuation = attenuation(s.attnFn);
+    d.lightingEnabled = s.lightingEnabled;
+    d.lightMask = static_cast<uint8_t>(g.colorChannelState[ch].lightMask.to_ulong());
+  }
+  const unsigned count = std::min<unsigned>(pipeline.texgenCount,
+      std::min<unsigned>(g.numTexGens, gfx::MaxTextures));
+  for (unsigned i = 0; i < count; ++i) {
+    const auto& s = g.tcgs[i];
+    auto& d = pipeline.texgens[i];
+    const bool matrixFromVertex = d.matrixFromVertex;
+    d.type = texgen_type(s.type);
+    d.source = texgen_source(s.src);
+    d.matrix = tex_mtx(s.mtx);
+    d.postMatrix = post_mtx(s.postMtx);
+    d.embossSource = (s.type >= GX_TG_BUMP0 && s.type <= GX_TG_BUMP7) ?
+        static_cast<uint8_t>(s.type - GX_TG_BUMP0) : 0;
+    d.normalize = s.normalize;
+    d.matrixFromVertex = matrixFromVertex;
+  }
 }
 
 gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept {

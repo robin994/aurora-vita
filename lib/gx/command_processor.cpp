@@ -1505,6 +1505,11 @@ static void handle_bp(u32 value, bool bigEndian) {
 }
 
 extern "C" void GXApplyBPReg(u8 reg, u32 value) {
+#if defined(MKW_TARGET_VITA)
+  if (!worker_running()) invalidate_bp_write_cache();
+#else
+  invalidate_bp_write_cache();
+#endif
   handle_bp((static_cast<u32>(reg) << 24) | (value & 0x00FFFFFFu), true);
 }
 
@@ -1584,6 +1589,8 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
   // Matrix index A (0x30)
   case 0x30: {
     const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
+    std::array<GXTexMtx, 4> oldTexMtx{};
+    for (u32 i = 0; i < 4 && i < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i].mtx;
     g_gxState.currentPnMtx = bp_get(value, 6, 0) / 3;
     for (u32 i = 0; i < 4 && i < MaxTexCoord; i++) {
       auto texMtx = static_cast<GXTexMtx>(bp_get(value, 6, 6 + i * 6));
@@ -1593,13 +1600,23 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     // Same matrix indices as XF 0x18, written from a different bank.
     g_gxState.invalidateXfReg(0x18);
     // currentPnMtx is vertex state, not pipeline state.
+    bool activeTexgenChanged = false;
+    for (u32 i = 0; i < 4 && i < MaxTexCoord && i < g_gxState.numTexGens; ++i)
+      activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i].mtx;
+    if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+#if defined(MKW_TARGET_VITA)
+    g_gxState.stateDirty = true;
+#else
     mark_pipeline_state_dirty_if(snap.changed());
+#endif
     break;
   }
 
   // Matrix index B (0x40)
   case 0x40: {
     const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
+    std::array<GXTexMtx, 4> oldTexMtx{};
+    for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i + 4].mtx;
     for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
       auto texMtx = static_cast<GXTexMtx>(bp_get(value, 6, i * 6));
       assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
@@ -1607,7 +1624,15 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     }
     // Same matrix indices as XF 0x19, written from a different bank.
     g_gxState.invalidateXfReg(0x19);
+    bool activeTexgenChanged = false;
+    for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord && (i + 4) < g_gxState.numTexGens; ++i)
+      activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i + 4].mtx;
+    if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+#if defined(MKW_TARGET_VITA)
+    g_gxState.stateDirty = true;
+#else
     mark_pipeline_state_dirty_if(snap.changed());
+#endif
     break;
   }
 
@@ -1802,7 +1827,17 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           }
           u32 lightMask = lightsLo | (lightsHi << 4);
           g_gxState.colorChannelState[chanId].lightMask = GX::LightMask{lightMask};
-          mark_pipeline_state_dirty_if(snap.changed() || oldLightMask != g_gxState.colorChannelState[chanId].lightMask);
+          const bool lightMaskChanged = oldLightMask != g_gxState.colorChannelState[chanId].lightMask;
+          const bool vertexProgramChanged = snap.changed() || lightMaskChanged;
+          if (vertexProgramChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+#if defined(MKW_TARGET_VITA)
+          // Channel lighting is evaluated before the normal Vita GXM shader.
+          // Keep all channel-program fields out of the expensive base pipeline;
+          // the vertex-program generation refreshes CPU and fixed-GPU state.
+          g_gxState.stateDirty = true;
+#else
+          mark_pipeline_state_dirty_if(vertexProgramChanged);
+#endif
         }
         break;
       }
@@ -1813,22 +1848,42 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
       case 0x18: {
         // Matrix index A: PnMtx + TexCoord0-3 matrix indices
         const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
+        std::array<GXTexMtx, 4> oldTexMtx{};
+        for (u32 i = 0; i < 4 && i < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i].mtx;
         g_gxState.currentPnMtx = bp_get(val, 6, 0) / 3;
         for (u32 i = 0; i < 4 && i < MaxTexCoord; i++) {
           auto texMtx = static_cast<GXTexMtx>(bp_get(val, 6, 6 + i * 6));
           assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
           g_gxState.tcgs[i].mtx = texMtx;
         }
+        bool activeTexgenChanged = false;
+        for (u32 i = 0; i < 4 && i < MaxTexCoord && i < g_gxState.numTexGens; ++i)
+          activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i].mtx;
+        if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+#if defined(MKW_TARGET_VITA)
+        g_gxState.stateDirty = true;
+#else
         mark_pipeline_state_dirty_if(snap.changed());
+#endif
         break;
       }
       case 0x19: {
         // Matrix index B: TexCoord4-7 matrix indices
         const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
+        std::array<GXTexMtx, 4> oldTexMtx{};
+        for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i + 4].mtx;
         for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
           g_gxState.tcgs[i + 4].mtx = static_cast<GXTexMtx>(bp_get(val, 6, i * 6));
         }
+        bool activeTexgenChanged = false;
+        for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord && (i + 4) < g_gxState.numTexGens; ++i)
+          activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i + 4].mtx;
+        if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+#if defined(MKW_TARGET_VITA)
+        g_gxState.stateDirty = true;
+#else
         mark_pipeline_state_dirty_if(snap.changed());
+#endif
         break;
       }
       case 0x1A:
@@ -1872,6 +1927,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           if (tcIdx < MaxTexCoord) {
             auto& tcg = g_gxState.tcgs[tcIdx];
             const DecodedSnapshot<std::remove_reference_t<decltype(tcg)>> snap(tcg);
+            const GXTexGenType oldType = tcg.type;
             bool proj = bp_get(val, 1, 1) != 0;
             u32 form = bp_get(val, 1, 2);
             u32 tgType = bp_get(val, 3, 4);
@@ -1896,7 +1952,18 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
             }
             // Texgens past numTexGens are not translated; XF 0x3F/genMode
             // changes to that count bump the generation themselves.
-            mark_pipeline_state_dirty_if(tcIdx < g_gxState.numTexGens && snap.changed());
+            const bool activeChanged = tcIdx < g_gxState.numTexGens && snap.changed();
+            if (activeChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+#if defined(MKW_TARGET_VITA)
+            // The CPU path only bakes the perspective-divide shape into the GXM
+            // shader; source/matrix/bump/normalize are vertex-program state.
+            const bool projectionShapeChanged =
+                (oldType == GX_TG_MTX3x4) != (tcg.type == GX_TG_MTX3x4);
+            if (activeChanged && projectionShapeChanged) mark_pipeline_state_dirty();
+            else g_gxState.stateDirty = true;
+#else
+            mark_pipeline_state_dirty_if(activeChanged);
+#endif
           }
         } else if (reg >= 0x50 && reg <= 0x5F) {
           u32 tcIdx = reg - 0x50;
@@ -1904,7 +1971,13 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
             const DecodedSnapshot<std::remove_reference_t<decltype(g_gxState.tcgs[tcIdx])>> snap(g_gxState.tcgs[tcIdx]);
             g_gxState.tcgs[tcIdx].postMtx = static_cast<GXPTTexMtx>(bp_get(val, 6, 0) + 64);
             g_gxState.tcgs[tcIdx].normalize = bp_get(val, 1, 8) != 0;
-            mark_pipeline_state_dirty_if(tcIdx < g_gxState.numTexGens && snap.changed());
+            const bool activeChanged = tcIdx < g_gxState.numTexGens && snap.changed();
+            if (activeChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+#if defined(MKW_TARGET_VITA)
+            g_gxState.stateDirty = true;
+#else
+            mark_pipeline_state_dirty_if(activeChanged);
+#endif
           }
         } else {
 #ifndef NDEBUG
@@ -2013,7 +2086,7 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
 
 #if defined(MKW_TARGET_VITA)
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
-                     uint32_t vertexBytes) {
+                     uint32_t vertexBytes, const uint8_t* stableSource) {
   if (vertices == nullptr || vtxCount == 0 || vertexBytes == 0) return false;
   if (__gx->dirtyState != 0) __GXSetDirtyState();
   drain();
@@ -2022,7 +2095,58 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   if (vtxSize == 0 || static_cast<u32>(vtxCount) * vtxSize != vertexBytes) return false;
 
   const auto result = aurora::vita::draw_sink().submit(
-      static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), vertices, vertexBytes, vtxCount);
+      static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), vertices, vertexBytes, vtxCount,
+      nullptr, 0, stableSource);
+  if (result.ok) g_gxState.stateDirty = false;
+  return result.ok;
+}
+
+bool submit_simple_display_list(const uint8_t* data, uint32_t size) {
+  if (aurora::vita::gfx::gxm_disabled(aurora::vita::gfx::GxmDisableDirectDisplayList) ||
+      data == nullptr || size < 3) return false;
+
+  const u8 cmd = data[0];
+  if (!is_draw_cmd(cmd)) return false;
+  switch (cmd & CP_OPCODE_MASK) {
+  case GX_DRAW_QUADS:
+  case 0x88:
+  case GX_DRAW_TRIANGLES:
+  case GX_DRAW_TRIANGLE_STRIP:
+  case GX_DRAW_TRIANGLE_FAN:
+  case GX_DRAW_LINES:
+  case GX_DRAW_LINE_STRIP:
+  case GX_DRAW_POINTS:
+    break;
+  default:
+    return false;
+  }
+
+  // The producer may have queued CP/XF/BP state immediately before the list.
+  // Apply it before deriving the vertex stride used to validate this draw.
+  if (__gx->dirtyState != 0) __GXSetDirtyState();
+  drain();
+
+  const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
+  const u16 vtxCount = read_u16(data + 1, true);
+  if (vtxCount == 0) return false;
+  const u32 vtxSize = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calculate_last_vtx_size(fmt);
+  if (vtxSize == 0) return false;
+  const uint64_t vertexBytes64 = static_cast<uint64_t>(vtxCount) * vtxSize;
+  if (vertexBytes64 > UINT32_MAX) return false;
+  const u32 vertexBytes = static_cast<u32>(vertexBytes64);
+  const uint64_t usedBytes64 = 3u + vertexBytes64;
+  if (usedBytes64 > size) return false;
+  const u32 usedBytes = static_cast<u32>(usedBytes64);
+
+  // dlMakeDisplayList() pads its single draw to 32 bytes with zero/NOP bytes.
+  // Any non-zero tail means this is a more general GX list and must use FIFO.
+  for (u32 i = usedBytes; i < size; ++i)
+    if (data[i] != 0) return false;
+
+  const GXPrimitive prim = primitive_from_draw_cmd(cmd);
+  const auto result = aurora::vita::draw_sink().submit(
+      static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), data + 3, vertexBytes, vtxCount,
+      nullptr, 0, data + 3);
   if (result.ok) g_gxState.stateDirty = false;
   return result.ok;
 }
@@ -2293,8 +2417,9 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
 }
 
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
-                     uint32_t vertexBytes) {
+                     uint32_t vertexBytes, const uint8_t* stableSource) {
   ZoneScoped;
+  (void)stableSource;
   if (vertices == nullptr || vtxCount == 0 || vertexBytes == 0) {
     return false;
   }

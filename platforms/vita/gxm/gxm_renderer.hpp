@@ -20,6 +20,7 @@ struct Config {
   size_t maxPipelines = 128;
   bool waitVblank = true;
   bool d16Depth = false;
+  bool fragmentPrepareCache = false;
   const char* shaderCompilerPath = nullptr;
   const char* programCachePath = nullptr;
   bool preloadProgramCache = false;

@@ -32,6 +32,8 @@ struct PerformanceSnapshot {
   uint64_t nativePipelineUs=0;
   uint64_t nativeTextureUs=0;
   uint64_t nativeDrawUs=0;
+  uint64_t nativeFragmentPrepareHits=0;
+  uint64_t nativeFragmentPrepareMisses=0;
   uint32_t nativeSceneCount=0;
   uint32_t nativeEfbCopies=0;
   uint64_t nativeEfbEndSceneUs=0;
@@ -48,6 +50,13 @@ struct PerformanceSnapshot {
   uint64_t staticGeometryLookupFallbacks=0;
   size_t staticGeometryBytes=0;
   size_t staticGeometryEntries=0;
+  bool geometryPreflightEnabled=false;
+  uint64_t geometryPreflightRejects=0;
+  bool fixedUniformPoolEnabled=false;
+  uint64_t fixedUniformPoolAllocations=0;
+  uint64_t fixedUniformPoolReuses=0;
+  uint64_t fixedUniformPoolFallbacks=0;
+  size_t fixedUniformPoolBytes=0;
   bool shaderRuntimeCompilationEnabled=false;
   uint64_t shaderRuntimeCompiles=0;
   uint64_t shaderRuntimeCompileUs=0;
@@ -59,6 +68,27 @@ struct PerformanceSnapshot {
   uint64_t gxProcessTotalUs=0;
   // gxm_disable bit 0x100 diagnostic: GPU time per scene of the last frame.
   uint32_t diagSceneGpuUs[4]{};
+  bool core3Available=false;
+  bool core3BudgetConfigured=false;
+  bool core3TelemetryValid=false;
+  bool core3DispatchAllowed=false;
+  uint32_t core3TargetPercent=0;
+  uint32_t core3LastTotalPercentX100=0;
+  uint64_t core3ShortCreditUs=0;
+  uint64_t core3LongCreditUs=0;
+  uint64_t core3Chunks=0;
+  uint64_t core3Denied=0;
+  uint64_t core3TelemetryFailures=0;
+  uint64_t core3Overruns=0;
+  uint64_t core3TotalChunkUs=0;
+  uint32_t core3MaxChunkUs=0;
+  uint64_t vertexParallelCalls=0;
+  uint64_t vertexParallelDynamicCalls=0;
+  uint64_t vertexParallelTotalWallUs=0;
+  uint64_t vertexParallelCallerWaitUs=0;
+  uint64_t vertexLaneItems[4]{};
+  uint64_t vertexLaneChunks[4]{};
+  uint64_t vertexLaneWorkUs[4]{};
 };
 using ParallelRangeTask = bool (*)(void* context, size_t begin, size_t end, uint32_t lane) noexcept;
 struct BackendConfig {
@@ -99,6 +129,15 @@ struct BackendConfig {
   // Maximum caller+worker lanes used by the public game-side parallel_for().
   // Keeping this at 3 while probing a fourth lane makes CPU3 probe-only.
   uint32_t cpu_game_execution_lanes=0;
+  // CPU3 is admitted only through the quota-aware dynamic scheduler. Creating
+  // the worker with this disabled leaves it probe-only even when lane caps are 4.
+  bool cpu_core3_budget_enabled=false;
+  uint32_t cpu_core3_max_total_percent=70;
+  uint32_t cpu_core3_guard_percent=5;
+  uint32_t cpu_core3_window_ms=100;
+  uint32_t cpu_core3_long_window_ms=1000;
+  uint32_t cpu_core3_chunk_target_us=250;
+  uint32_t cpu_core3_sample_period_us=10000;
   // Minimum useful work per CPU lane. Smaller draws stay on the render thread;
   // larger draws progressively use one or two workers as their size warrants.
   uint32_t cpu_parallel_min_vertices=512;
@@ -125,6 +164,15 @@ struct BackendConfig {
   // Keep cached-RAM copies of CDRAM display lists between frames. Requires the
   // port to publish every write to display-list memory (see fifo.hpp).
   bool display_list_shadow=true;
+  // Exact producer-side BP material-write elision; enable separately for A/B.
+  bool bp_write_cache=false;
+  // Prepared fragment bytes only; each draw still reserves a fresh GXM buffer.
+  bool gxm_fragment_prepare_cache=false;
+  // Retain CPU storage for fully rebuilt fixed-vertex snapshots, opt-in.
+  bool gxm_fixed_uniform_pool=false;
+  // Skip speculative geometry decode when even its minimum size cannot fit
+  // and eviction is blocked by pending GPU retirement (or disabled).
+  bool gxm_geometry_preflight=false;
   // gxm-optimization bisection switches, see gfx::GxmDisableBits.
   uint32_t gxm_disable_mask=0;
 #if defined(AURORA_VITA_RENDERER_GXM)

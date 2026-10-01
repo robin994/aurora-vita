@@ -320,7 +320,7 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
   // in cache and makes medium-sized Strikers draws worth parallelizing.
   const bool splitPhases=telemetry&&telemetry->split_vertex_phases();
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
-    if(!cpu_parallel_for(decodeCount,(splitPhases||pipeline.fixedVertexOnGpu)?profile_decode_range:decode_transform_range,&fused)){
+    if(!cpu_parallel_for_vertex(decodeCount,(splitPhases||pipeline.fixedVertexOnGpu)?profile_decode_range:decode_transform_range,&fused)){
       bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;
       out.error=transformFailed?PrepareDrawError::VertexTransformFailed:PrepareDrawError::VertexDecodeFailed;
       return false;
@@ -328,7 +328,7 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
   }
   if(splitPhases&&!pipeline.fixedVertexOnGpu){
     ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexTransform);
-    if(!cpu_parallel_for(decodeCount,profile_transform_range,&fused)){
+    if(!cpu_parallel_for_vertex(decodeCount,profile_transform_range,&fused)){
       out.error=PrepareDrawError::VertexTransformFailed;return false;
     }
   }
@@ -379,7 +379,7 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
                               static_cast<uint8_t*>(vertexDst),gpuStride,true};
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
     auto worker=pipeline.fixedVertexOnGpu?decode_pack_range:decode_transform_pack_range;
-    if(!cpu_parallel_for(count,worker,&fused)){
+    if(!cpu_parallel_for_vertex(count,worker,&fused)){
       bool transformFailed=false;for(const auto e:fused.error)transformFailed=transformFailed||e==2;
       out.error=transformFailed?PrepareDrawError::VertexTransformFailed:PrepareDrawError::VertexDecodeFailed;
       return false;

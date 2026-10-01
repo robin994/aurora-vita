@@ -24,6 +24,7 @@ struct RendererConfig {
   size_t nativeCdramPoolBytes=64*1024*1024;
   size_t nativeCdramReserveBytes=8*1024*1024;
   bool nativeD16Depth=false;
+  bool nativeFragmentPrepareCache=false;
   uint32_t nativeScenesPerFrame=5;
   const char* programBinaryCachePath=nullptr;
   const char* pipelineWarmupPath=nullptr;

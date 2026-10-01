@@ -478,6 +478,10 @@ struct GXState {
   // vertex decode layout, not the translated pipeline, so the Vita DrawSink
   // rebuilds the layout without retranslating the whole pipeline.
   u32 layoutStateGeneration = next_gx_state_epoch();
+  // Vita vertex-program state that is consumed by the CPU transform and by the
+  // optional fixed-vertex GPU shader, but is not necessarily part of the base
+  // GXM pipeline identity (lighting config, light masks, texgen inputs/matrices).
+  u32 vertexProgramStateGeneration = next_gx_state_epoch();
   std::array<u32, 0x100> bpRegCache = [] {
     std::array<u32, 0x100> regs{};
     regs[0xFE] = 0x00FFFFFF;

@@ -34,8 +34,7 @@
 // BP (RAS) register write: opcode 0x61, then 32-bit value (upper 8 bits = reg ID)
 #define GX_WRITE_RAS_REG(value)                                                                                        \
   do {                                                                                                                 \
-    GX_WRITE_U8(0x61);                                                                                                 \
-    GX_WRITE_U32(value);                                                                                               \
+    aurora::gx::fifo::write_bp(static_cast<uint32_t>(value));                                                           \
   } while (0)
 
 // CP register write with base/stride tracking for indexed arrays

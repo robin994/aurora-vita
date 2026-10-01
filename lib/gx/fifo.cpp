@@ -1,10 +1,11 @@
 #include "fifo.hpp"
 #include "fifo.hpp"
 #include "command_processor.hpp"
+#include "bp_write_cache.hpp"
 #if defined(MKW_TARGET_VITA)
 #include "../../platforms/vita/gfx/vita_telemetry.hpp"
 #include "../../platforms/vita/gfx/vita_memory_revision.hpp"
-#include "../../platforms/vita/gfx/vita_hash_map.hpp"
+#include "display_list_shadow.hpp"
 #endif
 #include "../internal.hpp"
 
@@ -27,11 +28,34 @@
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
 
+namespace {
+BpWriteCache sBpWriteCache;
+} // namespace
+
+void set_bp_write_cache_enabled(bool enabled) {
+  sBpWriteCache.invalidate();
+  detail::sBpWriteCacheEnabled = enabled;
+}
+
+void invalidate_bp_write_cache() {
+  sBpWriteCache.invalidate();
+}
+
+bool bp_write_unchanged(uint32_t value) {
+#if defined(MKW_TARGET_VITA)
+  // Keep the cache solely on the producer with synchronous GX consumption.
+  // The asynchronous worker retains the existing complete command stream.
+  if (worker_running()) return false;
+#endif
+  return !sBpWriteCache.should_emit(value);
+}
+
 namespace detail {
 uint8_t* sBufferData = nullptr;
 uint32_t sBufferSize = 0;
 uint32_t sBufferCapacity = 0;
 bool sInDisplayList = false;
+bool sBpWriteCacheEnabled = false;
 uint8_t* sDlBuffer = nullptr;
 uint32_t sDlSize = 0;
 uint32_t sDlWritePos = 0;
@@ -209,6 +233,7 @@ uint64_t enqueue_current_fifo() {
 
 bool start_worker() {
   if (sVitaWorker.running.load(std::memory_order_acquire)) return true;
+  invalidate_bp_write_cache();
   sVitaWorker.producer = sVitaWorker.consumer = 0;
   sVitaWorker.submitted.store(0, std::memory_order_release);
   sVitaWorker.completed.store(0, std::memory_order_release);
@@ -309,6 +334,7 @@ void process_sync(const uint8_t* data, uint32_t size, bool bigEndian) {
     process(data, size, bigEndian);
     return;
   }
+  invalidate_bp_write_cache();
   if (!worker_running()) {
     drain_sync();
     process(data, size, bigEndian);
@@ -325,6 +351,7 @@ void shutdown_worker() {
   wait_serial(serial);
   sceKernelWaitThreadEnd(sVitaWorker.thread, nullptr, nullptr);
   sVitaWorker.running.store(false, std::memory_order_release);
+  invalidate_bp_write_cache();
   destroy_worker_primitives();
 }
 #endif
@@ -335,6 +362,7 @@ void init() {
   wait_idle();
 #endif
   reset_cp_register_cache();
+  invalidate_bp_write_cache();
   free(detail::sBufferData);
   detail::sBufferData = static_cast<uint8_t*>(malloc(initialCapacity));
   detail::sBufferSize = 0;
@@ -352,6 +380,7 @@ void write_stable_data_from(const void* bytes, const void* stableSource, uint32_
     return;
   }
   if (bytes == nullptr || stableSource == nullptr || length == 0) return;
+  invalidate_bp_write_cache();
 #if defined(MKW_TARGET_VITA)
   const bool profile = aurora::vita::gfx::g_fifoProfileEnabled;
   const uint64_t profileStart = profile ? aurora::vita::gfx::telemetry_now_us() : 0;
@@ -387,16 +416,10 @@ void write_stable_data_from(const void* bytes, const void* stableSource, uint32_
 namespace {
 // Strikers keeps its permanent display lists in CDRAM, which the CPU reads
 // uncached: re-reading ~800 KiB of them every frame dominated the GX frontend.
-// Keep a cached-RAM shadow per list and reuse it while the guest has not
-// written the list again. Guest writes are observed through DCFlush/DCStore
-// (note_memory_write), the same contract the static geometry cache relies on.
-struct DisplayListShadow {
-  std::vector<uint8_t> bytes;
-  uint64_t revision = 0;
-};
-constexpr size_t DisplayListShadowBudget = 8u * 1024u * 1024u;
-aurora::vita::gfx::FlatHashMap<uintptr_t, DisplayListShadow> sDisplayListShadows;
-size_t sDisplayListShadowBytes = 0;
+// Validate every reuse against the live bytes until hardware establishes why
+// revision-only reuse glitched. This diagnostic guard retains the original
+// guest identity and publishes any untracked write to downstream caches.
+DisplayListShadowCache sDisplayListShadows;
 bool sDisplayListShadowEnabled = true;
 
 const uint8_t* display_list_shadow(const void* data, uint32_t length) {
@@ -404,24 +427,7 @@ const uint8_t* display_list_shadow(const void* data, uint32_t length) {
   const uintptr_t address = reinterpret_cast<uintptr_t>(data);
   // Only CDRAM (uncached CPU mapping) benefits; cached RAM is read directly.
   if (address < 0x60000000u || address >= 0x70000000u) return nullptr;
-  const uint64_t revision = aurora::vita::gfx::memory_range_revision(data, length);
-  auto it = sDisplayListShadows.find(address);
-  if (it != sDisplayListShadows.end()) {
-    auto& shadow = it->second;
-    if (shadow.bytes.size() == length && shadow.revision == revision) return shadow.bytes.data();
-    sDisplayListShadowBytes -= shadow.bytes.size();
-    sDisplayListShadows.erase(it);
-  }
-  if (length > DisplayListShadowBudget) return nullptr;
-  if (sDisplayListShadowBytes + length > DisplayListShadowBudget) {
-    sDisplayListShadows.clear();
-    sDisplayListShadowBytes = 0;
-  }
-  auto& shadow = sDisplayListShadows[address];
-  shadow.bytes.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + length);
-  shadow.revision = revision;
-  sDisplayListShadowBytes += length;
-  return shadow.bytes.data();
+  return sDisplayListShadows.get(data, length);
 }
 } // namespace
 #endif
@@ -431,7 +437,6 @@ void set_display_list_shadow_enabled(bool enabled) {
   sDisplayListShadowEnabled = enabled;
   if (!enabled) {
     sDisplayListShadows.clear();
-    sDisplayListShadowBytes = 0;
   }
 }
 #endif
@@ -508,7 +513,10 @@ void drain() {
   }
 #endif
   process(detail::sBufferData, detail::sBufferSize, true);
-  clear_buffer();
+  // These bytes were consumed, so the producer cache still describes live BP
+  // state. Public clear_buffer() instead discards bytes and invalidates it.
+  detail::sBufferSize = 0;
+  detail::sStableSourceSpanCount = 0;
 }
 
 const uint8_t* get_buffer_data() { return detail::sBufferData; }
@@ -545,6 +553,7 @@ const uint8_t* stable_source_for(const uint8_t* data,size_t bytes) {
   return span.source+relative;
 }
 void clear_buffer() {
+  invalidate_bp_write_cache();
   detail::sBufferSize = 0;
   detail::sStableSourceSpanCount = 0;
 }

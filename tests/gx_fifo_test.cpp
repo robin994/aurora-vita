@@ -3331,6 +3331,22 @@ TEST_F(GXFifoTest, ChanCtrl_Color0_LightingEnabled) {
   EXPECT_FALSE(state.lightMask[2]);
 }
 
+TEST_F(GXFifoTest, ChanCtrl_LightMaskBumpsVertexProgramGeneration) {
+  GXSetChanCtrl(GX_COLOR0, true, GX_SRC_REG, GX_SRC_VTX, GX_LIGHT0, GX_DF_CLAMP, GX_AF_SPOT);
+  auto first = capture_fifo();
+  GXSetChanCtrl(GX_COLOR0, true, GX_SRC_REG, GX_SRC_VTX, GX_LIGHT1, GX_DF_CLAMP, GX_AF_SPOT);
+  auto second = capture_fifo();
+
+  reset_gx_state();
+  decode_fifo(first);
+  const auto firstVertexProgramGeneration = g_gxState.vertexProgramStateGeneration;
+  decode_fifo(second);
+
+  EXPECT_NE(firstVertexProgramGeneration, g_gxState.vertexProgramStateGeneration);
+  EXPECT_TRUE(g_gxState.colorChannelState[GX_COLOR0].lightMask[1]);
+  EXPECT_FALSE(g_gxState.colorChannelState[GX_COLOR0].lightMask[0]);
+}
+
 TEST_F(GXFifoTest, ChanCtrl_Alpha0_NoLighting) {
   GXSetChanCtrl(GX_ALPHA0, false, GX_SRC_VTX, GX_SRC_REG, 0, GX_DF_NONE, GX_AF_NONE);
   auto bytes = capture_fifo();
@@ -3554,10 +3570,12 @@ TEST_F(GXFifoTest, MatrixIndexA_DecodesTexMatricesFromCpPacket) {
   auto bytes = cp_cmd(0x30, value);
 
   reset_gx_state();
+  g_gxState.numTexGens = 4;
   g_gxState.tcgs[0].mtx = GX_IDENTITY;
   g_gxState.tcgs[1].mtx = GX_IDENTITY;
   g_gxState.tcgs[2].mtx = GX_TEXMTX0;
   g_gxState.tcgs[3].mtx = GX_IDENTITY;
+  const auto beforeVertexProgramGeneration = g_gxState.vertexProgramStateGeneration;
   decode_fifo(bytes);
 
   EXPECT_EQ(g_gxState.currentPnMtx, 3u);
@@ -3565,6 +3583,7 @@ TEST_F(GXFifoTest, MatrixIndexA_DecodesTexMatricesFromCpPacket) {
   EXPECT_EQ(g_gxState.tcgs[1].mtx, GX_TEXMTX4);
   EXPECT_EQ(g_gxState.tcgs[2].mtx, GX_IDENTITY);
   EXPECT_EQ(g_gxState.tcgs[3].mtx, GX_TEXMTX7);
+  EXPECT_NE(beforeVertexProgramGeneration, g_gxState.vertexProgramStateGeneration);
 }
 
 TEST_F(GXFifoTest, MatrixIndexB_DecodesTexMatricesFromCpPacket) {
@@ -3572,16 +3591,31 @@ TEST_F(GXFifoTest, MatrixIndexB_DecodesTexMatricesFromCpPacket) {
   auto bytes = cp_cmd(0x40, value);
 
   reset_gx_state();
+  g_gxState.numTexGens = 8;
   g_gxState.tcgs[4].mtx = GX_IDENTITY;
   g_gxState.tcgs[5].mtx = GX_IDENTITY;
   g_gxState.tcgs[6].mtx = GX_TEXMTX0;
   g_gxState.tcgs[7].mtx = GX_IDENTITY;
+  const auto beforeVertexProgramGeneration = g_gxState.vertexProgramStateGeneration;
   decode_fifo(bytes);
 
   EXPECT_EQ(g_gxState.tcgs[4].mtx, GX_TEXMTX4);
   EXPECT_EQ(g_gxState.tcgs[5].mtx, GX_TEXMTX5);
   EXPECT_EQ(g_gxState.tcgs[6].mtx, GX_IDENTITY);
   EXPECT_EQ(g_gxState.tcgs[7].mtx, GX_TEXMTX9);
+  EXPECT_NE(beforeVertexProgramGeneration, g_gxState.vertexProgramStateGeneration);
+}
+
+TEST_F(GXFifoTest, MatrixIndexB_InactiveTexgensDoNotBumpVertexProgramGeneration) {
+  const u32 value = (GX_TEXMTX4 << 0) | (GX_TEXMTX5 << 6) | (GX_IDENTITY << 12) | (GX_TEXMTX9 << 18);
+  auto bytes = cp_cmd(0x40, value);
+
+  reset_gx_state();
+  g_gxState.numTexGens = 4;
+  const auto beforeVertexProgramGeneration = g_gxState.vertexProgramStateGeneration;
+  decode_fifo(bytes);
+
+  EXPECT_EQ(beforeVertexProgramGeneration, g_gxState.vertexProgramStateGeneration);
 }
 
 // --- GXSetChanAmbColor / GXSetChanMatColor (XF 0x100A-0x100D) ---

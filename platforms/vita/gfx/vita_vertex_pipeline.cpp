@@ -217,7 +217,7 @@ bool run_vertex_pipeline(std::vector<CanonicalVertex>& vertices,const PipelineDe
   const auto requirements=vertex_pipeline_requirements(pipeline);
   TransformContext ctx{vertices.data(), &pipeline, &state,requirements.needNormal,requirements.needBumpBasis,
                        requirements.colorMask,requirements.texgenMask};
-  return cpu_parallel_for(vertices.size(), transform_range, &ctx);
+  return cpu_parallel_for_vertex(vertices.size(), transform_range, &ctx);
 }
 
 } // namespace aurora::vita::gfx

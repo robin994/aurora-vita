@@ -48,6 +48,7 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
     return false;
   }
   stream_.reserve(config.commandReserve);
+  fixedVertexUniforms_.configure(config.fixedUniformPoolBytes);
   telemetry_ = config.telemetry;
   coverage_ = config.coverage;
   trace_ = config.trace;
@@ -72,7 +73,8 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   }
   initialized_ = true;
   if(config.staticGeometryBudget && renderer.supports_fixed_vertex())
-    staticGeometry_=std::make_unique<gfx::StaticGeometryCache>(renderer,config.staticGeometryBudget);
+    staticGeometry_=std::make_unique<gfx::StaticGeometryCache>(renderer,config.staticGeometryBudget,
+                                                             config.staticGeometryBudgetPreflight);
   staticGeometryRuntimeEnabled_=staticGeometry_!=nullptr;
   return true;
 }
@@ -155,7 +157,7 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
   if (!initialized_ || !arena_) return;
   stream_.reset();
   frameDrawIndex_ = 0;
-  fixedVertexUniforms_.clear();lastFixedUniforms_=nullptr;
+  fixedVertexUniforms_.reset();lastFixedUniforms_=nullptr;
   reset_pipeline_run_cache();
 #if defined(AURORA_VITA_UPSTREAM)
   resolvedTextureBindingsValid_=false;
@@ -173,7 +175,7 @@ void DrawSink::flush() noexcept {
     if (telemetry_) telemetry_->arena_overflow();
     if (strictUnsupported_) strictFailed_ = true;
     stream_.reset();
-    fixedVertexUniforms_.clear();lastFixedUniforms_=nullptr;
+    fixedVertexUniforms_.reset();lastFixedUniforms_=nullptr;
     reset_pipeline_run_cache();
     return;
   }
@@ -188,7 +190,7 @@ void DrawSink::flush() noexcept {
   }
   if(arena_->vertex_used()||arena_->index_used())arena_->mark_current_submitted();
   stream_.reset();
-  fixedVertexUniforms_.clear();lastFixedUniforms_=nullptr;
+  fixedVertexUniforms_.reset();lastFixedUniforms_=nullptr;
   reset_pipeline_run_cache();
 }
 
@@ -206,6 +208,30 @@ gfx::Handle DrawSink::white_texture() noexcept {
 
 #if defined(AURORA_VITA_UPSTREAM)
 namespace {
+uint64_t fixed_vertex_program_signature(const gfx::PipelineDesc& pipeline) noexcept {
+  uint64_t h = 0x8d58ac26afe12e47ull;
+  const auto mix = [&h](uint64_t v) noexcept { h = gfx::hash_combine(h, v); };
+  mix(pipeline.texgenCount);
+  for (unsigned i = 0; i < pipeline.texgenCount && i < gfx::MaxTextures; ++i) {
+    const auto& t = pipeline.texgens[i];
+    mix(static_cast<uint64_t>(t.type));
+    mix(static_cast<uint64_t>(t.source));
+    mix(static_cast<uint64_t>(static_cast<int64_t>(t.matrix)));
+    mix(static_cast<uint64_t>(static_cast<int64_t>(t.postMatrix)));
+    mix(t.embossSource);
+    mix(t.normalize ? 1u : 0u);
+    mix(t.matrixFromVertex ? 1u : 0u);
+  }
+  for (const auto& c : pipeline.colorChannels) {
+    mix(static_cast<uint64_t>(c.materialSource));
+    mix(static_cast<uint64_t>(c.ambientSource));
+    mix(static_cast<uint64_t>(c.diffuse));
+    mix(static_cast<uint64_t>(c.attenuation));
+    mix(c.lightingEnabled ? 1u : 0u);
+    mix(c.lightMask);
+  }
+  return h;
+}
 #if defined(__vita__)
 const char* prepare_draw_error_name(gfx::PrepareDrawError error) noexcept {
   switch(error){
@@ -495,6 +521,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
   const uint32_t stateGeneration = aurora::gx::g_gxState.pipelineStateGeneration;
   const uint32_t layoutGeneration = aurora::gx::g_gxState.layoutStateGeneration;
+  const uint32_t vertexProgramGeneration = aurora::gx::g_gxState.vertexProgramStateGeneration;
   const bool translatedCacheHit = translatedStateValid_ && translatedStateGeneration_ == stateGeneration &&
                                   translatedPrimitive_ == primitive && translatedFmt_ == fmt;
   if (translatedCacheHit && translatedLayoutGeneration_ != layoutGeneration) {
@@ -515,6 +542,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
                                                                translatedLayout_, translatedBaseKey_, telemetry_);
       if (telemetry_ && memoHit) telemetry_->count_translation_memo_hit();
     }
+    refresh_current_vertex_program_state(translatedPipeline_);
     translatedPipelineKey_ = translatedBaseKey_;
     // Streamed fixed-vertex draws need their own translated GPU pipeline too.
     // Leaving this stale meant dynamic draws could inherit layout/indexed-PN
@@ -526,6 +554,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       translatedGpuPipeline_.fixedVertexIndexedPn=gfx::vertex_layout_has_semantic(
           translatedLayout_,gfx::VertexSemantic::PnMatrixIndex);
       translatedGpuPipeline_.layout=gfx::fixed_vertex_gpu_layout(translatedGpuPipeline_);
+      translatedFixedVertexProgramKey_=fixed_vertex_program_signature(translatedGpuPipeline_);
     }
     translatedTextureMask_=gfx::pipeline_sampled_texture_mask(translatedPipeline_);
     translatedUsesOrigLod_=false;
@@ -539,9 +568,21 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     for(const auto&c:translatedPipeline_.colorChannels)translatedLit_=translatedLit_||c.lightingEnabled;
     translatedStateGeneration_ = stateGeneration;
     translatedLayoutGeneration_ = layoutGeneration;
+    translatedVertexProgramStateGeneration_ = vertexProgramGeneration;
     translatedPrimitive_ = primitive;
     translatedFmt_ = fmt;
     translatedStateValid_ = true;
+  }
+  if(translatedCacheHit && translatedVertexProgramStateGeneration_ != vertexProgramGeneration) {
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
+    refresh_current_vertex_program_state(translatedPipeline_);
+    translatedLit_=false;
+    for(const auto& c:translatedPipeline_.colorChannels)translatedLit_=translatedLit_||c.lightingEnabled;
+    if(staticGeometry_) {
+      refresh_current_vertex_program_state(translatedGpuPipeline_);
+      translatedFixedVertexProgramKey_=fixed_vertex_program_signature(translatedGpuPipeline_);
+    }
+    translatedVertexProgramStateGeneration_=vertexProgramGeneration;
   }
   const auto& pipeline = translatedPipeline_;
   const auto& layout = translatedLayout_;
@@ -780,7 +821,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         (uint64_t(gp.fixedPointSprite)<<2)|(uint64_t(gp.fixedLineSprite)<<3)|
         (uint64_t(gp.fixedVertexTexMtxMask)<<8)|(uint64_t(gp.fixedPrimitiveTexcoordMask)<<16)|
         (uint64_t(gp.primitive)<<24);
-    return gfx::hash_combine(translatedPipelineKey_,fixedBits^0xf1c3d5e7a9b20461ull);
+    return gfx::hash_combine(
+        gfx::hash_combine(translatedPipelineKey_,translatedFixedVertexProgramKey_),
+        fixedBits^0xf1c3d5e7a9b20461ull);
   };
   const auto resolveFixedPipeline=[&](uint64_t descKey) noexcept -> uint64_t {
     auto key=fixedPipelineKeys_.find(descKey);

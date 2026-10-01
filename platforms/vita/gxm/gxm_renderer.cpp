@@ -1,6 +1,7 @@
 #include "gxm_renderer.hpp"
 #include "gxm_memory.hpp"
 #include "gxm_program_cache.hpp"
+#include "gxm_fragment_prepare_cache.hpp"
 #include "gxm_shader_gen.hpp"
 #include "gxm_texture_layout.hpp"
 #include "../vita_data_paths.hpp"
@@ -21,6 +22,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -322,6 +324,7 @@ struct Renderer::Impl {
     // the ISP keeps the opaque pass type and hidden surface removal.
     bool ownsVertex = true;
     Pipeline* scissorFree = nullptr;
+    std::shared_ptr<FragmentPrepareCache> fragmentPrepare;
   };
   struct FragmentUniformState {
     GpuDrawUniforms uniforms{};
@@ -386,6 +389,7 @@ struct Renderer::Impl {
   std::array<bool,MaxTextures> boundTextureNativeWrap{};
   VertexUniformState vertexUniformState{};
   FragmentUniformState fragmentUniformState{};
+  uint64_t fragmentPrepareHits = 0, fragmentPrepareMisses = 0;
   Pipeline* resolvedPipelineHint = nullptr;
   uint64_t resolvedPipelineHintKey = 0;
   SceGxmSyncObject* pendingVertexDependency = nullptr;
@@ -584,7 +588,7 @@ struct Renderer::Impl {
     if (p.vertexId && p.ownsVertex) sceGxmShaderPatcherUnregisterProgram(patcher, p.vertexId);
     p.fragment = nullptr; p.vertex = nullptr; p.fragmentId = nullptr; p.vertexId = nullptr;
   }
-  static void find_fragment_parameters(Pipeline& p, const SceGxmProgram* fp) noexcept {
+  static void find_fragment_parameters(Pipeline& p, const SceGxmProgram* fp,bool prepareCache) noexcept {
     p.kcolor = sceGxmProgramFindParameterByName(fp, "u_kcolor");
     p.tevreg = sceGxmProgramFindParameterByName(fp, "u_tevreg");
     p.clip = sceGxmProgramFindParameterByName(fp, "u_clip_rect");
@@ -599,6 +603,16 @@ struct Renderer::Impl {
     p.textureWrap=sceGxmProgramFindParameterByName(fp,"u_tex_wrap");
     p.textureForceOpaque=sceGxmProgramFindParameterByName(fp,"u_tex_force_opaque");
     p.textureCopyMode=sceGxmProgramFindParameterByName(fp,"u_tex_copy_mode");
+    // A scissor-free variant was copied from its owner, but its GXP layout can
+    // differ. It must own a distinct preparation for its own fragment program.
+    p.fragmentPrepare.reset();
+    if(prepareCache) {
+      const size_t bytes=sceGxmProgramGetDefaultUniformBufferSize(fp);
+      if(bytes&&bytes<=FragmentPrepareCache::MaxBytes) {
+        p.fragmentPrepare=std::make_shared<FragmentPrepareCache>();
+        p.fragmentPrepare->configure(bytes);
+      }
+    }
   }
   // Best effort: a missing variant only costs the discard path, so failures
   // (compile sealed, USSE heap) never fail the owner pipeline.
@@ -635,7 +649,7 @@ struct Renderer::Impl {
       error = savedError;
       return;
     }
-    find_fragment_parameters(*variant, fp);
+    find_fragment_parameters(*variant, fp,config.fragmentPrepareCache);
     owner.scissorFree = variant;
   }
   std::shared_ptr<CompiledStage> compile_stage(const std::string& source, shark_type type,
@@ -754,6 +768,7 @@ bool Renderer::initialize(const Config& config) {
     return d.fail("invalid GXM config");
   log_memory_state("before-init");
   d.config = config; d.error.clear(); d.displayError = 0;
+  d.fragmentPrepareHits=d.fragmentPrepareMisses=0;
   d.stride = (config.width + 63u) & ~63u;
   const auto abort = [&]() { shutdown(); return false; };
   SceGxmInitializeParams init{};
@@ -927,7 +942,7 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   if (!d.check(sceGxmShaderPatcherCreateFragmentProgram(d.patcher, p.fragmentId, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
       SCE_GXM_MULTISAMPLE_NONE, &blend, vp, &p.fragment), "patch fragment program")) return abort();
   p.mvp = sceGxmProgramFindParameterByName(vp, "u_mvp");
-  Impl::find_fragment_parameters(p, fp);
+  Impl::find_fragment_parameters(p, fp,d.config.fragmentPrepareCache);
   p.gxPosition=sceGxmProgramFindParameterByName(vp,"u_gx_position");
   p.gxNormal=sceGxmProgramFindParameterByName(vp,"u_gx_normal");
   p.gxPositionPalette=sceGxmProgramFindParameterByName(vp,"u_gx_position_palette");
@@ -1064,6 +1079,8 @@ bool Renderer::begin_frame() {
   const int displayError = d.displayError.load(std::memory_order_relaxed);
   if (displayError < 0) return d.fail("display callback failed", displayError);
   d.stats = {}; d.frameStarted = sceKernelGetProcessTimeWide(); ++d.diagFrameCounter;
+  d.stats.nativeFragmentPrepareHits=d.fragmentPrepareHits;
+  d.stats.nativeFragmentPrepareMisses=d.fragmentPrepareMisses;
   d.profileDraws = (++d.profileFrame % 120u) == 60u;
   d.stats.nativeTimingsSampled=d.profileDraws;
   d.frameActive = true; d.boundTarget = 0;
@@ -1285,39 +1302,55 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   if(!reuseFragment) {
     void* fragment=nullptr;
     if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
-    const auto upload=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
-      if(!param || !count) return true;
-      count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
-      return d.check(sceGxmSetUniformDataF(fragment,param,0,count,data),"upload fragment uniform");
-    };
-    if(!upload(p.kcolor,16,u.kcolor[0].data()) || !upload(p.tevreg,16,u.tevreg[0].data()) || !upload(p.clip,4,clip)) return false;
-    if(!upload(p.fogColor,4,u.fogColor.data()) || !upload(p.fogParams,4,u.fogParams.data()) ||
-       !upload(p.fogRange,10,u.fogRangeK.data()) || !upload(p.viewportWidth,1,&u.renderViewportWidth) ||
-       !upload(p.indirectMatrices,MaxIndMatrices*8,u.indirectMatrices[0].data()) ||
-       !upload(p.texcoordScale,usedTextureCount*4,u.texcoordScale[0].data()) ||
-       !upload(p.textureSizeBias,usedTextureCount*4,u.textureSizeBias[0].data()))return false;
-    if(p.textureTransform) {
-      if(!upload(p.textureTransform,usedTextureCount*4,textureTransform[0].data()))return false;
+    std::optional<FragmentPrepareInputs> preparedInputs;
+    bool prepared=false;
+    if(p.fragmentPrepare) {
+      auto& inputs=preparedInputs.emplace();
+      inputs.uniforms=u;
+      inputs.scissor=p.clip?scissor:Scissor{};
+      inputs.textureFlags=textureFlags;
+      inputs.textureTransform=textureTransform;
+      inputs.usedTextureCount=static_cast<uint8_t>(usedTextureCount);
+      prepared=p.fragmentPrepare->copy_to(inputs,fragment);
+      if(prepared)d.stats.nativeFragmentPrepareHits=++d.fragmentPrepareHits;
+      else d.stats.nativeFragmentPrepareMisses=++d.fragmentPrepareMisses;
     }
-    if(p.textureWrap) {
-      std::array<std::array<float,4>,MaxTextures> wrap{};
-      for(unsigned i=0;i<usedTextureCount;++i) {
-        const auto wrapS=textures?(*textures)[i].sampler.wrapS:WrapMode::Clamp;
-        const auto wrapT=textures?(*textures)[i].sampler.wrapT:WrapMode::Clamp;
-        wrap[i]={float(static_cast<unsigned>(wrapS)),float(static_cast<unsigned>(wrapT)),0.f,0.f};
+    if(!prepared) {
+      const auto upload=[&](const SceGxmProgramParameter* param,unsigned count,const float* data) {
+        if(!param || !count) return true;
+        count=std::min(count,sceGxmProgramParameterGetComponentCount(param)*sceGxmProgramParameterGetArraySize(param));
+        return d.check(sceGxmSetUniformDataF(fragment,param,0,count,data),"upload fragment uniform");
+      };
+      if(!upload(p.kcolor,16,u.kcolor[0].data()) || !upload(p.tevreg,16,u.tevreg[0].data()) || !upload(p.clip,4,clip)) return false;
+      if(!upload(p.fogColor,4,u.fogColor.data()) || !upload(p.fogParams,4,u.fogParams.data()) ||
+         !upload(p.fogRange,10,u.fogRangeK.data()) || !upload(p.viewportWidth,1,&u.renderViewportWidth) ||
+         !upload(p.indirectMatrices,MaxIndMatrices*8,u.indirectMatrices[0].data()) ||
+         !upload(p.texcoordScale,usedTextureCount*4,u.texcoordScale[0].data()) ||
+         !upload(p.textureSizeBias,usedTextureCount*4,u.textureSizeBias[0].data()))return false;
+      if(p.textureTransform) {
+        if(!upload(p.textureTransform,usedTextureCount*4,textureTransform[0].data()))return false;
       }
-      if(!upload(p.textureWrap,usedTextureCount*4,wrap[0].data()))return false;
-    }
-    if(p.textureForceOpaque) {
-      std::array<float,MaxTextures> opaque{};
-      for(unsigned i=0;i<usedTextureCount;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
-      if(!upload(p.textureForceOpaque,usedTextureCount,opaque.data()))return false;
-    }
-    if(p.textureCopyMode) {
-      std::array<float,MaxTextures> mode{};
-      for(unsigned i=0;i<usedTextureCount;++i)
-        mode[i]=textures?float(efb_copy_sample_mode((*textures)[i].sampleFormat)):0.f;
-      if(!upload(p.textureCopyMode,usedTextureCount,mode.data()))return false;
+      if(p.textureWrap) {
+        std::array<std::array<float,4>,MaxTextures> wrap{};
+        for(unsigned i=0;i<usedTextureCount;++i) {
+          const auto wrapS=textures?(*textures)[i].sampler.wrapS:WrapMode::Clamp;
+          const auto wrapT=textures?(*textures)[i].sampler.wrapT:WrapMode::Clamp;
+          wrap[i]={float(static_cast<unsigned>(wrapS)),float(static_cast<unsigned>(wrapT)),0.f,0.f};
+        }
+        if(!upload(p.textureWrap,usedTextureCount*4,wrap[0].data()))return false;
+      }
+      if(p.textureForceOpaque) {
+        std::array<float,MaxTextures> opaque{};
+        for(unsigned i=0;i<usedTextureCount;++i)opaque[i]=textures&&(*textures)[i].forceOpaque?1.f:0.f;
+        if(!upload(p.textureForceOpaque,usedTextureCount,opaque.data()))return false;
+      }
+      if(p.textureCopyMode) {
+        std::array<float,MaxTextures> mode{};
+        for(unsigned i=0;i<usedTextureCount;++i)
+          mode[i]=textures?float(efb_copy_sample_mode((*textures)[i].sampleFormat)):0.f;
+        if(!upload(p.textureCopyMode,usedTextureCount,mode.data()))return false;
+      }
+      if(p.fragmentPrepare)p.fragmentPrepare->store(*preparedInputs,fragment);
     }
     auto& next=d.fragmentUniformState;
     next.uniforms=u;next.scissor=scissor;next.textureFlags=textureFlags;next.textureTransform=textureTransform;

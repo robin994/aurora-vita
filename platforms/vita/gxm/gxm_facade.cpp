@@ -409,6 +409,7 @@ bool Renderer::initialize() noexcept {
   c.cdramPoolBytes=cfg_.nativeCdramPoolBytes;
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
   c.d16Depth=cfg_.nativeD16Depth;
+  c.fragmentPrepareCache=cfg_.nativeFragmentPrepareCache;
   c.programCachePath=cfg_.programBinaryCachePath;
   c.preloadProgramCache=cfg_.preloadProgramBinaryCache;
   c.programCachePreloadLimit=cfg_.programBinaryPreloadLimit;
@@ -470,6 +471,11 @@ uint32_t Renderer::program_cache_misses() const noexcept {
 void Renderer::begin_frame() noexcept {
   pipelines_.clear_pins();pipelines_.trim_to_budget();stats_={};
   failed_=!native_->begin_frame();boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;
+  // Task profiling can read stats before queued draws/present. These counters
+  // are lifetime totals: carry the native values through the frame reset.
+  const auto& s=native_->stats();
+  stats_.nativeFragmentPrepareHits=s.nativeFragmentPrepareHits;
+  stats_.nativeFragmentPrepareMisses=s.nativeFragmentPrepareMisses;
   if(!failed_ && mainEfb_ && !bind_efb(mainEfb_)) failed_=true;
 }
 void Renderer::end_frame() noexcept {
@@ -492,6 +498,8 @@ bool Renderer::present(bool display) noexcept {
   stats_.nativeTimingsSampled=s.nativeTimingsSampled;
   stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;
   stats_.nativeDrawUs=s.nativeDrawUs;stats_.nativeDisplayQueueAddUs=s.nativeDisplayQueueAddUs;
+  stats_.nativeFragmentPrepareHits=s.nativeFragmentPrepareHits;
+  stats_.nativeFragmentPrepareMisses=s.nativeFragmentPrepareMisses;
   stats_.nativeSceneCount=s.nativeSceneCount;
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
@@ -582,6 +590,8 @@ void Renderer::draw(const DrawPacket& packet) noexcept {
   stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;stats_.nativeDrawUs=s.nativeDrawUs;
   stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
   stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
+  stats_.nativeFragmentPrepareHits=s.nativeFragmentPrepareHits;
+  stats_.nativeFragmentPrepareMisses=s.nativeFragmentPrepareMisses;
   stats_.nativeSceneCount=s.nativeSceneCount;
 }
 void Renderer::execute(const CommandStream& stream) noexcept {
