@@ -1,8 +1,25 @@
 # Configuration recipes
 
-These recipes are explicit controls and individual experiments for revision
-`ff5b2cf` (2026-10-02). The generic GXM runtime defaults include an 8 MiB geometry
+These recipes include the Vita-native implementation of 2026-10-02 on base `bb5147e`. The generic GXM runtime defaults include an 8 MiB geometry
 cache and lit fixed-vertex processing; an explicit CPU control overrides them.
+
+## Stable baseline and native candidate
+
+```sh
+cmake --preset vita-gxm-stable
+cmake --build --preset vita-gxm-stable --parallel 8
+cmake --preset vita-gxm-candidate
+cmake --build --preset vita-gxm-candidate --parallel 8
+```
+
+Stable enables the three accepted async/direct options. Candidate also defaults
+`cpu_distinct_core_dispatch` and `gxm_immediate_draw_view` to true. For an isolated
+comparison, turn either field false in the consuming port; compare one change
+at a time. `vita-gxm-control` selects all five OFF in its own directory.
+
+The new candidate features remain pending hardware comparison. Keep local draw
+batching false while measuring the direct view; batching routes through the
+owning queue. [Implementation and gates](../VITA_NATIVE_IMPLEMENTATION_2026-10-02.md).
 
 ## Conservative GXM control
 

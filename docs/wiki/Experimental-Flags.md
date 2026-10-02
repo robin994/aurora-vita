@@ -1,6 +1,6 @@
 # Experimental flags
 
-This inventory reflects renderer revision `ff5b2cf` (2026-10-02).
+This inventory includes the 2026-10-02 Vita-native implementation on base `bb5147e`.
 `platforms/vita/aurora_vita_backend.hpp` and the CMake modules define the source
 defaults; historical audit recommendations may describe a different revision.
 Defaults below are generic CMake defaults unless a preset override is stated.
@@ -16,7 +16,7 @@ Defaults below are generic CMake defaults unless a preset override is stated.
 | `AURORA_VITA_LTO` | `ON` on Vita, otherwise `OFF` | Common | Performance | Enables fat LTO objects and requests LTO at final link. Benchmark link time, binary size, and runtime. |
 | `AURORA_VITA_LTO_JOBS` | `auto` | Common/GXM | Build tuning | LTO parallelism for common/native GXM objects; accepts `auto` or a positive GCC job count. The VitaGL-specific objects currently use `auto`. |
 | `AURORA_VITA_RUNTIME_LOGGING` | `ON` | Common | Performance / release | Compile-time hard switch for Aurora Vita console logging. Set `OFF` for the lowest-overhead release build; all `AURORA_VITA_LOG_*` call sites compile out and log arguments are not evaluated. Explicit telemetry/coverage/trace files remain separate. |
-| `AURORA_VITA_WITH_GX_FRONTEND` | `OFF`; all three public presets set `ON` | Common | Integration | Builds the Dawn-free Dolphin GX/VI frontend used by native Vita ports and real host frontend tests. |
+| `AURORA_VITA_WITH_GX_FRONTEND` | `OFF`; all public presets set `ON` | Common | Integration | Builds the Dawn-free Dolphin GX/VI frontend used by native Vita ports and real host frontend tests. |
 | `AURORA_VITA_WITH_UPSTREAM_GX` | `OFF` | VitaGL/desktop integration | Experimental integration | Compiles the Vita bridge against upstream Aurora GX structs. Not supported for native GXM and not intended for Vita runtime while upstream GX still owns Dawn. |
 | `AURORA_VITA_BUILD_PROBE` | `OFF` | Common | Validation | Builds the standalone probe for the selected renderer. |
 | `AURORA_VITA_BUILD_SDL3_PROBE` | `OFF` | VitaGL | Validation | Builds the SDL3 + vitaGL coexistence probe. Rejected by the GXM backend. |
@@ -25,15 +25,17 @@ Defaults below are generic CMake defaults unless a preset override is stated.
 
 ## Texture and streaming flags
 
-| Flag | VitaGL default | GXM default | Risk | Notes |
+| Flag | VitaGL default | GXM default | Status | Notes |
 |---|---:|---:|---|---|
-| `AURORA_VITA_DIRECT_STREAM_WRITE` | `OFF` | forced `OFF` | High | VitaGL mapped-buffer switch. Native GXM has a separate option below; this macro does not select GXM direct writes. |
-| `AURORA_VITA_GXM_DIRECT_STREAM_WRITE` | N/A | `OFF` | High | Writes native vertex/index data directly into CpuGpu ring pages. Hardware cache/lifetime comparison required. |
-| `AURORA_VITA_ASYNC_GX` | N/A | `OFF` | High | Moves native GX decode/translation/submission to a dedicated consumer thread. Keep FIFO barriers and producer ownership intact. |
-| `AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT` | N/A | `OFF` | Medium/High | Bypasses CommandStream for streamed native draws; local batching selects queued submission when enabled. |
-| `AURORA_VITA_RUNTIME_MIPMAP_GENERATION` | `OFF` | N/A | Medium | Generates missing mip chains at runtime. Can improve sampling completeness but adds CPU/GPU work and memory pressure. |
-| `AURORA_VITA_NATIVE_CMPR` | `ON` | `OFF` | Medium/High | Uses native CMPR/DXT1/BC1 upload paths. GXM keeps this opt-in because image parity must be checked on hardware. |
-| `AURORA_VITA_NATIVE_GX_TEXTURES` | `ON` | `OFF` | Medium/High | Uses native GX intensity, intensity-alpha, and RGB565 mappings where supported. GXM keeps this opt-in because format/channel/alpha parity must be checked. |
+| `AURORA_VITA_DIRECT_STREAM_WRITE` | `OFF` | forced `OFF` | Experimental | VitaGL mapped-buffer switch. Native GXM has a separate option below; this macro does not select GXM direct writes. |
+| `AURORA_VITA_GXM_DIRECT_STREAM_WRITE` | N/A | `OFF` | Stable profile | Writes native vertex/index data directly into CpuGpu ring pages. Accepted as stable by the owner in the tested configuration; `vita-gxm-stable` enables it. Newly built artifacts require their own checks. |
+| `AURORA_VITA_ASYNC_GX` | N/A | `OFF` | Stable profile | Owner-validated stable option; stable preset ON. Moves native GX decode/translation/submission to CPU2. Keep FIFO barriers and producer ownership intact. |
+| `AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT` | N/A | `OFF` | Stable profile | Owner-validated stable option; stable preset ON. Bypasses CommandStream for streamed native draws; local batching selects queued submission when enabled. |
+| `AURORA_VITA_DISTINCT_CPU_CORES` | N/A | `OFF` | Candidate | Selects distinct-core dispatch as the BackendConfig default; only `vita-gxm-candidate` sets ON. Cap filtering never admits CPU3 beyond the allowed prefix. |
+| `AURORA_VITA_GXM_IMMEDIATE_DRAW_VIEW` | N/A | `OFF` | Candidate | Selects borrowed synchronous draw state as the runtime default. Requires direct draw submission to reach that path; queued draws retain owning snapshots. |
+| `AURORA_VITA_RUNTIME_MIPMAP_GENERATION` | `OFF` | N/A | Opt-in | Generates missing mip chains at runtime. Can improve sampling completeness but adds CPU/GPU work and memory pressure. |
+| `AURORA_VITA_NATIVE_CMPR` | `ON` | `OFF` | Opt-in on GXM | Uses native CMPR/DXT1/BC1 upload paths. GXM keeps this opt-in because image parity must be checked on hardware. |
+| `AURORA_VITA_NATIVE_GX_TEXTURES` | `ON` | `OFF` | Opt-in on GXM | Uses native GX intensity, intensity-alpha, and RGB565 mappings where supported. GXM keeps this opt-in because format/channel/alpha parity must be checked. |
 
 ## Runtime experimental/tuning fields
 
@@ -115,3 +117,14 @@ The following names may appear in source or audit notes but should not be treate
 - `AURORA_VITA_NO_DISCARD` — historical/audit discussion, not a supported current CMake option.
 
 Do not add new port configuration around internal macros; expose a real CMake option or `BackendConfig` field instead.
+
+## Profile acceptance
+
+The stable preset selects the three options already accepted by the project
+owner, while the control explicitly disables them. Both disable the new
+candidate defaults. The generic GXM CMake defaults remain OFF; native texture
+format defaults are unchanged. `BackendConfig::cpu_distinct_core_dispatch=false`
+and `gxm_immediate_draw_view=false` restore the original dispatch and owning
+packet for comparison, even in a candidate build. The common statistics/scratch
+refactor is present in all profiles; compare against base `bb5147e` to measure
+that refactor separately. No new FPS or device parity result is claimed.

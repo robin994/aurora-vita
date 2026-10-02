@@ -14,7 +14,8 @@ inline constexpr uint32_t MaxWorkerThreads = MaxExecutionLanes - 1;
 // optional third helper may be pinned to the system-reserved core when the
 // title has explicit access to it (for example through CapUnlocker).
 bool initialize_cpu_workers(uint32_t workerThreads = 2, size_t minItems = 512,
-                            uint32_t defaultExecutionLanes = 0) noexcept;
+                            uint32_t defaultExecutionLanes = 0,
+                            bool distinctCoreDispatch = false) noexcept;
 void shutdown_cpu_workers() noexcept;
 
 // Runs a disjoint range on the caller and the persistent workers, or falls back

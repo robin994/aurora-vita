@@ -1,4 +1,5 @@
 #include "vita_cpu_workers.hpp"
+#include "vita_cpu_dispatch_plan.hpp"
 #include "../vita_log.hpp"
 
 #include <algorithm>
@@ -32,6 +33,7 @@ struct CpuWorkerState {
   };
   std::array<Lane, MaxWorkers> lanes{};
   bool initialized = false;
+  bool distinctCoreDispatch = false;
   uint32_t workerCount = 0;
   uint32_t defaultExecutionLanes = 1;
   size_t minItems = 512;
@@ -71,10 +73,11 @@ void destroy_lane(CpuWorkerState::Lane &lane) noexcept {
 }
 } // namespace
 
-bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t defaultExecutionLanes) noexcept {
+bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t defaultExecutionLanes, bool distinctCoreDispatch) noexcept {
   if (g_workers.initialized) shutdown_cpu_workers();
 
   g_workers.workerCount = 0;
+  g_workers.distinctCoreDispatch = distinctCoreDispatch;
   g_workers.minItems = std::max<size_t>(1, minItems);
   const uint32_t requested = std::min(workerThreads, MaxWorkers);
   constexpr std::array<int,MaxWorkers> WorkerAffinities{{
@@ -133,8 +136,9 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t de
   g_workers.defaultExecutionLanes=defaultExecutionLanes==0?availableLanes:
       std::max<uint32_t>(1,std::min(defaultExecutionLanes,availableLanes));
   AURORA_VITA_LOG_INFO(
-      "[aurora-vita] cpu workers=%u lanes=%u default_lanes=%u sync=paired_semaphores helpers=cpu2,cpu1-lowpri,cpu3-probed parallel_min_items=%llu\n",
+      "[aurora-vita] cpu workers=%u lanes=%u default_lanes=%u sync=paired_semaphores helpers=cpu2,cpu1-lowpri,cpu3-probed distinct_cores=%u parallel_min_items=%llu\n",
       g_workers.workerCount,g_workers.workerCount+1,g_workers.defaultExecutionLanes,
+      g_workers.distinctCoreDispatch?1u:0u,
       static_cast<unsigned long long>(g_workers.minItems));
   return true;
 }
@@ -190,17 +194,29 @@ bool cpu_parallel_for_min_lanes(size_t count, size_t minItems, uint32_t maxExecu
       maxLanes, std::max<size_t>(1, count / minItems)));
   if (usefulLanes <= 1) return task(context, 0, count, 0);
 
-  const uint32_t lanes = usefulLanes;
+  CpuDispatchPlan plan{};
+  if(g_workers.distinctCoreDispatch) {
+    std::array<int,MaxWorkerThreads> cpus{};
+    for(uint32_t i=0;i<g_workers.workerCount;++i)cpus[i]=g_workers.lanes[i].cpuId.load(std::memory_order_relaxed);
+    plan=cpu_dispatch_plan(count,minItems,maxExecutionLanes,sceKernelGetCpuId(),cpus,g_workers.workerCount);
+  }else {
+    plan.workerCount=usefulLanes-1;
+    for(uint32_t i=0;i<plan.workerCount;++i)plan.workers[i]=i;
+  }
+  if(!plan.workerCount)return task(context,0,count,0);
+  const uint32_t lanes = plan.lanes();
   const size_t chunk = count / lanes + (count % lanes != 0);
-  const size_t mainEnd = std::min(count, chunk);
+  const size_t mainEnd = g_workers.distinctCoreDispatch?plan.range(count,0).second:std::min(count,chunk);
 
   const uint32_t activeWorkers=lanes-1;
   std::array<bool,MaxWorkers> dispatched{};
   bool workersResult=true;
-  for (uint32_t i = 0; i < activeWorkers; ++i) {
+  for (uint32_t rank = 0; rank < activeWorkers; ++rank) {
+    const uint32_t i=plan.workers[rank];
     auto &lane=g_workers.lanes[i];
-    const size_t begin = std::min(count, chunk * static_cast<size_t>(i + 1));
-    const size_t end = std::min(count, begin + chunk);
+    const auto range=plan.range(count,rank+1);
+    const size_t begin = g_workers.distinctCoreDispatch?range.first:std::min(count,chunk*size_t(rank+1));
+    const size_t end = g_workers.distinctCoreDispatch?range.second:begin+std::min(count-begin,chunk);
     lane.task=task;lane.context=context;lane.begin=begin;lane.end=end;
     lane.result=false;
     lane.state.store(1,std::memory_order_release);
@@ -209,12 +225,15 @@ bool cpu_parallel_for_min_lanes(size_t count, size_t minItems, uint32_t maxExecu
       workersResult=false;
       lane.task=nullptr;lane.context=nullptr;
       lane.state.store(0,std::memory_order_release);
+      // A rejected wake has no consumer. Complete the range locally, preserving
+      // exact coverage while reporting the dispatch failure to the caller.
+      task(context,begin,end,i+1);
     }
   }
 
   const bool mainResult = task(context, 0, mainEnd, 0);
 
-  for (uint32_t i = 0; i < activeWorkers; ++i) if(dispatched[i]) {
+  for (uint32_t i = 0; i < g_workers.workerCount; ++i) if(dispatched[i]) {
     auto &lane=g_workers.lanes[i];
     // Consume exactly one acknowledgement for every published job, even if
     // state already says done. Conditional signalling can leave a stale token
@@ -256,7 +275,7 @@ namespace {
 size_t g_minItems = 512;
 }
 
-bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t) noexcept {
+bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t, bool) noexcept {
   g_minItems = std::max<size_t>(1, minItems);
   return true;
 }

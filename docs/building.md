@@ -35,10 +35,10 @@ ctest --preset vita-host-tests --output-on-failure
 ```
 
 The host preset enables the real Dawn-free GX frontend with test-only
-thread/semaphore shims. With Python available, the current suite contains 11
+thread/semaphore shims. With Python available, the current suite contains 12
 CTest targets covering CPU/shader contracts, byte comparison, vertex packing,
 regressions, frontend translation, command-stream lifetime, submission,
-workers, renderer selection, performance-log comparison and ELF classification.
+workers, renderer selection, performance-log comparison, build manifest identity and ELF classification.
 These tests do not execute Vita GPU programs or prove device scheduling.
 
 For a separate sanitizer configuration with Clang/GCC:
@@ -52,6 +52,32 @@ cmake --preset vita-host-tests -B build/vita-host-sanitizers \
 cmake --build build/vita-host-sanitizers --parallel 8
 ctest --test-dir build/vita-host-sanitizers --output-on-failure
 ```
+
+## GXM profiles
+
+- `vita-gxm-stable`: the three owner-validated async/direct flags ON;
+  `vita-gxm-control`: the three OFF. New dispatch/view defaults are OFF in both.
+- `vita-gxm-candidate`: stable flags plus distinct CPU-core dispatch and immediate
+  borrowed draw views. These additions have local tests; device acceptance is pending.
+- `vita-gxm`: generic GXM configuration with ordinary CMake defaults. A reused
+  cache may preserve previous overrides; named profiles explicitly select their flags.
+
+Each named profile builds both probes under its own `build/<preset>` directory.
+The profile name does not certify a newly compiled binary on hardware. See the
+[handoff](VITA_NATIVE_IMPLEMENTATION_2026-10-02.md) for artifact identities.
+
+```sh
+export VITASDK=/usr/local/vitasdk
+cmake --preset vita-gxm-stable
+cmake --build --preset vita-gxm-stable --parallel 8
+cmake --preset vita-gxm-control
+cmake --build --preset vita-gxm-control --parallel 8
+cmake --preset vita-gxm-candidate
+cmake --build --preset vita-gxm-candidate --parallel 8
+```
+
+The new runtime fields change the C++ BackendConfig layout. Recompile the port
+and library together. A probe build does not replace the game's linked binary.
 
 ## Device builds
 

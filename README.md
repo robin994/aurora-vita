@@ -25,14 +25,18 @@ gameplay fidelity and sustained frame rate require tests in the consuming port.
 | Draw batching | Adjacent compatible streamed triangles can merge; `gxm_local_draw_batching` defaults to `false`. Ordering barriers and resource lifetime checks remain in place. |
 | CPU preparation | Two helper threads by default. An optional third helper is accepted only after a CPU3 affinity/core-ID probe; renderer and game lane caps are separate. |
 | Persistent data | Program caches and GXM pipeline warmup data are isolated under `ux0:data/aurora-vita/<TITLE_ID>/`. |
-| Profiling | Completed-frame snapshots, submission/upload counters, attributed finish waits and sampled FRAME-log comparison tools. |
+| Profiling | Completed performance and memory snapshots without a GX drain, native counters composed on read, attributed finish waits, build manifests and sampled FRAME-log comparison. |
 
 GXM currently defaults to display-sized raster output, DF32 depth, an **8 MiB
 static geometry cache** and **lit fixed-vertex GPU processing** for eligible
 draws. CPU control configurations explicitly set the geometry budget to `0`
-and `gxm_lit_fixed_vertex_gpu=false`. Native packed textures, GXM direct writes,
-async GX, direct draw submission, streamed fixed-vertex processing and local
-batching remain optional. See the [flag matrix](docs/wiki/Experimental-Flags.md)
+and `gxm_lit_fixed_vertex_gpu=false`. Native packed textures remain experimental.
+GXM direct stream writes, async GX and direct draw submission have been accepted as stable by the owner
+for the tested configuration. `vita-gxm-stable` enables these three flags;
+generic defaults remain OFF. Streamed fixed-vertex processing and local
+batching remain optional. `vita-gxm-candidate` additionally enables distinct
+CPU-core dispatch and borrowed immediate draw state, pending device comparison.
+See the [flag matrix](docs/wiki/Experimental-Flags.md)
 for defaults and the [configuration recipes](docs/wiki/Configuration-Recipes.md)
 for explicit controls.
 
@@ -51,12 +55,14 @@ To build the native GXM probes with VitaSDK and the required shader libraries:
 
 ```sh
 export VITASDK=/usr/local/vitasdk
-cmake --preset vita-gxm
-cmake --build --preset vita-gxm --parallel 8
+cmake --preset vita-gxm-stable
+cmake --build --preset vita-gxm-stable --parallel 8
 ```
 
-This produces `build/vita-gxm/aurora_vita_gx_probe.vpk` and
-`build/vita-gxm/aurora_vita_gxm_probe.vpk`. Use `vita-vitagl` for the vitaGL
+This produces `build/vita-gxm-stable/aurora_vita_gx_probe.vpk` and
+`build/vita-gxm-stable/aurora_vita_gxm_probe.vpk`.
+Use `vita-gxm-control` for the three flags OFF in a separate directory.
+Use `vita-vitagl` for the vitaGL
 backend and its probes. The device needs the shader compiler module
 `libshacccg.suprx`; the VPKs do not redistribute it.
 
@@ -64,6 +70,15 @@ See [Building and integration](docs/building.md) for dependencies, probe title
 IDs, embedding `aurora::vita_backend`, ABI selection and native binary audits.
 
 ## Validation status
+
+The 2026-10-02 Vita-native implementation is recorded in the
+[implementation handoff](docs/VITA_NATIVE_IMPLEMENTATION_2026-10-02.md), with
+current test results, build profiles, artifact hashes and pending device gates.
+The stable preset names the accepted three-flag profile; newly rebuilt binaries
+and the current common refactor still require their own device checks.
+
+Historical evidence:
+
 
 The renderer revision [`ff5b2cf`](https://github.com/robin994/aurora-vita/commit/ff5b2cf5ab6866fbf6e7708a0978157ddc5c0e7b),
 validated on **2026-10-02**, passed **11/11 host CTest targets** and **11/11
@@ -80,6 +95,8 @@ comparison procedure.
 ## Documentation
 
 - [Architecture and current status](docs/architecture.md): execution flow, ownership, invariants and source map.
+- [Vita-native AS-IS audit and implementation tasks](docs/VITA_NATIVE_AS_IS_2026-10-02.md): source/binary evidence, performance priorities and bounded development handoffs (Italian).
+- [Vita-native implementation and handoff](docs/VITA_NATIVE_IMPLEMENTATION_2026-10-02.md): AVN-00–11 status, controls and validation.
 - [Build and game integration](docs/building.md): standalone presets, embedding and ABI propagation.
 - [Vita wiki](docs/wiki/Home.md): GXM/VitaGL settings, runtime tuning and diagnostics.
 - [Native GXM implementation](platforms/vita/gxm/README.md): native EFB paths, coverage and historical integration evidence.

@@ -139,9 +139,11 @@ void state_transitions() {
 void completed_frame_does_not_fence() {
   BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
   config.log_level=RuntimeLogLevel::Silent;
-  CHECK(initialize(config));CHECK(!completed_performance_snapshot().completedFrame);
+  CHECK(initialize(config));CHECK(!completed_performance_snapshot().completedFrame);CHECK(!completed_memory_snapshot().completedFrame);
   CHECK(begin_frame());end_frame();
   const auto first=completed_performance_snapshot();CHECK(first.completedFrame&&first.frameIndex==1);
+  const auto firstMemory=completed_memory_snapshot();CHECK(firstMemory.completedFrame&&firstMemory.frameIndex==1);
+  CHECK(firstMemory.budget.staticGeometryBytes==memory_budget().staticGeometryBytes);
   CHECK(aurora::gx::fifo::start_worker());
   struct Blocker {std::atomic<bool>* entered;std::atomic<bool>* release;};
   std::atomic<bool> entered=false,release=false,readerDone=false;
@@ -153,13 +155,19 @@ void completed_frame_does_not_fence() {
   while(!entered.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
   CHECK(entered.load());
   std::thread reader([&]{const auto value=completed_performance_snapshot();
-    readerDone.store(value.completedFrame&&value.frameIndex==first.frameIndex,std::memory_order_release);});
+    const auto memory=completed_memory_snapshot();
+    readerDone.store(value.completedFrame&&value.frameIndex==first.frameIndex&&memory.completedFrame&&memory.frameIndex==firstMemory.frameIndex,std::memory_order_release);});
   while(!readerDone.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
   const bool beforeRelease=readerDone.load(std::memory_order_acquire);
   release.store(true,std::memory_order_release);reader.join();CHECK(beforeRelease);
   aurora::gx::fifo::drain_sync();CHECK(begin_frame());end_frame();aurora::gx::fifo::drain_sync();
-  CHECK(completed_performance_snapshot().frameIndex==2);
-  shutdown();CHECK(!completed_performance_snapshot().completedFrame);
+  CHECK(completed_performance_snapshot().frameIndex==2);CHECK(completed_memory_snapshot().frameIndex==2);
+  shutdown();CHECK(!completed_performance_snapshot().completedFrame);CHECK(!completed_memory_snapshot().completedFrame);
+  BackendConfig invalid=config;invalid.render_width=invalid.width+1;
+  CHECK(!initialize(invalid));CHECK(!completed_memory_snapshot().completedFrame);
+  CHECK(initialize(config));CHECK(!completed_memory_snapshot().completedFrame);
+  CHECK(begin_frame());end_frame();CHECK(completed_memory_snapshot().frameIndex==1);
+  shutdown();CHECK(!completed_memory_snapshot().completedFrame);
 }
 }
 int main(){layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();

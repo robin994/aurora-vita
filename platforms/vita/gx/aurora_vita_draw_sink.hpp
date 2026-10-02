@@ -10,7 +10,7 @@
 #include "../integration/vita_frame_trace.hpp"
 #include <cstddef>
 #include <cstdint>
-#include <deque>
+#include "../gfx/vita_fixed_snapshots.hpp"
 #include <memory>
 #include "../gfx/vita_hash_map.hpp"
 
@@ -58,6 +58,7 @@ struct DrawSinkConfig {
   bool staticGeometryStableOnly = false;
   bool allowLitFixedVertexGpu = false;
   bool localDrawBatching = false;
+  bool immediateDrawView = false;
   bool allowStreamedFixedVertexGpu = false;
   bool allowDynamicTexMatrixGpu = false;
   bool allowBumpFixedVertexGpu = false;
@@ -87,7 +88,7 @@ public:
   void shutdown() noexcept;
   void begin_frame(uint64_t frame) noexcept;
   void flush() noexcept;
-  void reset_commands() noexcept { stream_.reset(); fixedVertexUniforms_.clear(); lastFixedUniforms_ = nullptr; reset_pipeline_run_cache(); }
+  void reset_commands() noexcept { stream_.reset(); fixedVertexUniforms_.clear(); reset_pipeline_run_cache(); }
   void invalidate_texture_resolve_cache() noexcept {
 #if defined(AURORA_VITA_UPSTREAM)
     resolvedTextureBindingsValid_ = false;
@@ -128,11 +129,9 @@ private:
   gfx::CommandStream stream_{};
   gfx::PreparedDraw preparedScratch_{};
   std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
-  std::deque<gfx::FixedVertexUniforms> fixedVertexUniforms_{};
-  // Snapshot reuse across consecutive GPU-geometry draws (see submit()).
-  gfx::FixedVertexUniforms* lastFixedUniforms_ = nullptr;
+  gfx::FixedUniformSnapshots fixedVertexUniforms_{};
   uint64_t vertexStateVersion_ = 0;
-  uint64_t fixedUniformRevision_ = 0;
+
   gfx::PipelineDesc translatedGpuPipeline_{};
   gfx::FlatHashMap<uint64_t,uint64_t> fixedPipelineKeys_{};
   gfx::VertexTransformState translatedVertexState_{};
@@ -182,6 +181,8 @@ private:
   bool strictFailed_ = false;
   bool allowLitFixedVertexGpu_ = false;
   bool localDrawBatching_ = false;
+  bool immediateDrawView_ = false;
+  gfx::GpuUniformSnapshot immediateGpuUniforms_{};
   bool allowStreamedFixedVertexGpu_ = false;
   bool allowDynamicTexMatrixGpu_ = false;
   bool allowBumpFixedVertexGpu_ = false;

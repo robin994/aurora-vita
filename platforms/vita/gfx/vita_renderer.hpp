@@ -109,12 +109,25 @@ public:
   void execute_range(const CommandStream& stream,size_t begin,size_t end,
                      bool finalize=false) noexcept;
   void draw(const DrawPacket& d) noexcept;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  void draw_immediate(const DrawSubmissionView& view) noexcept;
+#endif
   // Resource uploads happen outside draw() and can change raw vitaGL buffer or
   // texture bindings. DrawSink calls this once per submitted command chunk so the
   // first draw re-establishes only those bindings, without throwing away pipeline
   // or viewport/scissor state.
   void invalidate_resource_bindings() noexcept;
-  const FrameStats& stats()const noexcept{return stats_;}uint64_t frame()const noexcept{return frame_;}
+  // Owner thread only. Contents are current at read time, including native
+  // clear/copy/present; reference remains usable until the next mutating call.
+#if defined(AURORA_VITA_RENDERER_GXM)
+  const FrameStats& stats() const noexcept;
+#else
+  const FrameStats& stats() const noexcept {return stats_;}
+#endif
+  CacheCounters cache_counters() const noexcept {
+    return {stats_.pipelineHits,stats_.pipelineMisses,stats_.textureHits,stats_.textureMisses,stats_.textureUploads};
+  }
+  uint64_t frame()const noexcept{return frame_;}
   uint32_t target_width()const noexcept{return targetWidth_;}uint32_t target_height()const noexcept{return targetHeight_;}
   PipelineCache& pipelines() noexcept{return pipelines_;}TextureCache& textures() noexcept{return textures_;}BufferPool& buffers() noexcept{return buffers_;}EfbManager& efb() noexcept{return efb_;}
 private:
@@ -130,7 +143,7 @@ private:
   bool failed_=false;
   Handle displayCopy_=InvalidHandle;
   Handle maskedClearVertices_=InvalidHandle,maskedClearIndices_=InvalidHandle;
-  PipelineCache pipelines_{};TextureCache textures_;BufferPool buffers_{};EfbManager efb_{};FrameStats stats_{};uint64_t frame_=0;bool initialized_=false;
+  PipelineCache pipelines_{};TextureCache textures_;BufferPool buffers_{};EfbManager efb_{};mutable FrameStats stats_{};uint64_t frame_=0;bool initialized_=false;
 #if defined(__vita__)
   bool viewportValid_=false,scissorValid_=false,scissorEnabled_=false,vertexStateValid_=false,indexStateValid_=false;
   bool vertexAttribMaskValid_=false,vertexAttribDefaultsValid_=false;

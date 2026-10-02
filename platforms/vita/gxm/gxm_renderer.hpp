@@ -86,6 +86,7 @@ public:
   bool copy_display_region(const gfx::Scissor& source);
   void set_presentation_aspect(float aspect) noexcept;
   bool draw(const gfx::DrawPacket& packet);
+  bool draw(const gfx::DrawSubmissionView& view);
   bool bind_pipeline(uint64_t key,const gfx::GpuDrawUniforms& uniforms,const gfx::Scissor& scissor={},
                      const gfx::FixedVertexUniforms* fixedVertex=nullptr,
                      const std::array<gfx::TextureBinding,gfx::MaxTextures>* textures=nullptr,

@@ -1,4 +1,5 @@
 #include "gxm_renderer.hpp"
+#include "../gfx/vita_frame_stats.hpp"
 #include "gxm_memory.hpp"
 #include "gxm_program_cache.hpp"
 #include "gxm_shader_gen.hpp"
@@ -447,7 +448,7 @@ struct Renderer::Impl {
   // GxmDiagDrawGpu: per-draw GPU cost of the first draws of a sampled frame.
   uint64_t diagDrawFrame = 0; uint32_t diagDrawIndex = 0; uint64_t diagFrameCounter = 0;
   std::unordered_set<uint64_t> diagDumpedKeys;
-  void diag_draw_gpu(const DrawPacket& packet, const Pipeline& p) {
+  void diag_draw_gpu(const DrawSubmissionView& packet, const Pipeline& p) {
     if (diagDrawFrame != diagFrameCounter) { diagDrawFrame = diagFrameCounter; diagDrawIndex = 0; }
     if (diagFrameCounter % 300u != 150u || diagDrawIndex >= 512u) return;
     const uint32_t index = diagDrawIndex++;
@@ -1076,7 +1077,8 @@ bool Renderer::begin_frame() {
     return d.fail("invalid begin_frame");
   const int displayError = d.displayError.load(std::memory_order_relaxed);
   if (displayError < 0) return d.fail("display callback failed", displayError);
-  d.stats = {}; d.frameStarted = sceKernelGetProcessTimeWide(); ++d.diagFrameCounter;
+  reset_native_frame_stats(d.stats,d.finishReasonCalls,d.finishReasonWaitUs);
+  d.frameStarted = sceKernelGetProcessTimeWide(); ++d.diagFrameCounter;
   d.profileDraws = (++d.profileFrame % 120u) == 60u;
   d.stats.nativeTimingsSampled=d.profileDraws;
   d.frameActive = true; d.boundTarget = 0;
@@ -1358,6 +1360,10 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
 }
 
 bool Renderer::draw(const DrawPacket& packet) {
+  return draw(DrawSubmissionView(packet));
+}
+
+bool Renderer::draw(const DrawSubmissionView& packet) {
   auto& d = *impl_;
   const auto pi = d.pipelines.find(packet.pipelineKey);
   const auto vi = d.buffers.find(packet.vertices.buffer), ii = d.buffers.find(packet.indices.buffer);

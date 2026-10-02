@@ -492,6 +492,21 @@ struct GpuDrawUniforms {
   }
 };
 static_assert(sizeof(GpuDrawUniforms) == offsetof(DrawUniforms, channelAmbient));
+// Typed uniform conversion at producer revision boundaries. revision==0 always
+// refreshes, retaining the conservative contract for unversioned producers.
+class GpuUniformSnapshot {
+  GpuDrawUniforms value_{};
+  uint64_t revision_=0;
+  bool valid_=false;
+public:
+  const GpuDrawUniforms& get(const DrawUniforms& source,uint64_t revision) noexcept {
+    if(!valid_ || !revision || revision!=revision_) {
+      value_=source;revision_=revision;valid_=true;
+    }
+    return value_;
+  }
+  void invalidate() noexcept {valid_=false;}
+};
 struct DrawPacket {
   uint64_t pipelineKey = 0;
   BufferSlice vertices{};
@@ -520,6 +535,33 @@ struct DrawPacket {
   const DrawPacket* sharedState=nullptr;
   const GpuDrawUniforms& gpu_uniforms() const noexcept {return sharedState?sharedState->uniforms:uniforms;}
   const std::array<TextureBinding,MaxTextures>& texture_bindings() const noexcept {return sharedState?sharedState->textures:textures;}
+};
+
+// Borrowed CPU state, consumed synchronously. Never store this in CommandStream
+// or retain its references after draw returns. GPU buffer retirement is separate.
+struct DrawSubmissionView {
+  const GpuDrawUniforms& uniforms;
+  const std::array<TextureBinding,MaxTextures>& textures;
+  uint64_t pipelineKey=0;
+  BufferSlice vertices{},indices{};
+  uint32_t vertexCount=0,indexCount=0,firstVertex=0,instanceCount=1;
+  bool absoluteVertexIndices=false;
+  uint64_t uniformRevision=0;
+  const FixedVertexUniforms* fixedVertexUniforms=nullptr;
+  Viewport viewport{};
+  Scissor scissor{};
+  DrawSubmissionView(const GpuDrawUniforms& u,const std::array<TextureBinding,MaxTextures>& t) noexcept
+      : uniforms(u),textures(t) {}
+  DrawSubmissionView(const GpuDrawUniforms&&,const std::array<TextureBinding,MaxTextures>&)=delete;
+  DrawSubmissionView(const GpuDrawUniforms&,const std::array<TextureBinding,MaxTextures>&&)=delete;
+  DrawSubmissionView(const DrawPacket&&)=delete;
+  explicit DrawSubmissionView(const DrawPacket& p) noexcept
+      : uniforms(p.gpu_uniforms()),textures(p.texture_bindings()),pipelineKey(p.pipelineKey),
+        vertices(p.vertices),indices(p.indices),vertexCount(p.vertexCount),indexCount(p.indexCount),
+        firstVertex(p.firstVertex),instanceCount(p.instanceCount),absoluteVertexIndices(p.absoluteVertexIndices),
+        uniformRevision(p.uniformRevision),fixedVertexUniforms(p.fixedVertexUniforms),viewport(p.viewport),scissor(p.scissor) {}
+  const GpuDrawUniforms& gpu_uniforms() const noexcept {return uniforms;}
+  const std::array<TextureBinding,MaxTextures>& texture_bindings() const noexcept {return textures;}
 };
 
 // Bisection switches for the gxm-optimization changes (BackendConfig::
@@ -553,6 +595,9 @@ inline bool gxm_disabled(uint32_t bit) noexcept { return (gxm_disable_mask() & b
 
 enum class FinishReason : uint8_t { Explicit,BufferMutation,TextureMutation,ResourceDestroy,Readback,TargetMutation,StreamReuse,FrameDiscard,Count };
 inline constexpr size_t FinishReasonCount=static_cast<size_t>(FinishReason::Count);
+struct CacheCounters {
+  uint32_t pipelineHits=0,pipelineMisses=0,textureHits=0,textureMisses=0,textureUploads=0;
+};
 struct FrameStats {
   uint32_t drawCalls = 0;
   uint32_t triangles = 0;

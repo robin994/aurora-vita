@@ -92,7 +92,7 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_stubs ${AURORA_VITA_SOURCE_DIR}/platforms/vita)
     target_link_libraries(aurora_vita_cpu_workers_test PRIVATE Threads::Threads)
     add_test(NAME vita_cpu_workers COMMAND aurora_vita_cpu_workers_test)
-    # The host shim intentionally exercises 8,000 semaphore round-trips. macOS
+    # The host shim intentionally exercises thousands of semaphore round-trips. macOS
     # scheduling can take several minutes even when every per-wait 3-second
     # lost-wake guard passes, so keep CTest from pre-empting a valid run.
     set_tests_properties(vita_cpu_workers PROPERTIES TIMEOUT 420)
@@ -102,6 +102,8 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
             -P ${AURORA_VITA_SOURCE_DIR}/tests/vita_renderer_selection_test.cmake)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME vita_build_manifest
+            COMMAND ${Python3_EXECUTABLE} ${AURORA_VITA_SOURCE_DIR}/tests/vita_build_manifest_test.py)
         add_test(NAME vita_performance_compare
             COMMAND ${Python3_EXECUTABLE} ${AURORA_VITA_SOURCE_DIR}/tests/vita_performance_compare_test.py)
         add_test(NAME vita_binary_audit_contract

@@ -121,3 +121,36 @@ An experimental flag should become a project default only when:
 - the exact build/configuration is documented.
 
 Keep title-specific overrides in the port until the behavior is validated broadly enough for an Aurora-wide default.
+
+## Build and capture manifests
+
+`tools/vita_build_manifest.py` records base commit, tracked diff/untracked content
+identity, real CMake cache/flags, toolchain executable/file hashes and ELF/SELF/
+VPK/eboot hashes. It rejects a packaged eboot different from its SELF. Capture
+metadata is supplied by the operator; absent fields remain `unknown`. An
+installed hash is verified only when supplied and matching the artifact.
+
+```sh
+python3 tools/vita_build_manifest.py \
+  --build build/vita-gxm-candidate \
+  --elf build/vita-gxm-candidate/aurora_vita_gx_probe \
+  --self build/vita-gxm-candidate/aurora_vita_gx_probe.self \
+  --vpk build/vita-gxm-candidate/aurora_vita_gx_probe.vpk \
+  --output build/vita-gxm-candidate/gx-manifest.json
+```
+
+Optional `--capture device.json --capture-log run.log` connects the binary to
+device evidence. Metadata fields are `title`, `scene`, `clocks`, `resolution`,
+`cache_state` and `installed_eboot_sha256`. They describe the actual capture,
+not inferred build defaults. The log uses the existing FRAME parser and rejects
+averages-only or mixed/unordered sessions. Keep generated manifests outside
+source files (an ignored build directory is suitable) to avoid changing their
+own source identity. No timestamp is invented.
+
+The manifest is build integrity data; the native ELF/map audit remains separate.
+The new [handoff](../VITA_NATIVE_IMPLEMENTATION_2026-10-02.md) reports current
+checks. [Batching protocol](../VITA_NATIVE_BATCHING_DECISION.md),
+[retirement contract](../VITA_NATIVE_RETIREMENT_CONTRACT.md) and
+[services contract](../VITA_PLATFORM_SERVICES_CONTRACT.md) keep pending device
+work explicit. Rebuild the consuming game with the matching public headers;
+probe results alone cannot establish game FPS or image correctness.

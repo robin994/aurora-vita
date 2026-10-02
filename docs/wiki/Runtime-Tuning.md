@@ -2,7 +2,7 @@
 
 Runtime tuning is configured through `aurora::vita::BackendConfig`.
 
-The defaults below reflect renderer revision `ff5b2cf` (2026-10-02). The public
+The defaults below include the 2026-10-02 Vita-native implementation on base `bb5147e`. The public
 declarations are in `platforms/vita/aurora_vita_backend.hpp`.
 
 ## Runtime logging
@@ -273,3 +273,50 @@ Automatic shader failure artifacts also live under the same per-title root, in
 | `trace_capacity` | 4096 | Trace record capacity. |
 
 Diagnostic builds are not directly comparable with shipping performance measurements. Always benchmark with diagnostics disabled after isolating the issue.
+
+## Memory observation without a GX fence
+
+```cpp
+const auto memory = aurora::vita::completed_memory_snapshot();
+if (memory.completedFrame) {
+  // memory.frameIndex identifies the last successful CPU end_frame.
+  const auto bytes = memory.budget.staticGeometryBytes;
+}
+```
+
+This getter copies a published value under a short mutex; it neither queues a
+GX callback nor accesses live caches. The value is invalid before the first
+successful frame, after shutdown and at initialization, including failed init.
+A failed frame retains the last successful value. It does not mean the GPU
+has finished. Performance and memory are published separately: compare their
+frameIndex values before combining two reads, rather than assuming atomicity
+across both APIs.
+
+`performance_snapshot()` is synchronous and can drain queued GX work.
+`memory_budget()`, `renderer()`, `draw_sink()`, `telemetry()`, live renderer
+`stats()` and `cache_counters()` are owner-thread tools. With async GX, overlays
+should use the two completed getters. Direct renderer inspection in the
+standalone diagnostic probe is serialized with the GX worker and intentionally
+perturbs overlap; it is not the shipping overlay pattern.
+
+The `stats()` reference reports current values at read time and is usable only
+until the next mutating renderer call. Copy it for before/after comparisons.
+`cache_counters()` copies only the five facade cache counters and is intended
+for narrow owner-thread telemetry deltas.
+
+## Candidate dispatch and draw view
+
+`cpu_distinct_core_dispatch` and `gxm_immediate_draw_view` default false,
+except when their candidate CMake defaults are enabled. They can be independently
+set false in BackendConfig to compare original behavior. The dispatch cap bounds
+the allowed helper prefix before filtering physical cores: a caller on CPU2
+with cap3 uses CPU1, not CPU3; cap2 leaves that caller serial. Callback IDs can
+have holes and remain within 0..3. `execution_lanes()` reports configured capacity,
+not the number of active lanes in an individual job. CPU3 still needs its actual
+CPU/affinity probe; no utilization quota is added by this change.
+
+The draw view borrows const uniform/texture data for one synchronous native draw.
+Uniform conversion uses a typed cache keyed by the producer revision; unversioned
+inputs always refresh. Runtime feature changes invalidate it. Queued packet
+state stays owned, and BeginScene, scissor and GPU page retirement retain their
+existing rules. [Validation and handoff](../VITA_NATIVE_IMPLEMENTATION_2026-10-02.md).
