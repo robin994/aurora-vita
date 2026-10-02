@@ -18,6 +18,16 @@ enum class RuntimeLogLevel : uint8_t {
   Debug = 3,
 };
 
+// Configure before creating workers. A port can silence every diagnostic
+// selector without altering optimization bits or CPU3 quota accounting.
+inline std::atomic<bool> g_runtimeDiagnosticsEnabled{true};
+inline void set_runtime_diagnostics_enabled(bool enabled) noexcept {
+  g_runtimeDiagnosticsEnabled.store(enabled,std::memory_order_relaxed);
+}
+inline bool runtime_diagnostics_enabled() noexcept {
+  return g_runtimeDiagnosticsEnabled.load(std::memory_order_relaxed);
+}
+
 #if AURORA_VITA_RUNTIME_LOGGING
 inline std::atomic<uint8_t> g_runtimeLogLevel{static_cast<uint8_t>(RuntimeLogLevel::Info)};
 
@@ -32,7 +42,7 @@ inline RuntimeLogLevel runtime_log_level() noexcept {
 
 inline bool runtime_log_enabled(RuntimeLogLevel level) noexcept {
   const auto requested = static_cast<uint8_t>(level);
-  return requested != 0 &&
+  return runtime_diagnostics_enabled() && requested != 0 &&
          g_runtimeLogLevel.load(std::memory_order_relaxed) >= requested;
 }
 
@@ -45,7 +55,7 @@ inline void runtime_logf(RuntimeLogLevel level, const char* format, ...) noexcep
 }
 
 inline void runtime_logf_unchecked(const char* format, ...) noexcept {
-  if (!format) return;
+  if (!runtime_diagnostics_enabled() || !format) return;
   va_list args;
   va_start(args, format);
   std::vfprintf(stderr, format, args);

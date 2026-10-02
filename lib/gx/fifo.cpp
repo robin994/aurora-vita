@@ -181,7 +181,8 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
     // Producer back-pressure: time the game thread waits for a free slot.
     const uint64_t t0 = aurora::vita::gfx::telemetry_now_us();
     while (sceKernelWaitSema(sVitaWorker.space, 1, nullptr) < 0) sceKernelDelayThread(100);
-    sProducerWaitUs.fetch_add(aurora::vita::gfx::telemetry_now_us() - t0, std::memory_order_relaxed);
+    if(aurora::vita::runtime_diagnostics_enabled())
+      sProducerWaitUs.fetch_add(aurora::vita::gfx::telemetry_now_us() - t0, std::memory_order_relaxed);
   }
 
   VitaJob& job = sVitaWorker.jobs[sVitaWorker.producer % VitaQueueDepth];
@@ -212,7 +213,8 @@ void wait_serial(uint64_t serial) noexcept {
   if (sVitaWorker.completed.load(std::memory_order_acquire) >= serial) return;
   const uint64_t t0 = aurora::vita::gfx::telemetry_now_us();
   struct Account { uint64_t t0; ~Account() {
-    sConsumerWaitUs.fetch_add(aurora::vita::gfx::telemetry_now_us() - t0, std::memory_order_relaxed); } } account{t0};
+    if(aurora::vita::runtime_diagnostics_enabled())
+      sConsumerWaitUs.fetch_add(aurora::vita::gfx::telemetry_now_us() - t0, std::memory_order_relaxed); } } account{t0};
   while (sVitaWorker.completed.load(std::memory_order_acquire) < serial) {
     if (sceKernelWaitSema(sVitaWorker.completedSignal, 1, nullptr) < 0) sceKernelDelayThread(100);
   }

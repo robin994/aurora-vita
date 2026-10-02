@@ -1,4 +1,5 @@
 #include "gfx/vita_cpu_workers.hpp"
+#include "vita_log.hpp"
 #include <psp2/kernel/threadmgr.h>
 #include <array>
 #include <atomic>
@@ -248,6 +249,25 @@ int main() {
   require(vertexSnap.calls>0&&vertexSnap.dynamicCalls>0,"vertex parallel telemetry missed dynamic call");
   require(vertexSnap.laneItems[3]>0&&vertexSnap.laneChunks[3]>0,"vertex parallel telemetry missed CPU3 work");
 
+  // Diagnostic OFF must suppress optional profiling while preserving quota
+  // admission, exact range coverage, failures and renewal. Keep it OFF through
+  // the exhaustion/telemetry-failure tests below.
+  aurora::vita::set_runtime_diagnostics_enabled(false);
+  fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);
+  BudgetJob quietJob;
+  require(cpu_parallel_for_vertex(512,budget_task,&quietJob),"quiet budget job");
+  verify_budget_coverage(quietJob,512,"quiet budget range coverage");
+  auto quietVertex=cpu_vertex_parallel_snapshot();
+  require(quietVertex.calls==vertexSnap.calls&&quietVertex.dynamicCalls==vertexSnap.dynamicCalls,
+          "quiet job still collected vertex calls");
+  require(quietVertex.totalWallUs==vertexSnap.totalWallUs&&quietVertex.callerWaitUs==vertexSnap.callerWaitUs,
+          "quiet job still collected vertex timing");
+  for(unsigned lane=0;lane<4;++lane)
+    require(quietVertex.laneItems[lane]==vertexSnap.laneItems[lane]&&
+            quietVertex.laneChunks[lane]==vertexSnap.laneChunks[lane]&&
+            quietVertex.laneWorkUs[lane]==vertexSnap.laneWorkUs[lane],"quiet job still collected lane profiling");
+  require(cpu_core3_budget_snapshot().configured,"diagnostics OFF disabled CPU3 quota");
+
   Job failing;
   fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);
   require(!cpu_parallel_for_vertex(256,fail_lane3_task,&failing),"budgeted lane3 callback failure lost");
@@ -284,6 +304,7 @@ int main() {
   require(budgetSnap.telemetryFailures>0,"telemetry failure was not counted");
   failSystemInfo.store(false);
   shutdown_cpu_workers();
+  aurora::vita::set_runtime_diagnostics_enabled(true);
   require(semas.empty()&&threads.empty(),"budget shutdown leaked resources");
   require(semaErrors==0,"semaphore token overflow");
   std::puts("vita workers: sparse CPU3 topology, quota scheduler, exact coverage/results, clean shutdown");

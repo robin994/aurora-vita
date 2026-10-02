@@ -72,6 +72,7 @@ bool g_displayClearValid=false;
 bool g_discardPresent=false;
 
 uint64_t now_us() noexcept {
+  if(!runtime_diagnostics_enabled())return 0;
 #if defined(__vita__)
   return sceKernelGetProcessTimeWide();
 #else
@@ -295,6 +296,7 @@ extern "C" uint32_t aurora_vita_debug_build_flags(void) noexcept {
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
+  set_runtime_diagnostics_enabled(c.diagnostics_enabled);
   g_displayQueueLastUs=g_displayQueueTotalUs=g_displayQueueMaxUs=g_displayQueueSamples=0;
   g_displayQueueBlockedSamples=0;
   set_runtime_log_level(c.log_level);
@@ -313,14 +315,14 @@ bool initialize(const BackendConfig& c) noexcept {
     return false;
   }
   aurora::vita::render_size::configure(renderWidth,renderHeight,c.width,c.height);
-  gfx::set_texture_decode_diagnostics(c.texture_decode_diagnostics);
+  gfx::set_texture_decode_diagnostics(c.diagnostics_enabled&&c.texture_decode_diagnostics);
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   gfx::configure_program_binary_cache(g_programCachePath.empty()?nullptr:g_programCachePath.c_str());
 #endif
 #if defined(MKW_TARGET_VITA)
   gfx::gxm_disable_mask()=c.gxm_disable_mask;
 #endif
-  g_telemetryEnabled=c.diagnostics||c.telemetry_log_path||gfx::gxm_disabled(gfx::GxmDiagPhases);
+  g_telemetryEnabled=c.diagnostics_enabled&&(c.diagnostics||c.telemetry_log_path||gfx::gxm_disabled(gfx::GxmDiagPhases));
   // GxmDiagPhases is the lightweight shipping-style profiling switch used by
   // Strikers.  Keep FIFO timing in the same diagnostic envelope so per-view
   // phase snapshots can attribute display-list/command-processor cost without
@@ -331,8 +333,8 @@ bool initialize(const BackendConfig& c) noexcept {
   aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow&&
       !gfx::gxm_disabled(gfx::GxmDisableDisplayListShadow));
 #endif
-  g_coverageEnabled=c.diagnostics||c.coverage_log_path;
-  g_traceEnabled=c.diagnostics||c.trace_log_path;
+  g_coverageEnabled=c.diagnostics_enabled&&(c.diagnostics||c.coverage_log_path);
+  g_traceEnabled=c.diagnostics_enabled&&(c.diagnostics||c.trace_log_path);
   g_diagnosticsEnabled=g_telemetryEnabled||g_coverageEnabled||g_traceEnabled;
   g_initFailure=InitFailure::None;
   g_initFailureDetail[0]='\0';
@@ -495,7 +497,7 @@ bool initialize(const BackendConfig& c) noexcept {
         system=after;
       }
     }
-    if(FILE* probe=std::fopen(cpuProbePath.c_str(),"w")) {
+    if(FILE* probe=c.diagnostics_enabled?std::fopen(cpuProbePath.c_str(),"w"):nullptr) {
       const auto budget=gfx::cpu_core3_budget_snapshot();
       const auto workerProbe=gfx::cpu_worker_probe_snapshot();
       std::fprintf(probe,
@@ -559,8 +561,11 @@ bool initialize(const BackendConfig& c) noexcept {
       static_cast<unsigned long long>(c.static_geometry_budget/(1024u*1024u)),
       static_cast<unsigned long long>(c.stream_vertex_bytes),
       static_cast<unsigned long long>(c.stream_index_bytes),c.stream_slots);
-  g_telemetry.reset(); g_coverage.reset(); g_trace=std::make_unique<integration::FrameTrace>(c.trace_capacity);
-  g_telemetry.set_split_vertex_phases(c.profile_split_vertex_phases);
+  g_telemetry.reset(); g_coverage.reset();
+  // Keep the public frame_trace() reference valid without reserving a ring
+  // when diagnostic recording is disabled.
+  g_trace=std::make_unique<integration::FrameTrace>(g_traceEnabled?c.trace_capacity:0);
+  g_telemetry.set_split_vertex_phases(c.diagnostics_enabled&&c.profile_split_vertex_phases);
   gxbridge::DrawSinkConfig dc{};
   dc.streaming.vertexBytes=c.stream_vertex_bytes;
   dc.streaming.indexBytes=c.stream_index_bytes;
@@ -569,7 +574,7 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.telemetry=g_telemetryEnabled ? &g_telemetry : nullptr;
   dc.coverage=g_coverageEnabled ? &g_coverage : nullptr;
   dc.trace=g_traceEnabled ? g_trace.get() : nullptr;
-  dc.verboseGeometryDiagnostics=c.diagnostics;
+  dc.verboseGeometryDiagnostics=c.diagnostics_enabled&&c.diagnostics;
   dc.strictUnsupported=c.strict_unsupported;
   dc.staticGeometryBudget=c.static_geometry_budget;
 #if defined(AURORA_VITA_RENDERER_GXM)
@@ -593,9 +598,9 @@ bool initialize(const BackendConfig& c) noexcept {
     g_renderer->shutdown(); g_renderer.reset(); g_drawSink.reset();
     return false;
   }
-  if (c.telemetry_log_path) ensure_parent_dir(c.telemetry_log_path);
-  if (c.coverage_log_path) ensure_parent_dir(c.coverage_log_path);
-  if (c.trace_log_path) ensure_parent_dir(c.trace_log_path);
+  if (g_telemetryEnabled&&c.telemetry_log_path) ensure_parent_dir(c.telemetry_log_path);
+  if (g_coverageEnabled&&c.coverage_log_path) ensure_parent_dir(c.coverage_log_path);
+  if (g_traceEnabled&&c.trace_log_path) ensure_parent_dir(c.trace_log_path);
   g_initialized=true; g_frame=0; g_last=0;
   return true;
 }
@@ -680,7 +685,7 @@ void end_frame_now() noexcept {
   g_renderer->present(!g_discardPresent);
   const uint64_t end = now_us();
   g_last=end-g_start;
-  if(!g_discardPresent) {
+  if(g_config.diagnostics_enabled&&!g_discardPresent) {
     const uint64_t queueUs=g_renderer->stats().nativeDisplayQueueAddUs;
     g_displayQueueLastUs=queueUs;
     g_displayQueueTotalUs+=queueUs;
@@ -693,21 +698,23 @@ void end_frame_now() noexcept {
     g_telemetry.end_frame(g_last);
   }
   ++g_frame;
-  g_lastFifoProfile=gfx::fifo_profile_take();
+  if(g_config.diagnostics_enabled) {
+    g_lastFifoProfile=gfx::fifo_profile_take();
 #if defined(MKW_TARGET_VITA)
-  aurora::gx::fifo::take_wait_stats(g_lastProducerWaitUs,g_lastConsumerWaitUs);
+    aurora::gx::fifo::take_wait_stats(g_lastProducerWaitUs,g_lastConsumerWaitUs);
 #endif
-  {
-    // Worker-side wall time between consecutive end_frame calls.
-    static uint64_t lastEnd=0; const uint64_t nowEnd=now_us();
-    g_lastWorkerFrameUs=lastEnd?nowEnd-lastEnd:0; lastEnd=nowEnd;
-  }
-  g_lastInvalidations=gfx::take_pipeline_invalidation_report();
-  if(g_telemetryEnabled&&gfx::gxm_disabled(gfx::GxmDiagPhases)) accumulate_phase_profile();
-  emit_periodic_diagnostics();
-  if(!g_renderer->failed()) {
-    auto completed=performance_snapshot_now();completed.completedFrame=true;
-    g_completedPerformance.publish(completed);
+    {
+      // Worker-side wall time between consecutive end_frame calls.
+      static uint64_t lastEnd=0; const uint64_t nowEnd=now_us();
+      g_lastWorkerFrameUs=lastEnd?nowEnd-lastEnd:0; lastEnd=nowEnd;
+    }
+    g_lastInvalidations=gfx::take_pipeline_invalidation_report();
+    if(g_telemetryEnabled&&gfx::gxm_disabled(gfx::GxmDiagPhases)) accumulate_phase_profile();
+    emit_periodic_diagnostics();
+    if(!g_renderer->failed()) {
+      auto completed=performance_snapshot_now();completed.completedFrame=true;
+      g_completedPerformance.publish(completed);
+    }
   }
 }
 void end_frame_task(void*) {

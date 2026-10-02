@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include "../vita_log.hpp"
 
 namespace aurora::vita::gfx {
 
@@ -552,7 +553,12 @@ enum GxmDisableBits : uint32_t {
   GxmDisableSharedState = 1u << 15, // reference: copy inline uniform/texture state into every packet
 };
 inline uint32_t& gxm_disable_mask() noexcept { static uint32_t mask = 0; return mask; }
-inline bool gxm_disabled(uint32_t bit) noexcept { return (gxm_disable_mask() & bit) != 0; }
+inline bool gxm_disabled(uint32_t bit) noexcept {
+  uint32_t selected=gxm_disable_mask()&bit;
+  if((selected&uint32_t(GxmDiagSceneFinish|GxmDiagDrawGpu|GxmDiagPhases))&&!runtime_diagnostics_enabled())
+    selected&=~uint32_t(GxmDiagSceneFinish|GxmDiagDrawGpu|GxmDiagPhases);
+  return selected!=0;
+}
 
 enum class FinishReason : uint8_t { Explicit,BufferMutation,TextureMutation,ResourceDestroy,Readback,TargetMutation,StreamReuse,FrameDiscard,Count };
 inline constexpr size_t FinishReasonCount=static_cast<size_t>(FinishReason::Count);

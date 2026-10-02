@@ -619,6 +619,8 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
 
 bool cpu_parallel_for_vertex(size_t count, CpuRangeTask task, void* context) noexcept {
   const uint32_t lanes=g_workers.core3Budget.config.enabled?MaxExecutionLanes:g_workers.defaultExecutionLanes;
+  if(!runtime_diagnostics_enabled())
+    return cpu_parallel_for_min_lanes_impl(count,g_workers.minItems,lanes,task,context,false);
   g_workers.vertexStats.calls.fetch_add(1,std::memory_order_relaxed);
   const int64_t started=sceKernelGetSystemTimeWide();
   const bool result=cpu_parallel_for_min_lanes_impl(count,g_workers.minItems,lanes,task,context,true);

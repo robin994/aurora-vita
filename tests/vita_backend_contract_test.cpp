@@ -9,6 +9,7 @@
 #include "gfx/vita_draw_batch.hpp"
 #include "gfx/vita_hash_map.hpp"
 #include "vita_log.hpp"
+#include "gfx/vita_telemetry.hpp"
 #include "vita_data_paths.hpp"
 #include "gxm/gxm_texture_layout.hpp"
 #include "gxm/gxm_program_cache.hpp"
@@ -528,6 +529,30 @@ void native_extended_contract() {
 }
 } // namespace
 int main() {
+  (void)take_pipeline_invalidation_report();
+  set_runtime_diagnostics_enabled(false);
+  note_pipeline_invalidation(123456);
+  REQUIRE(take_pipeline_invalidation_report().empty());
+  set_runtime_diagnostics_enabled(true);
+  REQUIRE(take_pipeline_invalidation_report().empty());
+  note_pipeline_invalidation(123456);
+  REQUIRE(take_pipeline_invalidation_report().find("123456:1")!=std::string::npos);
+  const uint32_t diagnosticMask=GxmDiagSceneFinish|GxmDiagDrawGpu|GxmDiagPhases;
+  gxm_disable_mask()=diagnosticMask|GxmDisableFixedSnapshot|GxmDisableUniformRevision;
+  set_runtime_diagnostics_enabled(false);
+  REQUIRE(!runtime_diagnostics_enabled());
+  REQUIRE(!gxm_disabled(diagnosticMask));
+  REQUIRE(gxm_disabled(GxmDisableFixedSnapshot));
+  REQUIRE(gxm_disabled(GxmDisableUniformRevision));
+  REQUIRE(gxm_disable_mask()==(diagnosticMask|GxmDisableFixedSnapshot|GxmDisableUniformRevision));
+  set_runtime_log_level(RuntimeLogLevel::Debug);
+  REQUIRE(!runtime_log_enabled(RuntimeLogLevel::Error));
+  int masterLogSideEffects=0;
+  AURORA_VITA_LOG_ERROR("master_suppressed=%d\n",++masterLogSideEffects);
+  REQUIRE(masterLogSideEffects==0);
+  set_runtime_diagnostics_enabled(true);
+  REQUIRE(gxm_disabled(diagnosticMask));
+  gxm_disable_mask()=0;
 #if AURORA_VITA_RUNTIME_LOGGING
   set_runtime_log_level(RuntimeLogLevel::Silent);
   REQUIRE(runtime_log_level()==RuntimeLogLevel::Silent);

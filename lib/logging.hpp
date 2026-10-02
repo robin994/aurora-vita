@@ -9,6 +9,8 @@
 #if !defined(MKW_TARGET_VITA)
 #include <fmt/base.h>
 #include <fmt/format.h>
+#else
+#include "../platforms/vita/vita_log.hpp"
 #endif
 
 namespace aurora {
@@ -23,6 +25,7 @@ struct Module {
 #if defined(MKW_TARGET_VITA)
   template <typename... T>
   void report(const AuroraLogLevel level, std::string_view format, T&&...) noexcept {
+    if (!vita::runtime_diagnostics_enabled()) return;
     if (g_config.logLevel > level) return;
     log_internal(level, name, format.data(), static_cast<unsigned int>(format.size()));
   }

@@ -149,6 +149,9 @@ struct BackendConfig {
   // Runtime console logging for Aurora Vita itself. Silent suppresses normal
   // backend output; errors remain available through the structured failure APIs.
   RuntimeLogLevel log_level=RuntimeLogLevel::Info;
+  // Master diagnostic gate; CPU3 safety measurements and cache policy remain
+  // operational. Changing it requires backend shutdown/reinitialization.
+  bool diagnostics_enabled=true;
   // Expensive per-draw coverage/trace instrumentation is opt-in for shipping
   // ports. Supplying any diagnostic output path still enables it automatically.
   bool diagnostics=false;

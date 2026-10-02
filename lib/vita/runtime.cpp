@@ -10,6 +10,7 @@ char g_gameName[4]{};
 
 void log_internal(const AuroraLogLevel level, const char* module, const char* message,
                   const unsigned int len) noexcept {
+  if (!vita::runtime_diagnostics_enabled()) return;
   if (module == nullptr) module = "";
   if (message == nullptr) message = "";
 
@@ -24,6 +25,7 @@ void log_internal(const AuroraLogLevel level, const char* module, const char* me
 }
 
 void Module::show_fatal_dialog(const char* module, std::string_view message) noexcept {
+  if (!vita::runtime_diagnostics_enabled()) return;
   std::fprintf(stderr, "[aurora] fatal renderer error%s%s: ",
                module != nullptr && module[0] != '\0' ? " in " : "",
                module != nullptr ? module : "");

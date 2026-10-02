@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <algorithm>
 #include "vita_telemetry.hpp"
+#include "../vita_log.hpp"
 #include <chrono>
 #include <sstream>
 #if defined(__vita__)
@@ -10,6 +11,7 @@
 namespace aurora::vita::gfx {
 
 uint64_t telemetry_now_us() noexcept {
+  if(!runtime_diagnostics_enabled())return 0;
 #if defined(__vita__)
   return sceKernelGetProcessTimeWide();
 #else
@@ -173,12 +175,14 @@ unsigned g_invalidationLine[InvalidationSlots]{};
 uint32_t g_invalidationCount[InvalidationSlots]{};
 }
 void note_pipeline_invalidation(unsigned line) noexcept {
+  if(!runtime_diagnostics_enabled())return;
   for(unsigned i=0;i<InvalidationSlots;++i){
     if(g_invalidationLine[i]==line){++g_invalidationCount[i];return;}
     if(g_invalidationLine[i]==0){g_invalidationLine[i]=line;g_invalidationCount[i]=1;return;}
   }
 }
 std::string take_pipeline_invalidation_report() {
+  if(!runtime_diagnostics_enabled())return {};
   unsigned order[InvalidationSlots];unsigned n=0;
   for(unsigned i=0;i<InvalidationSlots&&g_invalidationLine[i];++i)order[n++]=i;
   std::sort(order,order+n,[](unsigned a,unsigned b){return g_invalidationCount[a]>g_invalidationCount[b];});
