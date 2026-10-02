@@ -87,12 +87,13 @@ Additional `BackendConfig::gxm_disable_mask` controls:
 
 | Bit | Reference behavior |
 | --- | --- |
-| `0x0800` | Rebuild uniform/texture state on every dirty write |
-| `0x1000` | Emit all seven native pipeline setters on a pipeline transition |
-| `0x2000` | Keep one streamed packet per logical draw |
-| `0x4000` | Copy inline uniform/texture state into every packet |
+| `0x1000` | Rebuild uniform/texture state on every dirty write |
+| `0x2000` | Emit all seven native pipeline setters on a pipeline transition |
+| `0x4000` | Keep one streamed packet per logical draw |
+| `0x8000` | Copy inline uniform/texture state into every packet |
 
-`0x7800` combines these four controls; it is not an old binary. Existing flags
+`0xF000` combines these four controls; it is not an old binary. `0x0800` retains
+its existing single-draw display-list bypass control. Existing flags
 remain intact. `0x0010` disables all native fragment-uniform reuse and also
 disables producer state sharing. Exact partial scissor, EFB orientation/opacity and the
 complete CPU fallback are preserved. Fixed-vertex snapshots still use their
