@@ -1,12 +1,16 @@
 # VitaGL backend
 
 The VitaGL backend uses vitaGL for graphics ownership while Aurora provides GX translation, caching, streaming and diagnostics.
+This page describes source defaults at renderer revision `ff5b2cf` (2026-10-02).
+The new GX state domains, structural draw recipes and immutable packet accessors
+are shared frontend behavior. Native local-index batching is advertised only by
+GXM; VitaGL retains its own resource/context implementation.
 
 ## Recommended baseline
 
 ```sh
 cmake --preset vita-vitagl
-cmake --build build/vita-vitagl --parallel 8
+cmake --build --preset vita-vitagl --parallel 8
 ```
 
 Current VitaGL texture defaults are intentionally more aggressive than GXM:

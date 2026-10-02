@@ -61,6 +61,7 @@ struct DrawSinkConfig {
   bool staticGeometryStableOnly = false;
   bool allowLitFixedVertexGpu = false;
   bool localDrawBatching = false;
+  bool immediateDrawView = false;
   bool allowStreamedFixedVertexGpu = false;
   bool allowDynamicTexMatrixGpu = false;
   bool allowBumpFixedVertexGpu = false;
@@ -139,7 +140,7 @@ private:
   // Snapshot reuse across consecutive GPU-geometry draws (see submit()).
   gfx::FixedVertexUniforms* lastFixedUniforms_ = nullptr;
   uint64_t vertexStateVersion_ = 0;
-  uint64_t fixedUniformRevision_ = 0;
+
   gfx::PipelineDesc translatedGpuPipeline_{};
   gfx::FlatHashMap<uint64_t,uint64_t> fixedPipelineKeys_{};
   gfx::VertexTransformState translatedVertexState_{};
@@ -191,6 +192,8 @@ private:
   bool strictFailed_ = false;
   bool allowLitFixedVertexGpu_ = false;
   bool localDrawBatching_ = false;
+  bool immediateDrawView_ = false;
+  gfx::GpuUniformSnapshot immediateGpuUniforms_{};
   bool allowStreamedFixedVertexGpu_ = false;
   bool allowDynamicTexMatrixGpu_ = false;
   bool allowBumpFixedVertexGpu_ = false;

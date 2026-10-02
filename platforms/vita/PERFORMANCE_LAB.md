@@ -1,6 +1,15 @@
 # Vita performance laboratory
 
-## Validation status (2026-09-16)
+This laboratory record preserves the 2026-09-16 measurements and experimental
+contracts. Its CPU-default and fixed-GPU eligibility descriptions are historical.
+For revision `ff5b2cf` (2026-10-02), GXM defaults to an 8 MiB geometry cache and
+eligible lit fixed-vertex processing; explicit CPU controls remain available.
+Current configuration is in [Runtime tuning](../../docs/wiki/Runtime-Tuning.md),
+and new validation/artifact hashes are in the
+[GX/GXM refactor report](gxm/GXM_REFACTOR_2026-10-02.md). The historical timings
+below are not a current baseline or a measured result for that refactor.
+
+## Historical validation status (2026-09-16)
 
 The 60 FPS gameplay target has NOT been reached or validated. Successful host
 unit tests and a successful Vita build are not evidence of correct GPU output
@@ -59,7 +68,7 @@ Do not sum all phase fields as if they were disjoint. `submit_us` is CPU API
 submission time, not a GPU timestamp measurement. Resource statistics include
 stream recycles, GPU syncs, static geometry bytes and static geometry entries.
 
-## Experimental fixed-PN GPU geometry (default OFF)
+## Historical fixed-PN GPU experiment (default OFF at this revision)
 
 `BackendConfig::static_geometry_budget = 0` disables this path. Nonzero values
 opt in to the following experiment:

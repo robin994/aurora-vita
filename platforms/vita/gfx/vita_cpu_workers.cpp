@@ -1,4 +1,5 @@
 #include "vita_cpu_workers.hpp"
+#include "vita_cpu_dispatch_plan.hpp"
 #include "../vita_log.hpp"
 
 #include <algorithm>
@@ -71,6 +72,7 @@ struct CpuWorkerState {
     std::array<std::atomic<uint64_t>, MaxExecutionLanes> laneWorkUs{};
   } vertexStats{};
   bool initialized = false;
+  bool distinctCoreDispatch = false;
   uint32_t workerCount = 0;
   uint32_t defaultExecutionLanes = 1;
   size_t minItems = 512;
@@ -359,10 +361,11 @@ void destroy_lane(CpuWorkerState::Lane &lane) noexcept {
 } // namespace
 
 bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t defaultExecutionLanes,
-                            const CpuCore3BudgetConfig& core3Budget) noexcept {
+                            const CpuCore3BudgetConfig& core3Budget, bool distinctCoreDispatch) noexcept {
   if (g_workers.initialized) shutdown_cpu_workers();
 
   g_workers.workerCount = 0;
+  g_workers.distinctCoreDispatch = distinctCoreDispatch;
   g_workers.minItems = std::max<size_t>(1, minItems);
   g_workers.vertexStats.calls.store(0,std::memory_order_relaxed);
   g_workers.vertexStats.dynamicCalls.store(0,std::memory_order_relaxed);
@@ -444,8 +447,9 @@ bool initialize_cpu_workers(uint32_t workerThreads, size_t minItems, uint32_t de
       std::max<uint32_t>(1,std::min(defaultExecutionLanes,MaxExecutionLanes));
   reset_core3_budget(core3Budget);
   AURORA_VITA_LOG_INFO(
-      "[aurora-vita] cpu workers=%u lanes=%u default_lanes=%u sync=paired_semaphores helpers=cpu2,cpu1-lowpri,cpu3-probed parallel_min_items=%llu\n",
+      "[aurora-vita] cpu workers=%u lanes=%u default_lanes=%u sync=paired_semaphores helpers=cpu2,cpu1-lowpri,cpu3-probed distinct_cores=%u parallel_min_items=%llu\n",
       g_workers.workerCount,g_workers.workerCount+1,g_workers.defaultExecutionLanes,
+      g_workers.distinctCoreDispatch?1u:0u,
       static_cast<unsigned long long>(g_workers.minItems));
   return true;
 }
@@ -511,9 +515,20 @@ static bool cpu_parallel_for_min_lanes_impl(size_t count, size_t minItems, uint3
     if(logicalLane==3 && !g_workers.core3Budget.config.enabled)continue;
     workerSlots[selectableWorkers++]=slot;
   }
+  if(g_workers.distinctCoreDispatch) {
+    std::array<int,MaxWorkerThreads> cpus{};cpus.fill(-1);
+    for(uint32_t i=0;i<selectableWorkers;++i) {
+      const auto slot=workerSlots[i];
+      cpus[slot]=g_workers.lanes[slot].cpuId.load(std::memory_order_relaxed);
+    }
+    const auto selected=cpu_dispatch_plan(count,minItems,maxLanes,sceKernelGetCpuId(),cpus,MaxWorkers);
+    selectableWorkers=selected.workerCount;
+    for(uint32_t i=0;i<selectableWorkers;++i)workerSlots[i]=selected.workers[i];
+  }
   const uint32_t availableLanes=selectableWorkers+1;
   const bool core3Dynamic=maxLanes>=MaxExecutionLanes && g_workers.lanes[2].created &&
-      g_workers.core3Budget.config.enabled && count>=minItems*2u;
+      g_workers.core3Budget.config.enabled && count/minItems>=2u &&
+      std::find(workerSlots.begin(),workerSlots.begin()+selectableWorkers,2u)!=workerSlots.begin()+selectableWorkers;
   if(core3Dynamic) {
     DynamicRangeContext job{};
     job.task=task;job.taskContext=context;job.count=count;job.baseChunk=minItems;job.profileVertex=profileVertex;
@@ -553,22 +568,26 @@ static bool cpu_parallel_for_min_lanes_impl(size_t count, size_t minItems, uint3
       availableLanes, std::max<size_t>(1, count / minItems)));
   if (usefulLanes <= 1) return runCaller(0,count);
 
-  const uint32_t lanes = usefulLanes;
+  CpuDispatchPlan plan{};
+  plan.workerCount=usefulLanes-1;
+  for(uint32_t i=0;i<plan.workerCount;++i)plan.workers[i]=workerSlots[i];
+  if(!plan.workerCount)return runCaller(0,count);
+  const uint32_t lanes = plan.lanes();
   const size_t chunk = count / lanes + (count % lanes != 0);
-  const size_t mainEnd = std::min(count, chunk);
+  const size_t mainEnd = g_workers.distinctCoreDispatch?plan.range(count,0).second:std::min(count,chunk);
 
   const uint32_t activeWorkers=lanes-1;
   std::array<bool,MaxWorkers> dispatched{};
   bool workersResult=true;
-  for (uint32_t worker = 0; worker < activeWorkers; ++worker) {
-    const uint32_t i=workerSlots[worker];
+  for (uint32_t rank = 0; rank < activeWorkers; ++rank) {
+    const uint32_t i=plan.workers[rank];
     auto &lane=g_workers.lanes[i];
-    const size_t logicalChunk=worker+1;
-    const size_t logicalBegin=std::min(count,chunk*logicalChunk);
-    const size_t end = std::min(count, logicalBegin + chunk);
+    const auto range=plan.range(count,rank+1);
+    const size_t begin = g_workers.distinctCoreDispatch?range.first:std::min(count,chunk*size_t(rank+1));
+    const size_t end = g_workers.distinctCoreDispatch?range.second:begin+std::min(count-begin,chunk);
     lane.task=profileVertex?profiled_range_worker:task;
     lane.context=profileVertex?static_cast<void*>(&profiled):context;
-    lane.begin=logicalBegin;lane.end=end;
+    lane.begin=begin;lane.end=end;
     lane.result=false;
     lane.state.store(1,std::memory_order_release);
     dispatched[i]=sceKernelSignalSema(lane.wake,1)>=0;
@@ -576,15 +595,16 @@ static bool cpu_parallel_for_min_lanes_impl(size_t count, size_t minItems, uint3
       workersResult=false;
       lane.task=nullptr;lane.context=nullptr;
       lane.state.store(0,std::memory_order_release);
+      // A rejected wake has no consumer. Complete the range locally, preserving
+      // exact coverage while reporting the dispatch failure to the caller.
+      task(context,begin,end,i+1);
     }
   }
 
   const bool mainResult = runCaller(0,mainEnd);
 
   const int64_t waitStarted=profileVertex?sceKernelGetSystemTimeWide():0;
-  for (uint32_t worker = 0; worker < activeWorkers; ++worker) {
-    const uint32_t i=workerSlots[worker];
-    if(!dispatched[i])continue;
+  for (uint32_t i = 0; i < MaxWorkers; ++i) if(dispatched[i]) {
     auto &lane=g_workers.lanes[i];
     // Consume exactly one acknowledgement for every published job, even if
     // state already says done. Conditional signalling can leave a stale token
@@ -688,7 +708,7 @@ namespace {
 size_t g_minItems = 512;
 }
 
-bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t,const CpuCore3BudgetConfig&) noexcept {
+bool initialize_cpu_workers(uint32_t, size_t minItems, uint32_t,const CpuCore3BudgetConfig&, bool) noexcept {
   g_minItems = std::max<size_t>(1, minItems);
   return true;
 }

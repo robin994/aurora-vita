@@ -16,6 +16,28 @@ using namespace aurora::vita;
 unsigned failures=0,checks=0;
 #undef CHECK
 #define CHECK(x) do {++checks;if(!(x)){++failures;std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);}} while(0)
+void pooled_snapshot_transitions() {
+  using gfx::FixedUniformPool;
+  for(size_t budget:{size_t(0),sizeof(gfx::FixedVertexUniforms),FixedUniformPool::MaxRetainedBytes}) {
+    FixedUniformPool pool;pool.configure(budget);
+    pool.scratch().position[0]=11;
+    auto* first=&pool.publish();const auto firstRevision=first->revision;
+    const auto counters=pool.stats();
+    for(unsigned i=0;i<10000;++i)CHECK(&pool.publish()==first);
+    CHECK(pool.size()==1);CHECK(first->position[0]==11);
+    CHECK(pool.stats().allocations==counters.allocations&&pool.stats().reuses==counters.reuses&&pool.stats().fallbacks==counters.fallbacks);
+    pool.scratch().position[0]=12;auto* next=&pool.publish();
+    CHECK(next!=first&&next->revision>firstRevision&&first->position[0]==11);
+    pool.scratch().normalPalette[3][4]=22;auto* palette=&pool.publish();CHECK(palette!=next);
+    pool.scratch().texture[1][2]=33;auto* texture=&pool.publish();CHECK(texture!=palette);
+    pool.scratch().light[0][0]=44;auto* light=&pool.publish();CHECK(light!=texture);
+    CHECK(&pool.publish(false)!=light);
+    auto* sprite=&pool.publish(true,true);CHECK(&pool.publish()!=sprite);
+    const auto revision=pool.publish().revision;
+    pool.reset();CHECK(pool.size()==0);CHECK(pool.publish().revision>revision);
+    pool.clear();CHECK(pool.stats().retainedBytes==0);CHECK(pool.publish().revision>revision);
+  }
+}
 void layouts() {
   auto& g=aurora::gx::g_gxState;
   std::array<uint8_t,512> array{};
@@ -139,9 +161,11 @@ void state_transitions() {
 void completed_frame_does_not_fence() {
   BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
   config.log_level=RuntimeLogLevel::Silent;
-  CHECK(initialize(config));CHECK(!completed_performance_snapshot().completedFrame);
+  CHECK(initialize(config));CHECK(!completed_performance_snapshot().completedFrame);CHECK(!completed_memory_snapshot().completedFrame);
   CHECK(begin_frame());end_frame();
   const auto first=completed_performance_snapshot();CHECK(first.completedFrame&&first.frameIndex==1);
+  const auto firstMemory=completed_memory_snapshot();CHECK(firstMemory.completedFrame&&firstMemory.frameIndex==1);
+  CHECK(firstMemory.budget.staticGeometryBytes==memory_budget().staticGeometryBytes);
   CHECK(aurora::gx::fifo::start_worker());
   struct Blocker {std::atomic<bool>* entered;std::atomic<bool>* release;};
   std::atomic<bool> entered=false,release=false,readerDone=false;
@@ -153,14 +177,20 @@ void completed_frame_does_not_fence() {
   while(!entered.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
   CHECK(entered.load());
   std::thread reader([&]{const auto value=completed_performance_snapshot();
-    readerDone.store(value.completedFrame&&value.frameIndex==first.frameIndex,std::memory_order_release);});
+    const auto memory=completed_memory_snapshot();
+    readerDone.store(value.completedFrame&&value.frameIndex==first.frameIndex&&memory.completedFrame&&memory.frameIndex==firstMemory.frameIndex,std::memory_order_release);});
   while(!readerDone.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
   const bool beforeRelease=readerDone.load(std::memory_order_acquire);
   release.store(true,std::memory_order_release);reader.join();CHECK(beforeRelease);
   aurora::gx::fifo::drain_sync();CHECK(begin_frame());end_frame();aurora::gx::fifo::drain_sync();
-  CHECK(completed_performance_snapshot().frameIndex==2);
-  shutdown();CHECK(!completed_performance_snapshot().completedFrame);
+  CHECK(completed_performance_snapshot().frameIndex==2);CHECK(completed_memory_snapshot().frameIndex==2);
+  shutdown();CHECK(!completed_performance_snapshot().completedFrame);CHECK(!completed_memory_snapshot().completedFrame);
+  BackendConfig invalid=config;invalid.render_width=invalid.width+1;
+  CHECK(!initialize(invalid));CHECK(!completed_memory_snapshot().completedFrame);
+  CHECK(initialize(config));CHECK(!completed_memory_snapshot().completedFrame);
+  CHECK(begin_frame());end_frame();CHECK(completed_memory_snapshot().frameIndex==1);
+  shutdown();CHECK(!completed_memory_snapshot().completedFrame);
 }
 }
-int main(){layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

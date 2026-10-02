@@ -1,5 +1,7 @@
 #include "gfx/vita_cpu_workers.hpp"
 #include "vita_log.hpp"
+#include "gfx/vita_cpu_dispatch_plan.hpp"
+#include <limits>
 #include <psp2/kernel/threadmgr.h>
 #include <array>
 #include <atomic>
@@ -15,7 +17,7 @@
 #include <vector>
 
 namespace {
-struct Sema {std::mutex mutex;std::condition_variable cv;int count=0,max=1;};
+struct Sema {bool wake=false;std::mutex mutex;std::condition_variable cv;int count=0,max=1;};
 struct Thread {int(*entry)(SceSize,void*);std::thread thread;int affinity=0;int id=-1;};
 std::mutex registryMutex;
 std::map<int,std::shared_ptr<Sema>> semas;
@@ -27,6 +29,8 @@ std::atomic<bool> failUser1ThreadCreate{false};
 std::atomic<bool> failSystemInfo{false};
 std::atomic<uint64_t> fakeSystemUs{100000};
 std::atomic<uint64_t> fakeIdle3Us{100000};
+std::atomic<bool> failNextWake{false};
+std::atomic<bool> rejectSystemCpuId{false};
 thread_local int currentThreadId=0;
 thread_local int currentCpuId=0;
 thread_local int currentAffinity=0;
@@ -37,8 +41,8 @@ void require(bool ok,const char* reason) {
   if(!ok){std::fprintf(stderr,"worker regression: %s\n",reason);std::abort();}
 }
 }
-SceUID sceKernelCreateSema(const char*,int,int count,int max,void*) {
-  std::lock_guard lock(registryMutex);auto s=std::make_shared<Sema>();s->count=count;s->max=max;
+SceUID sceKernelCreateSema(const char* name,int,int count,int max,void*) {
+  std::lock_guard lock(registryMutex);auto s=std::make_shared<Sema>();s->count=count;s->max=max;s->wake=std::strcmp(name,"aurora_cpu_wake")==0;
   const int id=nextId++;semas.emplace(id,std::move(s));return id;
 }
 int sceKernelDeleteSema(SceUID id) {std::lock_guard lock(registryMutex);semas.erase(id);return 0;}
@@ -49,6 +53,7 @@ int sceKernelWaitSema(SceUID id,int count,void*) {
 }
 int sceKernelSignalSema(SceUID id,int count) {
   auto s=semaphore(id);std::lock_guard lock(s->mutex);
+  if(s->wake&&failNextWake.exchange(false))return -1;
   if(s->count+count>s->max){++semaErrors;return -1;}
   s->count+=count;s->cv.notify_one();return 0;
 }
@@ -64,7 +69,7 @@ int sceKernelStartThread(SceUID id,SceSize size,void* args) {
   const int affinity=t.affinity;
   t.thread=std::thread([entry=t.entry,copy=std::move(copy),id,affinity]() mutable {
     currentThreadId=id;currentAffinity=affinity;
-    currentCpuId=affinity==SCE_KERNEL_CPU_MASK_SYSTEM?3:
+    currentCpuId=affinity==SCE_KERNEL_CPU_MASK_SYSTEM?(rejectSystemCpuId.load()?2:3):
         (affinity==SCE_KERNEL_CPU_MASK_USER_2?2:(affinity==SCE_KERNEL_CPU_MASK_USER_1?1:0));
     entry(copy.size(),copy.data());
   });return 0;
@@ -133,8 +138,99 @@ void verify_budget_coverage(const BudgetJob& job,size_t count,const char* reason
     require(job.visits[i].load()==unsigned(i<count),reason);
 }
 }
+namespace {
+void dispatch_plans() {
+  using namespace aurora::vita::gfx;
+  const std::array<int,3> normal{2,1,3};
+  auto p=cpu_dispatch_plan(256,64,3,0,normal,3);
+  require(p.workerCount==2&&p.workers[0]==0&&p.workers[1]==1,"CPU0/cap3 plan");
+  p=cpu_dispatch_plan(256,64,3,2,normal,3);
+  require(p.workerCount==1&&p.workers[0]==1,"CPU2/cap3 plan must not replace CPU2 with CPU3");
+  p=cpu_dispatch_plan(256,64,4,2,normal,3);
+  require(p.workerCount==2&&p.workers[0]==1&&p.workers[1]==2,"CPU2/cap4 noncontiguous plan");
+  require(cpu_dispatch_plan(256,64,0,-1,normal,3).workerCount==0,"unknown caller must be serial");
+  require(cpu_dispatch_plan(256,64,0,0,normal,0).workerCount==0,"no workers");
+  require(cpu_dispatch_plan(256,64,0,0,{2,2,-1},3).workerCount==1,"duplicate/unknown helper cores");
+  require(cpu_dispatch_plan(1,0,0,0,normal,3).workerCount==0,"small job");
+  for(int caller=0;caller<4;++caller)for(unsigned cap=0;cap<6;++cap)
+    for(size_t count=0;count<260;++count)for(size_t minimum:{size_t(0),size_t(1),size_t(3),size_t(64)}) {
+      p=cpu_dispatch_plan(count,minimum,cap,caller,normal,3);
+      std::array<unsigned,260> visits{};
+      for(unsigned rank=0;rank<p.lanes();++rank) {
+        const auto [begin,end]=p.range(count,rank);
+        require(begin<=end&&end<=count,"partition bounds");
+        require(count==0||begin<end,"empty dispatched interval");
+        for(size_t i=begin;i<end;++i)++visits[i];
+      }
+      for(size_t i=0;i<count;++i)require(visits[i]==1,"pure partition coverage");
+      unsigned used=1u<<caller;
+      for(unsigned rank=0;rank<p.workerCount;++rank){
+        const auto i=p.workers[rank];require(i<3&&(cap==0||i+1<cap),"helper outside cap");
+        require(!(used&(1u<<normal[i])),"helper duplicates physical core");used|=1u<<normal[i];
+      }
+    }
+  p=cpu_dispatch_plan(std::numeric_limits<size_t>::max(),1,0,0,normal,3);
+  size_t previous=0;
+  for(unsigned rank=0;rank<p.lanes();++rank){auto [begin,end]=p.range(std::numeric_limits<size_t>::max(),rank);
+    require(begin==previous&&end>begin,"overflow-safe partition");previous=end;}
+  require(previous==std::numeric_limits<size_t>::max(),"overflow partition end");
+}
+void distinct_dispatch() {
+  using namespace aurora::vita::gfx;
+  require(initialize_cpu_workers(3,64,3,{},true),"distinct initialize");
+  currentCpuId=2;
+  for(unsigned iteration=1;iteration<=1000;++iteration) {
+    Job job;job.iteration=iteration;
+    require(cpu_parallel_for(256,task,&job),"excluded lane1 callback incorrectly ran");
+    require(job.laneMask==5,"CPU2 cap3 must run caller and lane2 only");
+    for(auto& v:job.visits)require(v==1,"noncontiguous coverage");
+  }
+  Job failing;
+  require(cpu_parallel_for_min_lanes(256,64,4,fail_lane3_task,&failing),"CPU3 without quota fallback");
+  require(failing.laneMask==5,"cap4 must preserve CPU3 quota gate");
+  for(auto& v:failing.visits)require(v==1,"noncontiguous failure coverage");
+  Job lane2;
+  const auto fail2=[](void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
+    auto& job=*static_cast<Job*>(opaque);job.laneMask.fetch_or(1u<<lane);
+    for(size_t i=begin;i<end;++i)++job.visits[i];return lane!=2;
+  };
+  require(!cpu_parallel_for(256,fail2,&lane2)&&lane2.laneMask==5,"lane2 callback failure");
+  for(auto& v:lane2.visits)require(v==1,"lane2 failure coverage");
+  Job signal;signal.iteration=7;failNextWake=true;
+  require(!cpu_parallel_for(256,task,&signal),"wake failure must be reported");
+  require(!failNextWake,"wake failure not injected");
+  for(auto& v:signal.visits)require(v==1,"wake failure lost or duplicated work");
+  Job unknown;unknown.iteration=7;currentCpuId=-1;
+  require(cpu_parallel_for(256,task,&unknown)&&unknown.laneMask==1,"unknown CPU fallback");
+  currentCpuId=0;
+  struct Nested {Job inner;std::atomic<unsigned> calls{0};} nested;
+  nested.inner.iteration=7;
+  const auto outer=[](void* opaque,size_t,size_t,uint32_t lane) noexcept {
+    auto& n=*static_cast<Nested*>(opaque);
+    if(lane==0){++n.calls;return cpu_parallel_for(256,task,&n.inner);}return true;
+  };
+  require(cpu_parallel_for(256,outer,&nested),"nested dispatch");
+  require(nested.calls==1&&nested.inner.laneMask==1,"nested job should be caller-only");
+  for(auto& v:nested.inner.visits)require(v==1,"nested coverage");
+  struct Held {std::atomic<bool> entered{false},release{false};} held;
+  const auto hold=[](void* opaque,size_t,size_t,uint32_t lane) noexcept {
+    auto& h=*static_cast<Held*>(opaque);
+    if(lane==0){h.entered=true;while(!h.release.load())std::this_thread::yield();}return true;
+  };
+  std::thread producer([&]{require(cpu_parallel_for(256,hold,&held),"held producer result");});
+  const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+  while(!held.entered&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+  require(held.entered,"concurrent test producer not started");
+  Job concurrent;concurrent.iteration=7;
+  require(cpu_parallel_for(256,task,&concurrent)&&concurrent.laneMask==1,"concurrent serial fallback");
+  held.release=true;producer.join();
+  shutdown_cpu_workers();
+  require(semas.empty()&&threads.empty(),"distinct shutdown leaked resources");
+}
+}
 int main() {
   using namespace aurora::vita::gfx;
+  dispatch_plans();distinct_dispatch();
   for(unsigned workers=1;workers<=3;++workers) {
     require(initialize_cpu_workers(workers,64,workers==3?3:0),"initialize");
     require(cpu_worker_threads()==workers,"worker count mismatch");
@@ -234,6 +330,24 @@ int main() {
   failUser1ThreadCreate.store(false);
   require(semas.empty()&&threads.empty(),"sparse budget shutdown leaked resources");
 
+  // Distinct filtering must also apply to the existing quota-aware scheduler.
+  fakeSystemUs.store(100000);fakeIdle3Us.store(100000);
+  require(initialize_cpu_workers(3,16,3,budget,true),"distinct budget initialize");
+  currentCpuId=2;
+  fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);
+  BudgetJob distinctBudget;
+  require(cpu_parallel_for_vertex(1024,budget_task,&distinctBudget),"distinct quota job");
+  verify_budget_coverage(distinctBudget,1024,"distinct quota coverage");
+  require(!(distinctBudget.laneMask.load()&2u),"CPU2 caller woke CPU2 helper in quota mode");
+  require(distinctBudget.laneMask.load()&8u,"eligible CPU3 was lost in quota mode");
+  const auto chunks=cpu_core3_budget_snapshot().chunks;
+  fakeSystemUs.fetch_add(20000);
+  BudgetJob distinctBlocked;
+  require(cpu_parallel_for_vertex(512,budget_task,&distinctBlocked),"distinct exhausted quota");
+  verify_budget_coverage(distinctBlocked,512,"distinct exhausted quota coverage");
+  require(cpu_core3_budget_snapshot().chunks==chunks,"distinct bypassed CPU3 quota");
+  currentCpuId=0;shutdown_cpu_workers();
+
   fakeSystemUs.store(100000);fakeIdle3Us.store(100000);
   require(initialize_cpu_workers(3,16,3,budget),"budget initialize");
   require(cpu_core3_available(),"budget test needs CPU3");
@@ -306,6 +420,11 @@ int main() {
   shutdown_cpu_workers();
   aurora::vita::set_runtime_diagnostics_enabled(true);
   require(semas.empty()&&threads.empty(),"budget shutdown leaked resources");
+  rejectSystemCpuId=true;
+  require(initialize_cpu_workers(3,64,3,{},true),"rejected physical CPU3 initialize");
+  require(cpu_worker_threads()==2&&!cpu_core3_available(),"CPU3 physical id rejection failed");
+  shutdown_cpu_workers();rejectSystemCpuId=false;
+  require(semas.empty()&&threads.empty(),"rejected CPU3 shutdown leaked resources");
   require(semaErrors==0,"semaphore token overflow");
   std::puts("vita workers: sparse CPU3 topology, quota scheduler, exact coverage/results, clean shutdown");
 }

@@ -1,6 +1,10 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "vita-standalone-base",
@@ -26,14 +30,18 @@
       "displayName": "Vita - shared GX frontend with vitaGL",
       "inherits": "vita-standalone-base",
       "binaryDir": "${sourceDir}/build/vita-vitagl",
-      "cacheVariables": { "AURORA_VITA_RENDERER": "VITAGL" }
+      "cacheVariables": {
+        "AURORA_VITA_RENDERER": "VITAGL"
+      }
     },
     {
       "name": "vita-gxm",
       "displayName": "Vita - shared GX frontend with native SceGxm",
       "inherits": "vita-standalone-base",
       "binaryDir": "${sourceDir}/build/vita-gxm",
-      "cacheVariables": { "AURORA_VITA_RENDERER": "GXM" }
+      "cacheVariables": {
+        "AURORA_VITA_RENDERER": "GXM"
+      }
     },
     {
       "name": "vita-host-tests",
@@ -53,18 +61,80 @@
         "AURORA_VITA_BUILD_SDL3_PROBE": "OFF",
         "AURORA_VITA_BUILD_BACKEND_TESTS": "ON"
       }
+    },
+    {
+      "name": "vita-gxm-stable",
+      "displayName": "Vita GXM - validated async/direct profile",
+      "inherits": "vita-gxm",
+      "binaryDir": "${sourceDir}/build/vita-gxm-stable",
+      "cacheVariables": {
+        "AURORA_VITA_DISTINCT_CPU_CORES": "OFF",
+        "AURORA_VITA_GXM_IMMEDIATE_DRAW_VIEW": "OFF",
+        "AURORA_VITA_ASYNC_GX": "ON",
+        "AURORA_VITA_GXM_DIRECT_STREAM_WRITE": "ON",
+        "AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT": "ON"
+      }
+    },
+    {
+      "name": "vita-gxm-control",
+      "displayName": "Vita GXM - reference without async/direct",
+      "inherits": "vita-gxm",
+      "binaryDir": "${sourceDir}/build/vita-gxm-control",
+      "cacheVariables": {
+        "AURORA_VITA_DISTINCT_CPU_CORES": "OFF",
+        "AURORA_VITA_GXM_IMMEDIATE_DRAW_VIEW": "OFF",
+        "AURORA_VITA_ASYNC_GX": "OFF",
+        "AURORA_VITA_GXM_DIRECT_STREAM_WRITE": "OFF",
+        "AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT": "OFF"
+      }
+    },
+    {
+      "name": "vita-gxm-candidate",
+      "displayName": "Vita GXM - native dispatch and borrowed draw candidate",
+      "inherits": "vita-gxm",
+      "binaryDir": "${sourceDir}/build/vita-gxm-candidate",
+      "cacheVariables": {
+        "AURORA_VITA_DISTINCT_CPU_CORES": "ON",
+        "AURORA_VITA_GXM_IMMEDIATE_DRAW_VIEW": "ON",
+        "AURORA_VITA_ASYNC_GX": "ON",
+        "AURORA_VITA_GXM_DIRECT_STREAM_WRITE": "ON",
+        "AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT": "ON"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "vita-vitagl", "configurePreset": "vita-vitagl" },
-    { "name": "vita-gxm", "configurePreset": "vita-gxm" },
-    { "name": "vita-host-tests", "configurePreset": "vita-host-tests" }
+    {
+      "name": "vita-vitagl",
+      "configurePreset": "vita-vitagl"
+    },
+    {
+      "name": "vita-gxm",
+      "configurePreset": "vita-gxm"
+    },
+    {
+      "name": "vita-host-tests",
+      "configurePreset": "vita-host-tests"
+    },
+    {
+      "name": "vita-gxm-stable",
+      "configurePreset": "vita-gxm-stable"
+    },
+    {
+      "name": "vita-gxm-control",
+      "configurePreset": "vita-gxm-control"
+    },
+    {
+      "name": "vita-gxm-candidate",
+      "configurePreset": "vita-gxm-candidate"
+    }
   ],
   "testPresets": [
     {
       "name": "vita-host-tests",
       "configurePreset": "vita-host-tests",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

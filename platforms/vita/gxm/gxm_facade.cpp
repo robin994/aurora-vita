@@ -1,4 +1,5 @@
 #include "gxm_renderer.hpp"
+#include "../gfx/vita_frame_stats.hpp"
 #include "../vita_log.hpp"
 #include "gfx/vita_renderer.hpp"
 #include "gfx/vita_pipeline_key.hpp"
@@ -492,30 +493,6 @@ bool Renderer::present(bool display) noexcept {
     else {boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;}
   }
   const bool ok=native_->end_frame(display);failed_=failed_||!ok;
-  // Include internal clears, copies and the final display scene. The last GX
-  // draw alone is not a complete snapshot of the native frame.
-  const auto& s=native_->stats();
-  stats_.nativeTimingsSampled=s.nativeTimingsSampled;
-  stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;
-  stats_.nativeDrawUs=s.nativeDrawUs;stats_.nativeDisplayQueueAddUs=s.nativeDisplayQueueAddUs;
-  stats_.nativeFragmentPrepareHits=s.nativeFragmentPrepareHits;
-  stats_.nativeFragmentPrepareMisses=s.nativeFragmentPrepareMisses;
-  stats_.nativeSceneCount=s.nativeSceneCount;
-  stats_.nativeFinishReasonCalls=s.nativeFinishReasonCalls;stats_.nativeFinishReasonWaitUs=s.nativeFinishReasonWaitUs;
-  stats_.nativePipelineSetters=s.nativePipelineSetters;stats_.nativePipelineSettersSkipped=s.nativePipelineSettersSkipped;
-  stats_.nativeUniformUploadCalls=s.nativeUniformUploadCalls;stats_.nativeUniformUploadBytes=s.nativeUniformUploadBytes;
-  stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
-  stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
-  stats_.nativeEfbCopies=s.nativeEfbCopies;stats_.nativeEfbEndSceneUs=s.nativeEfbEndSceneUs;
-  stats_.nativeEfbTransferSubmitUs=s.nativeEfbTransferSubmitUs;
-  stats_.nativeEfbTransferWaitUs=s.nativeEfbTransferWaitUs;
-  stats_.nativeEfbCpuFixupUs=s.nativeEfbCpuFixupUs;
-  stats_.nativeDepthLoadScenes=s.nativeDepthLoadScenes;
-  stats_.nativeDepthStoreScenes=s.nativeDepthStoreScenes;
-  stats_.nativeDepthlessScenes=s.nativeDepthlessScenes;
-  stats_.nativeFinishCalls=s.nativeFinishCalls;
-  stats_.nativeScissorFreeDraws=s.nativeScissorFreeDraws;
-  stats_.diagSceneGpuUs=s.diagSceneGpuUs;
   return ok;
 }
 bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) noexcept {return native_->readback_rgba8(pixels);}
@@ -568,12 +545,6 @@ Handle Renderer::capture_current(Handle existing,const Scissor& s,uint32_t dw,ui
   const int64_t y=int64_t(targetHeight_)-s.y-s.height;
   if(s.width<=0||s.height<=0||y<INT32_MIN||y>INT32_MAX)return 0;
   const auto h=efb_.capture_from_bound(existing,s.x,int32_t(y),s.width,s.height,dw,dh,f,false,fx,fy);
-  const auto& sNative=native_->stats();
-  stats_.nativeEfbCopies=sNative.nativeEfbCopies;
-  stats_.nativeEfbEndSceneUs=sNative.nativeEfbEndSceneUs;
-  stats_.nativeEfbTransferSubmitUs=sNative.nativeEfbTransferSubmitUs;
-  stats_.nativeEfbTransferWaitUs=sNative.nativeEfbTransferWaitUs;
-  stats_.nativeEfbCpuFixupUs=sNative.nativeEfbCpuFixupUs;
   return h;
 }
 Handle Renderer::upload_efb_rgba(Handle existing,uint32_t w,uint32_t h,const void* data) noexcept {return efb_.upload_rgba(existing,w,h,data);}
@@ -589,16 +560,14 @@ void Renderer::invalidate_draw_state() noexcept {pipelines_.invalidate_bound();}
 void Renderer::draw(const DrawPacket& packet) noexcept {
   if(failed_)return;
   if(!native_->draw(packet)) {failed_=true;return;}
-  const auto& s=native_->stats();stats_.drawCalls=s.drawCalls;stats_.triangles=s.triangles;
-  stats_.nativePipelineUs=s.nativePipelineUs;stats_.nativeTextureUs=s.nativeTextureUs;stats_.nativeDrawUs=s.nativeDrawUs;
-  stats_.nativeVertexUniformReuses=s.nativeVertexUniformReuses;
-  stats_.nativeFragmentUniformReuses=s.nativeFragmentUniformReuses;
-  stats_.nativeFragmentPrepareHits=s.nativeFragmentPrepareHits;
-  stats_.nativeFragmentPrepareMisses=s.nativeFragmentPrepareMisses;
-  stats_.nativeSceneCount=s.nativeSceneCount;
-  stats_.nativeFinishReasonCalls=s.nativeFinishReasonCalls;stats_.nativeFinishReasonWaitUs=s.nativeFinishReasonWaitUs;
-  stats_.nativePipelineSetters=s.nativePipelineSetters;stats_.nativePipelineSettersSkipped=s.nativePipelineSettersSkipped;
-  stats_.nativeUniformUploadCalls=s.nativeUniformUploadCalls;stats_.nativeUniformUploadBytes=s.nativeUniformUploadBytes;
+
+}
+void Renderer::draw_immediate(const DrawSubmissionView& view) noexcept {
+  if(!failed_ && !native_->draw(view))failed_=true;
+}
+const FrameStats& Renderer::stats() const noexcept {
+  stats_=compose_native_frame_stats(stats_,native_->stats());
+  return stats_;
 }
 void Renderer::execute(const CommandStream& stream) noexcept {
   execute_range(stream,0,stream.size(),true);

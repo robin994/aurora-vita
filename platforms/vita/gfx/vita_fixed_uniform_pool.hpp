@@ -40,6 +40,17 @@ public:
     return *slots_[used_++];
   }
 
+  // Build into scratch first; duplicates never acquire/reset a live pool slot.
+  FixedVertexUniforms& scratch() noexcept { return scratch_; }
+  FixedVertexUniforms& publish(bool reuse=true,bool distinct=false) {
+    if(reuse&&!distinct&&last_&&
+       std::memcmp(last_,&scratch_,offsetof(FixedVertexUniforms,revision))==0)return *last_;
+    scratch_.revision=++revision_;
+    auto& stored=emplace_back();stored=scratch_;
+    last_=distinct?nullptr:&stored;
+    return stored;
+  }
+
   // The most recent candidate can be discarded when exact snapshot comparison
   // chooses an older live snapshot. That older slot is never overwritten.
   void pop_back() noexcept {
@@ -47,7 +58,7 @@ public:
     else if (used_) --used_;
   }
 
-  void reset() noexcept { overflow_.clear(); used_ = 0; }
+  void reset() noexcept { overflow_.clear(); used_ = 0; last_ = nullptr; }
   void clear() noexcept {
     reset();
     std::vector<std::unique_ptr<FixedVertexUniforms>>{}.swap(slots_);
@@ -63,6 +74,9 @@ private:
   std::vector<std::unique_ptr<FixedVertexUniforms>> slots_{};
   // OFF and over-budget draws retain the original std::deque storage path.
   std::deque<FixedVertexUniforms> overflow_{};
+  FixedVertexUniforms scratch_{};
+  FixedVertexUniforms* last_ = nullptr;
+  uint64_t revision_ = 0;
   size_t used_ = 0, limit_ = 0;
   uint64_t allocations_ = 0, reuses_ = 0, fallbacks_ = 0;
 };

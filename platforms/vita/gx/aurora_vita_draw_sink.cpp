@@ -56,6 +56,7 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   strictUnsupported_ = config.strictUnsupported;
   allowLitFixedVertexGpu_ = config.allowLitFixedVertexGpu;
   localDrawBatching_=config.localDrawBatching;
+  immediateDrawView_=config.immediateDrawView;
   allowStreamedFixedVertexGpu_ = config.allowStreamedFixedVertexGpu;
   allowDynamicTexMatrixGpu_ = config.allowDynamicTexMatrixGpu;
   allowBumpFixedVertexGpu_ = config.allowBumpFixedVertexGpu;
@@ -111,7 +112,7 @@ void DrawSink::set_runtime_feature_flags(uint32_t flags) noexcept {
   allowPrimitiveExpansionGpu_=(flags&RuntimePrimitiveExpansion)!=0;
   staticGeometryStableOnly_=(flags&RuntimeStaticStableOnly)!=0;
   localDrawBatching_=(flags&RuntimeLocalDrawBatching)!=0;
-  translatedVertexStateValid_=false;
+  translatedVertexStateValid_=false;immediateGpuUniforms_.invalidate();
   translatedVertexStateLightweight_=false;
 #if defined(AURORA_VITA_UPSTREAM)
   translatedStateValid_=false;
@@ -126,8 +127,8 @@ void DrawSink::shutdown() noexcept {
   if (!initialized_ && !arena_) return;
   stream_.reset();
   preparedScratch_=gfx::PreparedDraw{};
-  fixedVertexUniforms_.clear();lastFixedUniforms_=nullptr;staticGeometry_.reset();fixedPipelineKeys_.clear();
-  translatedVertexStateValid_=false;
+  fixedVertexUniforms_.clear();staticGeometry_.reset();fixedPipelineKeys_.clear();
+  translatedVertexStateValid_=false;immediateGpuUniforms_.invalidate();
   translatedVertexStateLightweight_=false;
 #if defined(AURORA_VITA_UPSTREAM)
   translatedStateValid_=false;
@@ -653,11 +654,11 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     if (translated.valid) {
       if(!translated.texture.cacheable)volatileTextureMask|=static_cast<uint8_t>(1u<<slot);
       // Only telemetry consumes these deltas; skip the struct copies otherwise.
-      gfx::FrameStats statsBeforeTexture{};
-      if (telemetry_) statsBeforeTexture = renderer_->stats();
+      gfx::CacheCounters statsBeforeTexture{};
+      if (telemetry_) statsBeforeTexture = renderer_->cache_counters();
       const auto handle = renderer_->create_texture(translated.texture);
       if (telemetry_) {
-        const auto statsAfterTexture = renderer_->stats();
+        const auto statsAfterTexture = renderer_->cache_counters();
         const uint32_t hits = statsAfterTexture.textureHits - statsBeforeTexture.textureHits;
         const uint32_t misses = statsAfterTexture.textureMisses - statsBeforeTexture.textureMisses;
         const uint32_t uploads = statsAfterTexture.textureUploads - statsBeforeTexture.textureUploads;
@@ -1035,8 +1036,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   }
 
   gfx::PrepareDrawError error = gfx::PrepareDrawError::None;
-  gfx::FrameStats statsBeforeEnqueue{};
-  if (telemetry_) statsBeforeEnqueue = renderer_->stats();
+  gfx::CacheCounters statsBeforeEnqueue{};
+  if (telemetry_) statsBeforeEnqueue = renderer_->cache_counters();
   uint64_t resolvedPipelineKey = 0;
   if(gpuGeometry||streamFixed){
     resolvedPipelineKey=fixedPipelineKey;
@@ -1065,17 +1066,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // snapshot whose inputs had changed). Snapshots live until the next flush.
   const auto buildFixedUniforms=[&]() noexcept -> gfx::FixedVertexUniforms& {
     const bool spriteExpand=translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite;
-    gfx::FixedVertexUniforms& fixed=fixedVertexUniforms_.emplace_back();
-    gfx::fixed_vertex_uniforms_into(fixed,translatedGpuPipeline_,vertexState);
-    const bool reuseFixed=!spriteExpand&&!gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot)&&lastFixedUniforms_&&
-        std::memcmp(lastFixedUniforms_,&fixed,offsetof(gfx::FixedVertexUniforms,revision))==0;
-    if(reuseFixed){
-      fixedVertexUniforms_.pop_back();
-    }else{
-      fixed.revision=++fixedUniformRevision_;
-      lastFixedUniforms_=spriteExpand?nullptr:&fixed;
-    }
-    gfx::FixedVertexUniforms& shared=reuseFixed?*lastFixedUniforms_:fixed;
+    auto& scratch=fixedVertexUniforms_.scratch();
+    gfx::fixed_vertex_uniforms_into(scratch,translatedGpuPipeline_,vertexState);
+    auto& shared=fixedVertexUniforms_.publish(!gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot),spriteExpand);
     if(spriteExpand){
       shared.primitiveExpand={{
         std::max(expansion.viewportWidth,1.f),std::max(expansion.viewportHeight,1.f),
@@ -1125,21 +1118,24 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(!uploaded){
         error=gfx::PrepareDrawError::StreamingOverflow;
       }else{
-        gfx::DrawPacket packet{};
-        packet.pipelineKey=resolvedPipelineKey;
-        packet.vertices=streamed.vertices;
-        packet.indices=streamed.indices;
-        packet.vertexCount=streamed.vertexCount;
-        packet.indexCount=streamed.indexCount;
-        packet.absoluteVertexIndices=false;
-        packet.textures=bindings;
-        packet.uniforms=uniforms;
-        packet.uniformRevision=vertexStateVersion_;
-        packet.viewport=translate_viewport();
-        packet.scissor=translate_scissor();
-        packet.fixedVertexUniforms=streamFixed?&buildFixedUniforms():nullptr;
-        renderer_->invalidate_resource_bindings();
-        {
+        const auto fillGeometry=[&](auto& draw) noexcept {
+          draw.pipelineKey=resolvedPipelineKey;
+          draw.vertices=streamed.vertices;draw.indices=streamed.indices;
+          draw.vertexCount=streamed.vertexCount;draw.indexCount=streamed.indexCount;
+          draw.uniformRevision=vertexStateVersion_;
+          draw.viewport=translate_viewport();draw.scissor=translate_scissor();
+          draw.fixedVertexUniforms=streamFixed?&buildFixedUniforms():nullptr;
+        };
+        if(immediateDrawView_) {
+          // Typed conversion, never alias DrawUniforms through a GPU prefix.
+          gfx::DrawSubmissionView view(immediateGpuUniforms_.get(uniforms,vertexStateVersion_),bindings);
+          fillGeometry(view);
+          gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::Submit);
+          renderer_->draw_immediate(view);
+        }else {
+          gfx::DrawPacket packet{};
+          fillGeometry(packet);
+          packet.textures=bindings;packet.uniforms=uniforms;
           gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::Submit);
           renderer_->draw(packet);
         }
@@ -1165,7 +1161,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     return result;
   }
   if (telemetry_) {
-    const auto statsAfterEnqueue = renderer_->stats();
+    const auto statsAfterEnqueue = renderer_->cache_counters();
     const uint32_t hitDelta = statsAfterEnqueue.pipelineHits - statsBeforeEnqueue.pipelineHits;
     const uint32_t missDelta = statsAfterEnqueue.pipelineMisses - statsBeforeEnqueue.pipelineMisses;
     for (uint32_t i = 0; i < hitDelta; ++i) telemetry_->pipeline(true);

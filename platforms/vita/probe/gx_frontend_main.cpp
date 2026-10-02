@@ -21,6 +21,11 @@
 #endif
 namespace {
 using namespace aurora::vita;
+// This diagnostic probe reads live renderer objects. Serialize its direct
+// inspections with the optional GX worker; production overlays use snapshots.
+bool begin_probe_frame() {
+  const bool ok=begin_frame();wait_for_render_idle();return ok;
+}
 void setup_gx() {
   GXInit(nullptr,0);
   AuroraSetViewportPolicy(AURORA_VIEWPORT_NATIVE);
@@ -62,13 +67,29 @@ void quad(float x,float y,float size,uint8_t r,uint8_t g,uint8_t b,bool textured
 bool efb_contract() {
   auto& r=renderer();
   const auto target=r.create_efb(64,64,true);
-  if(!target||!begin_frame()||!r.bind_efb(target)) {
+  if(!target||!begin_probe_frame()||!r.bind_efb(target)) {
     std::fprintf(stderr,"[gx-contract] EFB create/bind failed handle=%u\n",target);return false;
   }
+#if defined(AURORA_VITA_RENDERER_GXM)
+  const auto initialCache=r.cache_counters();
+#endif
   r.clear_current({.25f,0,0,.5f},1,true,true,true);
   // Separate clear masks must survive native scene boundaries/readback.
   r.clear_current({0,1,0,0},.25f,false,false,true);
   r.clear_current({0,0,1,.8f},1,false,true,false);
+#if defined(AURORA_VITA_RENDERER_GXM)
+  const auto beforePartial=r.stats();
+  gfx::CommandStream partial;
+  partial.clear(gfx::ClearCommand{{.25f,0,0,.8f},.25f,true,true});
+  partial.barrier();
+  r.execute_range(partial,0,1,false);
+  if(r.stats().drawCalls!=beforePartial.drawCalls+1)return false;
+  r.execute_range(partial,1,2,true);
+  const auto afterClear=r.stats();
+  if(!afterClear.nativeSceneCount || !afterClear.drawCalls || afterClear.pipelineHits!=initialCache.pipelineHits) {
+    std::fprintf(stderr,"[gx-contract] mid-frame clear stats FAILED\n");return false;
+  }
+#endif
   std::vector<uint8_t> pixels;
   if(!r.efb().read_rgba(target,pixels)||pixels.size()!=64u*64u*4u) {
     std::fprintf(stderr,"[gx-contract] EFB readback failed size=%u\n",unsigned(pixels.size()));return false;
@@ -96,9 +117,22 @@ bool efb_contract() {
           unsigned(p/4),pixels[p],pixels[p+1],pixels[p+2],pixels[p+3]);return false;
     }
   }
+#if defined(AURORA_VITA_RENDERER_GXM)
+  const auto afterCopy=r.stats();
+  if(afterCopy.nativeEfbCopies<afterClear.nativeEfbCopies+2 ||
+      afterCopy.nativeFinishReasonCalls[static_cast<size_t>(gfx::FinishReason::Readback)]<=
+      afterClear.nativeFinishReasonCalls[static_cast<size_t>(gfx::FinishReason::Readback)]) {
+    std::fprintf(stderr,"[gx-contract] mid-frame copy/finish stats FAILED\n");return false;
+  }
+#endif
   std::fprintf(stderr,"[gx-contract] native EFB 2x GXM transfer PASS\n");
   if(!r.blit_efb(copy))return false;
-  end_frame();
+  end_frame();wait_for_render_idle();
+#if defined(AURORA_VITA_RENDERER_GXM)
+  const auto completed=completed_memory_snapshot();
+  if(!completed.completedFrame || completed.frameIndex!=completed_performance_snapshot().frameIndex ||
+      r.stats().nativeSceneCount<afterCopy.nativeSceneCount)return false;
+#endif
   if(!r.readback_rgba8(pixels)||pixels.size()!=960u*544u*4u)return false;
   for(size_t p=0;p<pixels.size();p+=4)
     for(unsigned c=0;c<3;++c)if(std::abs(int(pixels[p+c])-64)>1) {
@@ -118,7 +152,7 @@ bool cropped_efb_orientation_probe() {
     p[3]=x<8?64:192;
   }
   const auto source=r.upload_efb_rgba(0,side,side,rgba.data());
-  if(!source||!begin_frame()||!r.bind_efb(source))return false;
+  if(!source||!begin_probe_frame()||!r.bind_efb(source))return false;
   const gfx::Scissor crop{2,4,12,8};
   unsigned cases=0;
   for(auto format:{gfx::EfbCopyFormat::Passthrough,gfx::EfbCopyFormat::RGB565,gfx::EfbCopyFormat::A8})
@@ -135,7 +169,7 @@ bool cropped_efb_orientation_probe() {
       }
       r.efb().destroy(copied);++cases;
     }
-  r.bind_default();end_frame();r.efb().destroy(source);
+  r.bind_default();end_frame();wait_for_render_idle();r.efb().destroy(source);
   std::fprintf(stderr,"[gx-contract] cropped EFB orientation/alpha PASS cases=%u\n",cases);
   return !r.failed();
 }
@@ -153,10 +187,10 @@ bool display_blit_orientation_probe() {
     p[0]=color[0];p[1]=color[1];p[2]=color[2];p[3]=255;
   }
   auto source=r.upload_efb_rgba(0,side,side,rgba.data());
-  if(!source||!begin_frame()||!r.blit_efb(source)||!r.display_copy({0,0,960,544})) {
+  if(!source||!begin_probe_frame()||!r.blit_efb(source)||!r.display_copy({0,0,960,544})) {
     std::fprintf(stderr,"[gx-contract] display blit setup failed handle=%u\n",source);return false;
   }
-  end_frame();
+  end_frame();wait_for_render_idle();
   std::vector<uint8_t> pixels;
   if(r.failed()||!r.readback_rgba8(pixels)||pixels.size()!=960u*544u*4u)return false;
   const auto sample=[&](uint32_t x,uint32_t y) {
@@ -219,7 +253,7 @@ bool extended_contract() {
   }
   const uint16_t idx[]{0,1,2,0,2,3};
   const auto vb=r.create_vertex_buffer(v.data(),sizeof(v),true),ib=r.create_index_buffer(idx,sizeof(idx));
-  if(!texture||!target||!vb||!ib||!begin_frame()||!r.bind_efb(target)) {
+  if(!texture||!target||!vb||!ib||!begin_probe_frame()||!r.bind_efb(target)) {
     std::fprintf(stderr,"[gx-contract] mip resources/bind failed tex=%u target=%u vb=%u ib=%u\n",texture,target,vb,ib);return false;
   }
   r.clear_current({0,0,0,1},1,true,true,true);
@@ -239,7 +273,7 @@ bool extended_contract() {
   }
   // Mutation after GPU consumption must wait before touching the backing block.
   if(!r.update_buffer(vb,v.data(),sizeof(v)))return false;
-  r.bind_default();end_frame();
+  r.bind_default();end_frame();wait_for_render_idle();
   r.buffers().destroy(vb);r.buffers().destroy(ib);r.textures().erase(texture);r.efb().destroy(target);
   return !r.failed();
 }
@@ -261,7 +295,7 @@ bool fixed_vertex_contract() {
   const auto vb=r.create_vertex_buffer(vertices,sizeof(vertices),false);
   const auto ib=r.create_index_buffer(indices,sizeof(indices),false);
   const auto target=r.create_efb(64,64,true);
-  if(!pipeline||!vb||!ib||!target||!begin_frame()||!r.bind_efb(target)) {
+  if(!pipeline||!vb||!ib||!target||!begin_probe_frame()||!r.bind_efb(target)) {
     std::fprintf(stderr,"[gx-contract] fixed vertex setup failed pipe=%llu vb=%u ib=%u target=%u err=%s\n",
       static_cast<unsigned long long>(pipeline),vb,ib,target,r.last_error());
     return false;
@@ -286,7 +320,7 @@ bool fixed_vertex_contract() {
   if(colored<500) {
     std::fprintf(stderr,"[gx-contract] fixed vertex output too small colored=%u\n",colored);return false;
   }
-  r.bind_default();end_frame();
+  r.bind_default();end_frame();wait_for_render_idle();
   r.buffers().destroy(vb);r.buffers().destroy(ib);r.efb().destroy(target);
   std::fprintf(stderr,"[gx-contract] fixed-PN native GPU vertex PASS colored=%u\n",colored);
   return !r.failed();
@@ -296,12 +330,14 @@ int run() {
   char path[160];
   std::snprintf(path,sizeof(path),"ux0:data/aurora-vita/gx_frontend_%s.log",AURORA_TEST_RENDERER);
   if(std::freopen(path,"w",stderr))std::setvbuf(stderr,nullptr,_IONBF,0);
-  std::fprintf(stderr,"[gx-contract] build=regression-20260919 renderer=%s shared_frontend=1\n",AURORA_TEST_RENDERER);
+  std::fprintf(stderr,"[gx-contract] contract=vita-native-20261002 renderer=%s shared_frontend=1\n",AURORA_TEST_RENDERER);
   BackendConfig config{};
   config.stream_vertex_bytes=512;config.stream_index_bytes=128;config.stream_slots=2;
   config.texture_cache_budget=4*1024*1024;
   config.vgl_circular_pool_size=4*1024*1024;
   config.cpu_worker_threads=0;config.wait_vblank=true;
+  std::fprintf(stderr,"[gx-contract] immediate_view=%u distinct_cores=%u\n",
+      config.gxm_immediate_draw_view?1u:0u,config.cpu_distinct_core_dispatch?1u:0u);
   // Exercise the immutable object-space geometry path on both renderers. The
   // probe intentionally keeps the budget tiny; it only needs to compile and
   // execute at least one fixed-PN GPU vertex pipeline.
@@ -335,7 +371,7 @@ int run() {
   alignas(32) static std::array<uint8_t,64*64*4> copyDestination{};
   GXTexObj copyTexture{};
   for(unsigned frame=0;frame<120;++frame) {
-    if(!begin_frame()) {shutdown();return 3;}
+    if(!begin_probe_frame()) {shutdown();return 3;}
     renderer().clear_current({.025f,.04f,.06f,1},1,true,true,true);
     material(false);
     for(unsigned i=0;i<40;++i) {
@@ -349,7 +385,7 @@ int run() {
     GXLoadTexObj(&copyTexture,GX_TEXMAP0);
     material(true);quad(.5f,.55f,.38f,255,255,255,true);
     GXDrawDone();
-    end_frame();
+    end_frame();wait_for_render_idle();
     if(renderer().failed() || draw_sink().strict_failed()) {
       std::fprintf(stderr,"[gx-contract] frame=%u FAILED %s\n",frame,renderer().last_error());shutdown();return 4;
     }
@@ -379,7 +415,28 @@ int run() {
     for(size_t i=0,j=0;i<image.size();i+=4,j+=3)std::memcpy(rgb.data()+j,image.data()+i,3);
     std::fwrite(rgb.data(),1,rgb.size(),output);std::fclose(output);
   }
+#if defined(AURORA_VITA_RENDERER_GXM)
+  // End with an intentional native validation failure, after image validation.
+  // Neither publication may label this failed frame as a new successful frame.
+  const auto lastMemory=completed_memory_snapshot();
+  const auto lastPerformance=completed_performance_snapshot();
+  const auto beforeBegin=renderer().stats().nativeFinishReasonCalls;
+  if(!begin_probe_frame()){shutdown();return 13;}
+  for(size_t i=0;i<gfx::FinishReasonCount;++i)
+    if(renderer().stats().nativeFinishReasonCalls[i]<beforeBegin[i]){shutdown();return 17;}
+  const auto beforeFailure=renderer().stats();
+  gfx::DrawPacket invalid{};renderer().draw(invalid);
+  if(!renderer().failed()){shutdown();return 14;}
+  const auto failedStats=renderer().stats();
+  end_frame();wait_for_render_idle();
+  if(completed_memory_snapshot().frameIndex!=lastMemory.frameIndex ||
+      completed_performance_snapshot().frameIndex!=lastPerformance.frameIndex || failedStats.drawCalls!=beforeFailure.drawCalls) {
+    shutdown();return 15;
+  }
+  std::fprintf(stderr,"[gx-contract] stats clear/copy/present/error and failed-frame publication PASS\n");
+#endif
   shutdown();
+  if(completed_memory_snapshot().completedFrame)return 16;
   std::fprintf(stderr,"[gx-contract] pixels=%u clear/copy/FIFO/streaming/present PASS\n",unsigned(colored));
   return 0;
 }

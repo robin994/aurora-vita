@@ -43,7 +43,8 @@ namespace aurora::vita {
 namespace {
 BackendConfig g_config{};
 gfx::PublishedSnapshot<PerformanceSnapshot> g_completedPerformance;
-PerformanceSnapshot performance_snapshot_now() noexcept;
+gfx::PublishedSnapshot<CompletedMemorySnapshot> g_completedMemory;
+PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* memory=nullptr) noexcept;
 bool g_initialized=false;
 bool g_diagnosticsEnabled=false;
 bool g_telemetryEnabled=false;
@@ -297,6 +298,8 @@ bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
   g_config=c;
   set_runtime_diagnostics_enabled(c.diagnostics_enabled);
+  g_completedPerformance.publish(PerformanceSnapshot{});
+  g_completedMemory.publish(CompletedMemorySnapshot{});
   g_displayQueueLastUs=g_displayQueueTotalUs=g_displayQueueMaxUs=g_displayQueueSamples=0;
   g_displayQueueBlockedSamples=0;
   set_runtime_log_level(c.log_level);
@@ -464,7 +467,7 @@ bool initialize(const BackendConfig& c) noexcept {
   core3Budget.chunkTargetUs=c.cpu_core3_chunk_target_us;
   core3Budget.samplePeriodUs=c.cpu_core3_sample_period_us;
   if (!gfx::initialize_cpu_workers(c.cpu_worker_threads, c.cpu_parallel_min_vertices,
-                                   c.cpu_renderer_execution_lanes,core3Budget)) {
+                                   c.cpu_renderer_execution_lanes,core3Budget,c.cpu_distinct_core_dispatch)) {
     AURORA_VITA_LOG_ERROR(
         "[aurora-vita] cpu worker initialization failed; using render-thread CPU path\n");
   }
@@ -585,6 +588,7 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.staticGeometryStableOnly=c.static_geometry_stable_only;
   dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
   dc.localDrawBatching=g_config.gxm_local_draw_batching;
+  dc.immediateDrawView=c.gxm_immediate_draw_view;
   dc.allowStreamedFixedVertexGpu=c.gxm_streamed_fixed_vertex_gpu;
   dc.allowDynamicTexMatrixGpu=c.gxm_dynamic_tex_matrix_gpu;
   dc.allowBumpFixedVertexGpu=c.gxm_bump_fixed_vertex_gpu;
@@ -704,17 +708,20 @@ void end_frame_now() noexcept {
     aurora::gx::fifo::take_wait_stats(g_lastProducerWaitUs,g_lastConsumerWaitUs);
 #endif
     {
-      // Worker-side wall time between consecutive end_frame calls.
       static uint64_t lastEnd=0; const uint64_t nowEnd=now_us();
       g_lastWorkerFrameUs=lastEnd?nowEnd-lastEnd:0; lastEnd=nowEnd;
     }
     g_lastInvalidations=gfx::take_pipeline_invalidation_report();
     if(g_telemetryEnabled&&gfx::gxm_disabled(gfx::GxmDiagPhases)) accumulate_phase_profile();
     emit_periodic_diagnostics();
-    if(!g_renderer->failed()) {
-      auto completed=performance_snapshot_now();completed.completedFrame=true;
+  }
+  if(!g_renderer->failed()) {
+    const auto memory=g_drawSink->memory_budget();
+    if(g_config.diagnostics_enabled) {
+      auto completed=performance_snapshot_now(&memory);completed.completedFrame=true;
       g_completedPerformance.publish(completed);
     }
+    g_completedMemory.publish(CompletedMemorySnapshot{true,g_frame,memory});
   }
 }
 void end_frame_task(void*) {
@@ -765,14 +772,16 @@ void shutdown() noexcept {
   g_traceEnabled=false;
   g_initialized=false;
   g_completedPerformance.publish(PerformanceSnapshot{});
+  g_completedMemory.publish(CompletedMemorySnapshot{});
 }
 
 uint64_t frame_index() noexcept{return g_frame;}
 uint64_t last_frame_time_us() noexcept{return g_last;}
 uint32_t width() noexcept{return g_config.width;}
 uint32_t height() noexcept{return g_config.height;}
-namespace { PerformanceSnapshot performance_snapshot_now() noexcept; }
+
 PerformanceSnapshot completed_performance_snapshot() noexcept {return g_completedPerformance.read();}
+CompletedMemorySnapshot completed_memory_snapshot() noexcept {return g_completedMemory.read();}
 PerformanceSnapshot performance_snapshot() noexcept {
 #if defined(MKW_TARGET_VITA)
   // Renderer statistics and cache maps belong to the GX worker: read them on
@@ -786,7 +795,7 @@ PerformanceSnapshot performance_snapshot() noexcept {
   return performance_snapshot_now();
 }
 namespace {
-PerformanceSnapshot performance_snapshot_now() noexcept {
+PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* suppliedMemory) noexcept {
   PerformanceSnapshot out{};
 #if defined(MKW_TARGET_VITA)
   out.gxProcessTotalUs=aurora::gx::fifo::process_time_total_us();
@@ -871,7 +880,7 @@ PerformanceSnapshot performance_snapshot_now() noexcept {
     out.fixedUniformPoolReuses=pool.reuses;
     out.fixedUniformPoolFallbacks=pool.fallbacks;
     out.fixedUniformPoolBytes=pool.retainedBytes;
-    const auto memory=g_drawSink->memory_budget();
+    const auto memory=suppliedMemory?*suppliedMemory:g_drawSink->memory_budget();
     out.staticGeometryHits=memory.staticGeometryHits;
     out.staticGeometryMisses=memory.staticGeometryMisses;
     out.staticGeometryLookupFallbacks=memory.staticGeometryLookupFallbacks;

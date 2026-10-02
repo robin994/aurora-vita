@@ -71,7 +71,8 @@ struct CpuVertexParallelSnapshot {
 // title has explicit access to it (for example through CapUnlocker).
 bool initialize_cpu_workers(uint32_t workerThreads = 2, size_t minItems = 512,
                             uint32_t defaultExecutionLanes = 0,
-                            const CpuCore3BudgetConfig& core3Budget = {}) noexcept;
+                            const CpuCore3BudgetConfig& core3Budget = {},
+                            bool distinctCoreDispatch = false) noexcept;
 void shutdown_cpu_workers() noexcept;
 
 // Runs a disjoint range on the caller and the persistent workers, or falls back

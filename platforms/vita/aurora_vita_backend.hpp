@@ -95,6 +95,13 @@ struct PerformanceSnapshot {
   uint64_t vertexLaneChunks[4]{};
   uint64_t vertexLaneWorkUs[4]{};
 };
+struct CompletedMemorySnapshot {
+  // Last successful CPU end_frame; does not claim GPU completion. A failed frame
+  // retains the previous value. Initialization/shutdown reset validity.
+  bool completedFrame=false;
+  uint64_t frameIndex=0;
+  gfx::MemoryBudgetSnapshot budget{};
+};
 using ParallelRangeTask = bool (*)(void* context, size_t begin, size_t end, uint32_t lane) noexcept;
 struct BackendConfig {
   uint32_t width=960,height=544;
@@ -127,9 +134,21 @@ struct BackendConfig {
   // both renderer and game jobs capped to the original CPU0-2 topology until a
   // quota-aware scheduler is enabled.
   uint32_t cpu_worker_threads=2;
-  // Maximum caller+worker lanes used by Aurora's own decode/transform path.
-  // Zero uses every configured lane. Ports with real-time work on CPU1 can
-  // create a low-priority second helper but cap renderer work to CPU0+CPU2.
+  // New dispatch is opt-in until device comparisons. false restores prefix dispatch.
+#if defined(AURORA_VITA_DISTINCT_CPU_CORES) && AURORA_VITA_DISTINCT_CPU_CORES
+  bool cpu_distinct_core_dispatch=true;
+#else
+  bool cpu_distinct_core_dispatch=false;
+#endif
+#if defined(AURORA_VITA_GXM_IMMEDIATE_DRAW_VIEW) && AURORA_VITA_GXM_IMMEDIATE_DRAW_VIEW
+  bool gxm_immediate_draw_view=true;
+#else
+  bool gxm_immediate_draw_view=false;
+#endif
+  // Allowed prefix of caller+helper identities for decode/transform. Zero
+  // permits all configured helpers. Distinct dispatch filters this prefix;
+  // excluded helpers are never replaced with later helpers outside the cap.
+  // Caller on CPU2 with cap=2 therefore executes serially in distinct mode.
   uint32_t cpu_renderer_execution_lanes=0;
   // Maximum caller+worker lanes used by the public game-side parallel_for().
   // Keeping this at 3 while probing a fourth lane makes CPU3 probe-only.
@@ -250,6 +269,8 @@ PerformanceSnapshot performance_snapshot() noexcept;
 // Latest complete frame; never fences the GX worker. completedFrame is false
 // before the first successful end_frame. The existing synchronous API remains.
 PerformanceSnapshot completed_performance_snapshot() noexcept;
+// Safe game-thread observation: a short copy, no FIFO fence or renderer access.
+CompletedMemorySnapshot completed_memory_snapshot() noexcept;
 // GXM only: disabling runtime compilation guarantees that cache misses never
 // call vitaShaRK. Missing stages fail that draw instead of stalling to compile.
 void set_runtime_shader_compilation_enabled(bool enabled) noexcept;
@@ -259,9 +280,11 @@ gxbridge::DrawSink& draw_sink() noexcept;
 gfx::Telemetry& telemetry() noexcept;
 integration::FeatureCoverage& feature_coverage() noexcept;
 integration::FrameTrace& frame_trace() noexcept;
+// Owner-thread only, like renderer()/draw_sink()/telemetry(). Prefer the completed API
+// from the game thread when async GX is active.
 gfx::MemoryBudgetSnapshot memory_budget() noexcept;
 size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept;
-// Shared Vita CPU helper. CPU0 participates as lane 0; persistent helpers may
+// Shared Vita CPU helper. The calling thread participates as lane 0; persistent helpers may
 // occupy CPU2, CPU1 and (when verified) CPU3. Jobs are synchronous: this returns
 // only after all dispatched ranges complete. Nested calls fall back to caller.
 bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* context) noexcept;

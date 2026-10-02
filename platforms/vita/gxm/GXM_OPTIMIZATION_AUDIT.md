@@ -1,12 +1,19 @@
 # Audit ottimizzazioni — renderer nativo sceGxm (2026-09-26)
 
+> **Documento storico:** le voci e i riferimenti sotto descrivono il branch del
+> 26 settembre. Per lo stato a `ff5b2cf` del 2 ottobre leggere
+> [GXM_REFACTOR_2026-10-02.md](GXM_REFACTOR_2026-10-02.md) e
+> [l'architettura corrente](../../../docs/architecture.md). La persistenza dei
+> binding tra scene indicata nella voce C1 è stata corretta: BeginScene invalida
+> sempre lo stato, dopo una regressione hardware durante suspend/resume.
+
 Branch di lavoro: `gxm-optimization` (da `vita-experiment` @ `c7e57c3`).
 Ambito: solo il percorso **SceGxm** (`AURORA_VITA_RENDERER=GXM`): `platforms/vita/gxm/*`,
 la facade `gxm_facade.cpp` e le parti condivise che lo alimentano per ogni draw
 (`gx/aurora_vita_draw_sink.cpp`, `gfx/vita_draw_adapter.cpp`, `gfx/vita_streaming_arena.cpp`,
 `gfx/vita_static_geometry.hpp`, `gfx/vita_pipeline_key.cpp`). vitaGL è fuori ambito.
 
-## Stato sul branch
+## Stato storico sul branch esaminato
 
 Base riallineata a `experiment/vita-native-gxm` @ `f96d00b` (la revisione usata da Strikers).
 I riferimenti di riga sono stati presi su `c7e57c3`: in `gxm_renderer.cpp` le righe dopo la
