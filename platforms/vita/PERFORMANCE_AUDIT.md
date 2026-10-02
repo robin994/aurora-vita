@@ -1,7 +1,12 @@
 # Audit performance — Aurora Vita (backend GXM + vitaGL)
 
+> **Stato corrente, 2026-10-02:** questo audit conserva proposte e rettifiche
+> storiche. Default e controlli correnti sono nella
+> [matrice delle opzioni](../../docs/wiki/Experimental-Flags.md); le verifiche a
+> `ff5b2cf` sono nel [report GX/GXM](gxm/GXM_REFACTOR_2026-10-02.md).
+
 > **Rettifica 2026-09-19:** questo documento conserva la proposta originaria.
-> Lo stato corrente e le verifiche sono in [REGRESSION_AUDIT_2026-09-19.md](REGRESSION_AUDIT_2026-09-19.md).
+> Lo stato esaminato allora e le verifiche sono in [REGRESSION_AUDIT_2026-09-19.md](REGRESSION_AUDIT_2026-09-19.md).
 > In particolare region clip non sostituisce lo scissor pixel, lo spin/sleep dei
 > worker e' stato corretto, e geometria GPU/risoluzione ridotta/texture native non
 > sono piu' abilitate implicitamente nel profilo GXM. Le stime sotto non sono

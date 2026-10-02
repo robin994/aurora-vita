@@ -2,6 +2,10 @@
 
 The [2026-10-02 GX/GXM refactor report](GXM_REFACTOR_2026-10-02.md) documents current
 state revisions, local batching controls, completed-frame snapshots and validation.
+See [Architecture](../../../docs/architecture.md) for the current frontend and
+ownership contract and [Building](../../../docs/building.md) for dependencies
+and embedding. Configuration defaults are listed in the
+[flag matrix](../../../docs/wiki/Experimental-Flags.md).
 
 The same public `aurora::vita` API, `gfx::Renderer` facade, GX frontend, FIFO
 command processor and DrawSink now compile with either hardware implementation:
@@ -17,11 +21,16 @@ implementation as `aurora::vita_backend`. This is source/build-time
 interchangeability, not a runtime hot switch or identical coverage of every GX
 feature. The earlier standalone milestone is archived in `BRINGUP_NOTES.md`.
 
-The [2026-09-19 regression audit](../REGRESSION_AUDIT_2026-09-19.md) supersedes
-the implementation claims in the earlier performance proposal. Native GXM now
-preserves exact fragment scissoring, uses paired worker semaphores, and defaults
-to display-sized CPU geometry. Reduced resolution, fixed GPU geometry, D16 and
-native packed texture uploads require explicit opt-in and hardware comparison.
+Current GXM defaults are display-sized raster output, DF32 depth, an 8 MiB
+immutable geometry cache and lit fixed-vertex GPU processing for eligible draws.
+An explicit CPU reference sets `static_geometry_budget=0` and
+`gxm_lit_fixed_vertex_gpu=false`. Local batching, streamed/extended GPU features,
+reduced resolution, D16, native packed textures and async/direct submission
+remain optional. Exact fragment scissoring, paired worker semaphores and complete
+BeginScene binding invalidation remain required.
+
+The [2026-09-19 regression audit](../REGRESSION_AUDIT_2026-09-19.md) is a dated
+record of defects and corrections; its CPU defaults do not describe this revision.
 The GX probe additionally compares 24 cropped EFB copy/flip/alpha cases with the
 CPU reference. Building that probe does not establish that those cases pass on
 the device.
@@ -41,9 +50,10 @@ color/depth surfaces, display queue and sync objects. Cg is compiled through
 vitaShaRK; no OpenGL translation is involved.
 
 `BufferPool::wait_idle()` moves hardware completion out of the shared streaming
-allocator. Native GXM conservatively completes scenes before resource mutation,
-destruction or EFB transitions. The same DrawSink respects the native index limit
-and uses the existing CPU vertex path when fixed GX GPU transforms are unavailable.
+allocator. Resource mutation, retirement and destruction retain completion
+rules; native EFB paths preserve their source/target dependencies. Finish calls
+are attributed by reason. DrawSink respects the native index limit and uses the
+CPU path when GPU feature eligibility or source stability is unavailable.
 
 The renderer and GX ABI definitions propagate PUBLIC through the CMake target.
 Every object-library consumer must inherit them: `AURORA_VITA_UPSTREAM` changes
@@ -108,27 +118,15 @@ target_link_libraries(game PRIVATE aurora::vita_backend)
 ```
 
 Link the usage requirements into every object target that uses Aurora public
-headers, not only the final executable. Strikers attaches them to its shared
-`port_flags` interface. `SDK` is the standalone default ABI; `GAMECUBE` exports
+headers, not only the final executable; a shared port interface target can
+propagate them. `SDK` is the standalone default ABI; `GAMECUBE` exports
 `-fshort-wchar -fno-short-enums` consistently to common/backend/consumer code.
 GameCube-layout builds can still report wchar/enum warnings from SDK libraries.
 
-Strikers now uses the embed entry point. From its repository root:
-
-```sh
-cmake -S smstrikers-port -B smstrikers-port/build-gxm \
-  -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
-  -DCMAKE_BUILD_TYPE=Release -DAURORA_VITA_RENDERER=GXM
-cmake --build smstrikers-port/build-gxm --parallel 8
-
-cmake -S smstrikers-port -B smstrikers-port/build-vita \
-  -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
-  -DCMAKE_BUILD_TYPE=Release -DAURORA_VITA_RENDERER=VITAGL
-cmake --build smstrikers-port/build-vita --parallel 8
-```
-
-Both output `strikers_vita.vpk` in their own build directory. The game title ID
-is still `SMSVITA01`, so installing one variant replaces the other.
+The historical Strikers integration below exercised this entry point with both
+renderers. A consumer's paths, options, packaged artifacts and title ID belong to
+that consumer; current builds must be verified in its own checkout. The canonical
+generic embedding example is in [Building](../../../docs/building.md#embed-in-a-game).
 
 ## Shared validation
 
@@ -150,7 +148,10 @@ ux0:data/aurora-vita/gx_frontend_VITAGL.ppm
 
 Host tests cover CPU contracts, 1,024 shader input-mask combinations, native
 indirect/fog emission, mip packing, EFB conversion, selector validation and the
-ELF audit's symbol classification. These tests do not execute GPU code.
+ELF audit's symbol classification. They now also compile the real GX frontend,
+test domain transitions, command lifetime/copy/move, index rebasing and batching,
+pipeline binding changes, completed snapshots and the CPU3 protocol. These tests
+do not execute GPU code.
 
 Audit the final native executable, not just a static library:
 
@@ -165,7 +166,18 @@ GXM draw/present functions. Engine data symbols whose names begin with `gl` are
 not OpenGL calls. The console Cg module must already be present, normally at
 `ur0:/data/libshacccg.suprx`; neither VPK redistributes it.
 
-### Verified integration snapshot (2026-09-16)
+### Current host/build validation (2026-10-02)
+
+Renderer revision `ff5b2cf` passed 11/11 host targets and the same 11 targets
+with ASan/UBSan. Default and async/direct GXM configurations built GX and native
+probes, all four final ELF/map audits passed, and each VPK eboot matched its SELF.
+The [refactor report](GXM_REFACTOR_2026-10-02.md) records artifact hashes and the
+reference mask. No current device image/gameplay/FPS result is included.
+
+### Historical integration snapshot (2026-09-16)
+
+The following results describe that revision and its device captures. They do
+not revalidate the current renderer or a downstream game's current checkout.
 
 - The shared GX probe and the complete Strikers consumer both produced linked
   ELF, SELF and VPK outputs with either renderer selected.
@@ -203,9 +215,11 @@ populated by the native GX FIFO frontend, not Dawn's unresolved `TextureBind`
 table. Native EFB capture normalizes its top-left readback rows to the shared
 render-texture convention before applying the caller's flip flags.
 
-EFB color copies currently finish GPU work and use a CPU reference conversion
-and resize before writing native texture storage. This is a functional,
-conservative path, not an optimized GPU copy. Clears cover the active target
+Eligible equal-size and 2:1 EFB passthrough/RGB565 copies have native GPU paths.
+Unmodified equal-size copies use transfer; reduction, flip and opaque RGB565
+fixups use native draw conversion. Feedback and unsupported format/size cases
+retain cached CPU readback/conversion/upload fallback. Source restoration and
+crop/orientation/alpha rules apply to both paths. Clears cover the active target
 with independent RGB/alpha/depth masks. LOD bias is expressed in mip levels in
 the shared API and quantized to native eighth-level units at the device edge.
 The vitaGL cache preserves explicit uncompressed mip data using its public
@@ -213,16 +227,17 @@ backing-store interop and the shared linear packer; it does not substitute
 automatically generated levels. Backing storage remains owned/freed by vitaGL.
 
 Remaining limits include depth-copy formats, polygon offset, bitwise logic
-beyond CLEAR/COPY/NOOP, non-power-of-two mip chains, fractional LOD clamping,
-GPU-side fixed transforms and persistent native program caching. Native direct
-device draws require indexed triangle data; the shared GX path expands other
+beyond CLEAR/COPY/NOOP, non-power-of-two mip chains and fractional LOD clamping.
+Eligible fixed-vertex GPU transforms and persistent per-title GXP program caches
+are implemented; this does not make all vertex categories or cold-cache sealing
+valid. Native direct device draws require indexed triangle data; the shared GX path expands other
 primitives and supplies those indices. Unsupported paths remain visible as
 errors/coverage warnings and never silently use vitaGL.
 
 A successful build or probe does not establish complete gameplay fidelity,
-bit-exact GX arithmetic, early-Z equivalence or game framerate. Native scene
-fencing, GPU EFB copies and compressed uploads are subsequent measured
-optimizations, separate from making the frontend/consumer interchangeable.
+bit-exact GX arithmetic, early-Z equivalence or game framerate. Hardware image
+comparison, completion behavior and title-specific measurements remain necessary
+for changes to native submission, GPU EFB copies, geometry and compressed uploads.
 
 ## Public implementation references
 

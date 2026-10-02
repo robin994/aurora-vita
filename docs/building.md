@@ -1,74 +1,181 @@
-# Building
+# Building and integrating Aurora Vita
+
+The device presets build the standalone, Dawn-free Vita backend. The desktop
+stack has a separate build path described at the end of this page.
 
 ## Prerequisites
 
-- CMake 3.25 or later
-- A C++20 compatible compiler (Clang, GCC, or MSVC)
-- Git (for cloning)
+- CMake 3.25 or later, Git and a C++20 compiler for host tests.
+- Python 3 for the FRAME-log comparator and binary-audit contract tests.
+- VitaSDK for device builds, with `VITASDK` pointing to its installation.
+- Vita shader/runtime libraries used by the selected backend: vitaShaRK,
+  SceShaccCgExt, taiHEN stubs and mathneon, alongside VitaSDK system stubs.
+- vitaGL for `VITAGL` builds. Its exact archive is fingerprinted for program-cache
+  compatibility; native GXM does not link this archive.
 
-## Building the Examples
+The shared backend fetches pinned xxHash and robin-hood-hashing dependencies
+during configuration unless the parent project already provides their targets.
+The initial configure therefore needs access to those dependencies. Device
+builds use VitaSDK's toolchain and packaging helpers; host tests use the host
+compiler and do not require vitaGL or a Vita graphics context.
 
-To build Aurora's included examples:
+Clone this fork:
 
-```bash
-git clone https://github.com/encounter/aurora.git
-cd aurora
-mkdir build && cd build
-cmake ..
-cmake --build . --target simple
+```sh
+git clone --branch vita-experiment https://github.com/robin994/aurora-vita.git
+cd aurora-vita
 ```
 
-The `simple` example demonstrates a minimal Aurora application with a blue screen. The built executable will be in `build/examples/simple`.
+## Host contract tests
 
-## Using Aurora in Your Project
+```sh
+cmake --preset vita-host-tests
+cmake --build --preset vita-host-tests --parallel 8
+ctest --preset vita-host-tests --output-on-failure
+```
 
-Aurora is designed to be integrated as a library in GameCube/Wii decompilation projects.
+The host preset enables the real Dawn-free GX frontend with test-only
+thread/semaphore shims. With Python available, the current suite contains 11
+CTest targets covering CPU/shader contracts, byte comparison, vertex packing,
+regressions, frontend translation, command-stream lifetime, submission,
+workers, renderer selection, performance-log comparison and ELF classification.
+These tests do not execute Vita GPU programs or prove device scheduling.
 
-**CMakeLists.txt example:**
+For a separate sanitizer configuration with Clang/GCC:
+
+```sh
+cmake --preset vita-host-tests -B build/vita-host-sanitizers \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+  -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+  -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
+cmake --build build/vita-host-sanitizers --parallel 8
+ctest --test-dir build/vita-host-sanitizers --output-on-failure
+```
+
+## Device builds
+
+```sh
+export VITASDK=/usr/local/vitasdk
+
+cmake --preset vita-gxm
+cmake --build --preset vita-gxm --parallel 8
+
+cmake --preset vita-vitagl
+cmake --build --preset vita-vitagl --parallel 8
+```
+
+Use separate build directories for the two renderer owners. Both device
+presets enable `AURORA_VITA_BACKEND_ONLY`, `AURORA_VITA_WITH_GX_FRONTEND` and
+`AURORA_VITA_BUILD_PROBE`, select `SDK` ABI, and disable the desktop GX/Dawn and
+SDL3 probe paths.
+
+| Preset | VPK relative to repository root | Title ID |
+| --- | --- | --- |
+| `vita-gxm` | `build/vita-gxm/aurora_vita_gx_probe.vpk` | `AURGXGM01` |
+| `vita-gxm` | `build/vita-gxm/aurora_vita_gxm_probe.vpk` | `AURVGXM01` |
+| `vita-vitagl` | `build/vita-vitagl/aurora_vita_gx_probe.vpk` | `AURGXGL01` |
+| `vita-vitagl` | `build/vita-vitagl/aurora_vita_probe_diag2.vpk` | `AURVPRB02` |
+
+The corresponding ELF, `.map` where configured, `.velf` and `.self` outputs
+remain in each build directory. These probes exercise renderer contracts and
+do not package a game or its assets.
+
+The device shader compiler module must already be installed. The GXM renderer
+uses vitaShaRK's default module path, normally `ur0:/data/libshacccg.suprx`;
+the VitaGL initialization path also checks the
+external-module layout under `ur0:/data/external/`. Neither VPK contains this
+module. Inspect `last_init_failure()` and `last_init_failure_detail()` when
+initialization fails.
+
+### Experimental native submission build
+
+Use a separate directory when testing async GX and direct native streaming:
+
+```sh
+cmake --preset vita-gxm -B build/vita-gxm-fast \
+  -DAURORA_VITA_ASYNC_GX=ON \
+  -DAURORA_VITA_GXM_DIRECT_STREAM_WRITE=ON \
+  -DAURORA_VITA_GXM_DIRECT_DRAW_SUBMIT=ON
+cmake --build build/vita-gxm-fast --parallel 8
+```
+
+All three flags default to `OFF`. Local triangle batching is a separate runtime
+setting; when enabled it selects queued submission so direct per-draw flushes
+do not prevent merging. Refer to the [flag matrix](wiki/Experimental-Flags.md)
+before changing the texture, depth or geometry controls.
+
+### Audit the final GXM executable
+
+```sh
+python3 tools/check_vita_gxm_binary.py build/vita-gxm/aurora_vita_gx_probe \
+  --map build/vita-gxm/aurora_vita_gx_probe.map \
+  --nm "$VITASDK/bin/arm-vita-eabi-nm"
+```
+
+Run the same audit for the native probe and for the final executable of a
+consuming game. It requires native draw/present symbols and rejects linked
+GL/vitaGL/vita2d renderer functions or libraries. It cannot validate rendering
+output. Record the source revision and compare the packaged `eboot.bin` hash
+with the installed bytes before a hardware performance comparison.
+
+## Embed in a game
+
+Use the Vita-only entry point to avoid loading the desktop dependency stack or
+duplicating Aurora's source list:
 
 ```cmake
-cmake_minimum_required(VERSION 3.25)
-project(your_game)
-
-# Add Aurora as a subdirectory
-add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
-
-# Create your executable
-add_executable(your_game src/main.c)
-
-# Link against Aurora components
-target_link_libraries(your_game PRIVATE 
-    aurora::core 
-    aurora::gx 
-    aurora::main 
-    aurora::vi
-)
+set(AURORA_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/aurora-vita")
+set(AURORA_VITA_RENDERER GXM CACHE STRING "" FORCE)
+set(AURORA_VITA_WITH_GX_FRONTEND ON CACHE BOOL "" FORCE)
+set(AURORA_VITA_WITH_UPSTREAM_GX OFF CACHE BOOL "" FORCE)
+set(AURORA_VITA_PORT_ABI SDK CACHE STRING "" FORCE)
+include("${AURORA_SOURCE_DIR}/cmake/aurora_vita_embed.cmake")
+aurora_add_vita_backend()
+target_link_libraries(game PRIVATE aurora::vita_backend)
 ```
 
-See [examples/simple.c](../examples/simple.c) for a minimal application template.
+Call the function once. Choose `GAMECUBE` ABI only for a port that retains
+GameCube-style short wchar and 32-bit enums; this propagates `-fshort-wchar`
+and `-fno-short-enums`. Every object library compiling public Aurora headers
+must inherit the backend's usage requirements, not only the final executable.
+`AURORA_VITA_UPSTREAM` affects public class layout and is exported by the target.
 
-## CMake Options
+The game owns initialization, frame boundaries and shutdown through
+`aurora::vita`, and owns invalidation for guest memory changes. Display-list
+shadows and immutable geometry reuse require publication of relevant guest
+writes; see [Architecture](architecture.md) and `lib/gx/fifo.hpp`.
 
-- `AURORA_ENABLE_GX` (default: ON) - Enable GX implementation and WebGPU renderer
-- `AURORA_ENABLE_DVD` (default: OFF) - Enable DVD implementation backed by nod
-- `AURORA_ENABLE_CARD` (default: ON) - Enable CARD implementation based on kabufuda
-- `AURORA_CACHE_USE_ZSTD` (default: ON) - Compress WebGPU cache entries with zstd
+The [runtime configuration](wiki/Runtime-Tuning.md) and
+[recipes](wiki/Configuration-Recipes.md) document source defaults and explicit
+CPU reference configurations. Persistent caches use the application's title ID
+automatically; a port normally leaves `data_root_path=nullptr`.
 
-## PS Vita backend performance options
+## SDL3 platform probe
 
-The experimental Vita backend includes the optimization paths validated during the Vita porting work:
+`AURORA_VITA_BUILD_SDL3_PROBE=ON` is a VitaGL-only integration target. It also
+requires `AURORA_VITA_SDL3_NATIVE=ON` and an SDL3-providing parent build; the
+standalone Vita presets disable this path. The SDL platform layer handles
+events/services while Aurora/vitaGL owns graphics. Native GXM rejects the
+SDL3/vitaGL probe combination during configuration.
 
-- `AURORA_VITA_DIRECT_STREAM_WRITE=ON` maps the current streaming VBO/IBO and writes frame data directly, avoiding the extra CPU staging-to-buffer copy. Leave it `OFF` for conservative stock-vitaGL builds; enable it with a vitaGL build whose mapped-buffer path is known to be stable.
-- `AURORA_VITA_RUNTIME_MIPMAP_GENERATION=OFF` is the default. Explicit source mip levels are still uploaded, but missing chains are not generated at runtime on Vita, reducing allocation pressure and avoiding historical OOM failures. It can be re-enabled after validating runtime mip generation with the selected vitaGL build.
+## Desktop upstream build
 
-The Vita texture cache also pre-evicts LRU textures before allocation, preserves textures referenced by the current frame, validates vitaGL backing storage after upload, and tracks allocation/pre-eviction telemetry. EFB passthrough copies use a GPU blit fast path while GX copy formats that require channel or quantization conversion keep the shader conversion path.
+The inherited desktop implementation uses SDL3 and Dawn/WebGPU. Build it in a
+separate directory without the Vita backend-only preset:
 
-### Native SDL3 platform layer on PS Vita
+```sh
+cmake -S . -B build/desktop
+cmake --build build/desktop --target simple
+```
 
-When cross-compiling with VitaSDK, `AURORA_VITA_SDL3_NATIVE` defaults to `ON`. Aurora vendors SDL3 3.4.4 as a static library and uses SDL native Vita backends for window/events/touch, gamepad/joystick, audio, filesystem, threading, locale, timer, power and sensors.
+The executable is produced under `build/desktop/examples/`. A desktop consumer
+can use `add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)` and link components
+such as `aurora::core`, `aurora::gx`, `aurora::main` and `aurora::vi`.
+See [examples/simple.c](../examples/simple.c) for the application API.
 
-Aurora/vitaGL remains the only graphics owner. The Vita profile disables SDL GPU, SDL Renderer, PIB and PVR integration, and Aurora deliberately does not create an `SDL_Renderer` on Vita. The SDL window is fullscreen 960x544 and exists only as the native platform/event surface. This avoids a second SDL GXM renderer/context competing with vitaGL.
-
-Vita SELF builds also disable position-independent code because `vita-elf-create` does not accept ARM PIC relocations such as `R_ARM_BASE_PREL`.
-
-For an isolated hardware gate, configure `AURORA_VITA_BUILD_SDL3_PROBE=ON`. The resulting `aurora_vita_sdl3_probe.vpk` initializes SDL3 Vita platform services first, then the Aurora vitaGL backend, renders a changing clear color, polls SDL gamepad events, and exits when START is pressed.
+The top-level desktop defaults include `AURORA_ENABLE_GX=ON`,
+`AURORA_ENABLE_DVD=OFF`, `AURORA_ENABLE_CARD=ON`, `AURORA_ENABLE_THP=ON` and
+`AURORA_CACHE_USE_ZSTD=ON`. Device backend-only builds return before loading
+those desktop targets. A successful Vita build does not validate the desktop
+examples or vice versa.

@@ -1,11 +1,19 @@
 # Configuration recipes
 
-These recipes are starting points, not universal performance presets.
+These recipes are explicit controls and individual experiments for revision
+`ff5b2cf` (2026-10-02). The generic GXM runtime defaults include an 8 MiB geometry
+cache and lit fixed-vertex processing; an explicit CPU control overrides them.
 
 ## Conservative GXM control
 
 ```sh
-cmake --preset vita-gxm -DAURORA_VITA_RUNTIME_LOGGING=OFF
+cmake --preset vita-gxm \
+  -DAURORA_VITA_RUNTIME_LOGGING=OFF \
+  -DAURORA_VITA_ASYNC_GX=OFF \
+  -DAURORA_VITA_GXM_DIRECT_STREAM_WRITE=OFF \
+  -DAURORA_VITA_GXM_DIRECT_DRAW_SUBMIT=OFF \
+  -DAURORA_VITA_NATIVE_CMPR=OFF \
+  -DAURORA_VITA_NATIVE_GX_TEXTURES=OFF
 ```
 
 ```cmake
@@ -21,6 +29,12 @@ cfg.render_width = 0;
 cfg.render_height = 0;
 cfg.gxm_d16_depth = false;
 cfg.static_geometry_budget = 0;
+cfg.gxm_lit_fixed_vertex_gpu = false;
+cfg.gxm_streamed_fixed_vertex_gpu = false;
+cfg.gxm_dynamic_tex_matrix_gpu = false;
+cfg.gxm_bump_fixed_vertex_gpu = false;
+cfg.gxm_primitive_expand_gpu = false;
+cfg.gxm_local_draw_batching = false;
 cfg.diagnostics = false;
 ```
 
@@ -99,7 +113,43 @@ cfg.gxm_seal_shader_cache_after_prewarm = true;
 
 After initialization, `shark_compile_shader()` cannot run. A previously unseen shader stage becomes
 a counted blocked miss instead of a gameplay compile. Verify that
-`performance_snapshot().shaderCompileBlockedMisses == 0` for the complete test session.
+`completed_performance_snapshot().shaderCompileBlockedMisses == 0` once a frame
+has completed, for the complete test session.
+
+## Local streamed-triangle batching
+
+Keep every other setting identical to the reference run:
+
+```cpp
+cfg.gxm_local_draw_batching = true;
+```
+
+Compare `batchCandidates`, `batchMerged`, rejection counts, native draws and
+frame samples. A successful build or an enabled feature bit does not establish
+that the game emits contiguous compatible slices. Compare UI, alpha, EFB copies,
+scissors and scene transitions on device.
+
+To isolate the four refactor optimizations in the same executable:
+
+```cpp
+cfg.gxm_disable_mask |= 0x7800;
+```
+
+Remove those bits for the candidate. This is a reference-cost control, not an old
+binary or a complete rollback of all GXM optimizations. `0x0010` additionally
+disables all fragment-uniform reuse and packet-state sharing.
+
+## CPU3 probe without fourth-lane dispatch
+
+```cpp
+cfg.cpu_worker_threads = 3;
+cfg.cpu_renderer_execution_lanes = 3;
+cfg.cpu_game_execution_lanes = 3;
+```
+
+Check `core3_available()`, `core3_cpu_id()` and `core3_affinity_mask()` after
+initialization. An accepted probe enables infrastructure, not a measured CPU3
+budget or a gameplay performance result. A failed probe keeps two helpers.
 
 ## Conservative VitaGL debug control
 

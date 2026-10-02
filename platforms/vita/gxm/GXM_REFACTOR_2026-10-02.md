@@ -7,6 +7,8 @@ Delivery was requested on 2026-10-02. Before delivery, remote commit
 probe infrastructure) was integrated
 without conflicts and validation repeated on the combined sources. The delivery
 target is `origin/vita-experiment`; the resulting commit is recorded by Git.
+The delivered renderer commit is
+`ff5b2cf5ab6866fbf6e7708a0978157ddc5c0e7b`, verified against the remote branch.
 This report supersedes historical assumptions about the current defaults;
 GXM still defaults to 8 MiB of static geometry and
 lit fixed-vertex GPU processing. Resolution and the EFB/scissor algorithms retain

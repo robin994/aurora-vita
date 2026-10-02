@@ -2,7 +2,7 @@
 
 The GXM backend talks directly to `sceGxm`. Its probe is audited to ensure that GL/vitaGL/vita2d entry points are not linked into the native binary.
 
-## Recommended conservative baseline
+## Explicit CPU reference configuration
 
 ```sh
 cmake --preset vita-gxm \
@@ -23,7 +23,7 @@ config.static_geometry_budget = 0;          // explicit CPU/control override
 config.gxm_lit_fixed_vertex_gpu = false;    // explicit CPU/control override
 ```
 
-This explicit baseline intentionally favors correctness over peak throughput. The current GXM
+This reference overrides the current GXM defaults. The current GXM
 experimental profile defaults to an 8 MiB immutable geometry cache with
 `gxm_lit_fixed_vertex_gpu=true` so it can be A/B tested on hardware.
 
@@ -108,7 +108,9 @@ Current GXM experimental default: **8 MiB**. VitaGL/host default: **0**.
 
 Enables the experimental fixed-geometry GPU path/cache when non-zero.
 
-This path must remain opt-in until the eligible vertex categories are validated against the CPU reference path. It is especially sensitive to matrix, lighting, texgen, FIFO source revision, and cache lifetime.
+The source default enables this experiment; it does not establish hardware
+validation for every eligible vertex category. Compare against the explicit CPU
+reference, especially matrix, lighting, texgen, FIFO source revision and cache lifetime.
 
 Use an explicit `0` budget for the conservative CPU control. Use telemetry:
 - geometry cache hits/misses;
@@ -118,7 +120,44 @@ Use an explicit `0` budget for the conservative CPU control. Use telemetry:
 
 ## GXM streaming
 
-`AURORA_VITA_DIRECT_STREAM_WRITE` is currently forced to **0** for GXM. Do not try to override it from a port. GXM uses its own memory/streaming path and cache-coherency rules.
+`AURORA_VITA_DIRECT_STREAM_WRITE` belongs to VitaGL and is forced to **0** in
+the GXM target. Native GXM uses these separate CMake options, all default **OFF**:
+
+- `AURORA_VITA_GXM_DIRECT_STREAM_WRITE`: mapped CpuGpu ring writes.
+- `AURORA_VITA_ASYNC_GX`: dedicated GX consumer/submission thread.
+- `AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT`: direct streamed draw submission.
+
+Use a separate build directory for the combined experiment in
+[Building](../building.md#experimental-native-submission-build). Validate queue
+ordering, cache visibility, mutation, ring reuse and PS-button suspend/resume.
+
+## State reuse and local batching
+
+The current renderer uses GX state domains, cached structural recipes and
+immutable packet state. Native pipeline binding compares programs/depth/cull
+within a scene and resolves uniform capacities at pipeline creation. Every
+BeginScene resets the context bindings; reservations are invalidated when a
+program changes. Exact partial scissors and EFB alpha/orientation remain part
+of the contract.
+
+`gxm_local_draw_batching=false` is the default. When enabled, only adjacent
+compatible streamed triangles with contiguous pending arena slices can merge.
+Clear/copy/target/barrier commands end the run, and indices are validated before
+rebasing. A direct-submit build uses queued submission while batching is enabled.
+Inspect merge/rejection counters before assuming native draw counts decreased.
+
+See the [reference mask table](Experimental-Flags.md#reference-and-diagnostic-mask)
+and [2026-10-02 refactor report](../../platforms/vita/gxm/GXM_REFACTOR_2026-10-02.md)
+for current validation and per-feature controls.
+
+## EFB copy paths
+
+Eligible passthrough/RGB565 copies at equal size or 2:1 reduction use native GPU
+paths. The unmodified equal-size case uses transfer; downscale, flip and opaque
+RGB565 fixups use draw-based conversion. Feedback copies and unsupported format
+or size combinations retain cached CPU conversion/readback/upload fallback.
+Preserve source-target restoration, crop, flip, channel/alpha and synchronization
+semantics when comparing them.
 
 ## Native binary audit
 

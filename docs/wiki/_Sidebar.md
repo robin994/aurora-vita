@@ -1,4 +1,6 @@
 - [Home](Home.md)
+- [Build and integration](../building.md)
+- [Architecture](../architecture.md)
 - [Experimental flags](Experimental-Flags.md)
 - [Native GXM backend](GXM-Backend.md)
 - [VitaGL backend](VitaGL-Backend.md)

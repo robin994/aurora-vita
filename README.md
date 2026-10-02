@@ -1,79 +1,98 @@
 <div align="center">
-  <img src="assets/aurora.png" alt="Logo" width="640">
+  <img src="assets/aurora.png" alt="Aurora" width="640">
 </div>
-<br/>
 
-Aurora is a source-level GameCube & Wii compatibility layer intended for use with game decompilation projects.
+# Aurora Vita
 
-> **Aurora Vita is an experimental project made for fun and research. It is not a serious, production-ready, or
-> officially supported port. Expect incomplete functionality, rough edges, and breaking changes.**
+Aurora Vita adapts Aurora's source-level GameCube/Wii compatibility layer for
+PS Vita game ports. The original Dolphin GX/VI entry points feed a shared FIFO,
+command processor and draw frontend, with a choice of native **SceGxm** or
+**vitaGL** rendering. Games integrate the library through CMake and retain their
+own callbacks, assets, simulation and main loop.
 
-Originally developed for use in [Metaforce](https://github.com/AxioDL/metaforce), a Metroid Prime reverse engineering project.
-It now powers several completed source ports, including [Dusklight](https://github.com/TwilitRealm/dusklight).
+This fork is experimental. Renderer coverage and performance depend on the
+title, configuration and device. The included VPKs are diagnostic probes;
+gameplay fidelity and sustained frame rate require tests in the consuming port.
 
-### Features
+## Current implementation
 
-- Application layer using SDL3
-  - Runs on Windows, Linux, macOS, iOS, tvOS, Android
-- GX compatibility layer
-  - Graphics API support: D3D12, Vulkan, Metal
-  - Highly accurate and performant GX implementation
-  - Robust pipeline cache system with "transferable" cache support for releases
-  - Dolphin-compatible texture pack support
-  - Widescreen & resolution scaling support
-  - Custom APIs for offscreen rendering
-- PAD compatibility layer
-  - Utilizes `SDL_Gamepad` for wide controller support, including GameCube controller adapters
-  - Automatically saves and loads controller bindings and port mappings
-  - Gyro & mouse support
-- DVD compatibility layer
-  - Utilizes [nod](https://github.com/encounter/nod) to support all GameCube/Wii disc image types, including RVZ
-- CARD compatibility layer
-  - Full compatibility with Dolphin `.gci` and `.raw` for game saves
-- [Dear ImGui](https://github.com/ocornut/imgui) built-in for simple debug UIs
+| Area | Current behavior |
+| --- | --- |
+| Renderer selection | `AURORA_VITA_RENDERER=GXM` or `VITAGL`, selected at build time. The generic CMake default is `VITAGL`; each device preset selects its renderer explicitly. |
+| GX frontend | Shared Dawn-free GX/VI frontend, FIFO ordering, vertex/texture decoding, lighting/texgen preparation and CPU fallback. |
+| Native GXM | Cg/GXP shader generation, native resource ownership, TEV/fog, EFB targets/copies, presentation and readback. GXM builds exclude GL/vitaGL/vita2d renderer code. |
+| State submission | Domain-specific GX revisions, cached draw recipes and uniform capacities, immutable packet-state sharing, and native binding comparisons within each scene. |
+| Draw batching | Adjacent compatible streamed triangles can merge; `gxm_local_draw_batching` defaults to `false`. Ordering barriers and resource lifetime checks remain in place. |
+| CPU preparation | Two helper threads by default. An optional third helper is accepted only after a CPU3 affinity/core-ID probe; renderer and game lane caps are separate. |
+| Persistent data | Program caches and GXM pipeline warmup data are isolated under `ux0:data/aurora-vita/<TITLE_ID>/`. |
+| Profiling | Completed-frame snapshots, submission/upload counters, attributed finish waits and sampled FRAME-log comparison tools. |
 
-### Graphics
+GXM currently defaults to display-sized raster output, DF32 depth, an **8 MiB
+static geometry cache** and **lit fixed-vertex GPU processing** for eligible
+draws. CPU control configurations explicitly set the geometry budget to `0`
+and `gxm_lit_fixed_vertex_gpu=false`. Native packed textures, GXM direct writes,
+async GX, direct draw submission, streamed fixed-vertex processing and local
+batching remain optional. See the [flag matrix](docs/wiki/Experimental-Flags.md)
+for defaults and the [configuration recipes](docs/wiki/Configuration-Recipes.md)
+for explicit controls.
 
-The GX compatibility layer is built on top of [WebGPU](https://www.w3.org/TR/webgpu/), a cross-platform graphics API
-abstraction layer. WebGPU allows targeting all major platforms simultaneously with minimal overhead. The WebGPU
-implementation used is Chromium's [Dawn](https://dawn.googlesource.com/dawn/).
+## Build and test
 
-![Screenshot](assets/screenshot.png)
+Host validation requires CMake 3.25+, a C++20 compiler and Git; Python 3 enables
+the performance-comparison and binary-audit contract tests.
 
-### Building
+```sh
+cmake --preset vita-host-tests
+cmake --build --preset vita-host-tests --parallel 8
+ctest --preset vita-host-tests --output-on-failure
+```
 
-See [docs/building.md](docs/building.md) for build instructions, CMake integration, and configuration options.
+To build the native GXM probes with VitaSDK and the required shader libraries:
 
-### PS Vita backends
+```sh
+export VITASDK=/usr/local/vitasdk
+cmake --preset vita-gxm
+cmake --build --preset vita-gxm --parallel 8
+```
 
-Aurora Vita provides two mutually exclusive experimental hardware renderer paths:
+This produces `build/vita-gxm/aurora_vita_gx_probe.vpk` and
+`build/vita-gxm/aurora_vita_gxm_probe.vpk`. Use `vita-vitagl` for the vitaGL
+backend and its probes. The device needs the shader compiler module
+`libshacccg.suprx`; the VPKs do not redistribute it.
 
-- **VitaGL** for the vitaGL-based renderer.
-- **GXM** for the native `sceGxm` renderer.
+See [Building and integration](docs/building.md) for dependencies, probe title
+IDs, embedding `aurora::vita_backend`, ABI selection and native binary audits.
 
-The Vita backend exposes both conservative defaults and opt-in performance paths for native GX
-textures, CMPR/BC1, streaming, reduced internal resolution, D16 depth, GPU geometry, diagnostics,
-memory tuning, and runtime logging (`BackendConfig::log_level`, including a fully quiet `Silent`
-mode). Experimental options can change framebuffer output or synchronization behavior,
-so they should be validated on real hardware before becoming a port default.
+## Validation status
 
-For performance/release builds where even the runtime log-level check is unwanted, configure
-`-DAURORA_VITA_RUNTIME_LOGGING=OFF`. Aurora Vita also exposes
-`performance_snapshot()` so CPU/GPU timing can be sampled without printing logs.
+The renderer revision [`ff5b2cf`](https://github.com/robin994/aurora-vita/commit/ff5b2cf5ab6866fbf6e7708a0978157ddc5c0e7b),
+validated on **2026-10-02**, passed **11/11 host CTest targets** and **11/11
+AddressSanitizer/UndefinedBehaviorSanitizer targets**. Default GXM and the
+async/direct experimental configuration built both probe VPKs; all four
+ELF/map audits passed and packaged eboots matched their SELF files.
 
-Persistent shader/program caches and pipeline warmup data are isolated automatically per title under
-`ux0:data/aurora-vita/<TITLE_ID>/` on Vita. This keeps Aurora-owned cache files separate from each
-homebrew's custom `ux0:data/<game-folder>/` layout. Ports normally should not override this root.
+These checks establish host contracts and build integrity. The current refactor
+has no device image comparison or measured gameplay FPS result. Earlier hardware
+probe results are dated separately. The [refactor report](platforms/vita/gxm/GXM_REFACTOR_2026-10-02.md)
+records the tested configuration, artifact hashes, reference switches and device
+comparison procedure.
 
-See the [Aurora Vita Wiki](docs/wiki/Home.md) for:
+## Documentation
 
-- the complete [experimental flag matrix](docs/wiki/Experimental-Flags.md);
-- [native GXM configuration](docs/wiki/GXM-Backend.md);
-- [VitaGL configuration](docs/wiki/VitaGL-Backend.md);
-- [runtime and memory tuning](docs/wiki/Runtime-Tuning.md);
-- [hardware validation and profiling](docs/wiki/Diagnostics-and-Validation.md);
-- [known-safe configuration recipes](docs/wiki/Configuration-Recipes.md).
+- [Architecture and current status](docs/architecture.md): execution flow, ownership, invariants and source map.
+- [Build and game integration](docs/building.md): standalone presets, embedding and ABI propagation.
+- [Vita wiki](docs/wiki/Home.md): GXM/VitaGL settings, runtime tuning and diagnostics.
+- [Native GXM implementation](platforms/vita/gxm/README.md): native EFB paths, coverage and historical integration evidence.
+- [Hardware validation](docs/wiki/Diagnostics-and-Validation.md): framebuffer checks, artifact identity and performance sampling.
 
-### License
+## Upstream Aurora
+
+Aurora was originally developed for [Metaforce](https://github.com/AxioDL/metaforce).
+The upstream desktop stack uses SDL3 and Dawn/WebGPU, with PAD, DVD, CARD and
+other compatibility components. Those integrations have separate build paths
+from the standalone Vita renderer. See the [desktop build instructions](docs/building.md#desktop-upstream-build)
+and [upstream repository](https://github.com/encounter/aurora).
+
+## License
 
 Aurora is licensed under the [MIT License](LICENSE).

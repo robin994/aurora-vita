@@ -1,5 +1,11 @@
 # Audit regressioni e prestazioni Aurora / sceGxm — 19 settembre 2026
 
+> **Snapshot storico:** questo documento conserva confronto, difetti e verifiche
+> del 19 settembre. Per default e funzionalità del 2 ottobre usare
+> [la matrice corrente](../../docs/wiki/Experimental-Flags.md) e
+> [GXM_REFACTOR_2026-10-02.md](gxm/GXM_REFACTOR_2026-10-02.md).
+> I risultati hardware storici non convalidano il refactoring corrente.
+
 ## Ambito e conclusione
 
 Baseline indicata dall'utente: `85505768070821171682fca6eeed8fbd4f149abc`.
