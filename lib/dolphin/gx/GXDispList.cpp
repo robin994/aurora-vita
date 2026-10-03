@@ -66,8 +66,9 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
 
 #if defined(MKW_TARGET_VITA)
   // Strikers' compiled model lists are normally one draw plus zero padding.
-  // Submit those current bytes directly; unlike the old CDRAM shadow this never
-  // reuses stale list contents. Complex/nested lists fall through unchanged.
+  // The direct path is synchronous-only. submit_simple_display_list() rejects
+  // it while the async GX worker owns frontend state, in which case the list is
+  // appended below and consumed in-order with the state writes that precede it.
   if (aurora::gx::fifo::submit_simple_display_list(static_cast<const u8*>(data), nbytes)) return;
 #endif
 

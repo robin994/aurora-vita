@@ -91,6 +91,12 @@ built, but `end_frame()` does not return until that frame has been consumed and
 presented by the GX worker. This prevents the game from recycling frame-owned
 guest memory or display resources while the consumer still references them.
 
+The GX worker is the sole owner of decoded `GXState`, `DrawSink`, renderer state
+and their caches while async GX is active. Producer-side shortcuts must not
+decode or submit draws directly. In particular, the single-draw display-list
+fast path is disabled with the worker running; those bytes are appended to the
+same FIFO as the preceding state commands and decoded in-order by the consumer.
+
 ## CPU3 probe and lane caps
 
 The default is two helpers, with CPU2 and lower-priority CPU1 affinities. Requesting

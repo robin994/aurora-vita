@@ -2102,6 +2102,13 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
 }
 
 bool submit_simple_display_list(const uint8_t* data, uint32_t size) {
+#if defined(MKW_TARGET_VITA)
+  // This fast path submits directly to DrawSink and therefore may only run on
+  // the synchronous frontend. With the async GX consumer active, the producer
+  // must append the list to the FIFO so state updates and draws stay on the
+  // single owner thread and preserve command ordering.
+  if (fifo::worker_running()) return false;
+#endif
   if (aurora::vita::gfx::gxm_disabled(aurora::vita::gfx::GxmDisableDirectDisplayList) ||
       data == nullptr || size < 3) return false;
 

@@ -2,6 +2,7 @@
 #include "gx/aurora_gx_bridge.hpp"
 #include "gx/aurora_vita_draw_sink.hpp"
 #include "aurora_vita_backend.hpp"
+#include "../lib/gx/command_processor.hpp"
 #include "../lib/gx/fifo.hpp"
 #include <array>
 #include <bit>
@@ -254,6 +255,19 @@ void async_end_frame_is_a_lifetime_barrier() {
   CHECK(completed_memory_snapshot().completedFrame);
   shutdown();
 }
+
+void async_worker_rejects_direct_display_list_submit() {
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));
+  CHECK(aurora::gx::fifo::start_worker());
+
+  // Contents are intentionally irrelevant: the ownership guard must reject a
+  // producer-thread direct submit before it can inspect GX state or DrawSink.
+  const std::array<uint8_t,3> list{0x90,0x00,0x00};
+  CHECK(!aurora::gx::fifo::submit_simple_display_list(list.data(),list.size()));
+  shutdown();
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_reuse_fences_async_gx();async_end_frame_is_a_lifetime_barrier();
+}
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_reuse_fences_async_gx();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}
