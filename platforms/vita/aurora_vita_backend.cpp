@@ -752,7 +752,14 @@ void invalidate_texture_task(void* p) {
 
 void end_frame() noexcept {
   if(!g_initialized) return;
-  if(gx_worker_active()) { queue_on_gx_worker(end_frame_task,NoArgs{}); return; }
+  if(gx_worker_active()) {
+    // The producer may recycle guest resources immediately after end_frame()
+    // returns. Keep GX decode/rendering asynchronous within the frame, but do
+    // not let the game advance into the next frame while this frame still owns
+    // guest pointers or renderer work on the consumer thread.
+    aurora::gx::fifo::run_sync(end_frame_task,nullptr);
+    return;
+  }
   end_frame_now();
 }
 

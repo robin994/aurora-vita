@@ -75,12 +75,21 @@ revision tracking, texture invalidation and immutable geometry reuse. Preserve
 TLUT and EFB invalidation as well as explicit source-range updates. When source
 stability or feature eligibility is unavailable, preparation uses the CPU path.
 
-On Vita, `aurora_vita_notify_memory_write()` is also the guest-memory reuse
-barrier for async GX. A port must call it before overwriting or recycling a range
-that may have been referenced by GX. While the async consumer is active Aurora
-first retires all earlier FIFO work, then publishes the write revision. The
-current implementation uses a conservative global drain; replacing it with
-range-aware retirement must preserve the same lifetime guarantee.
+On Vita, `aurora_vita_notify_memory_write()` can also be used as a conservative
+guest-memory reuse barrier for async GX when it is called before a recycled range
+is handed back to code that will overwrite it. While the async consumer is active
+Aurora first retires all earlier FIFO work, then publishes the write revision.
+A notification made only after an arbitrary CPU write cannot retroactively make
+that write race-free, so callers that recycle GPU-visible storage must fence
+before the new owner starts modifying it. The current implementation uses a
+global drain; range-aware retirement may replace it without weakening that
+ordering guarantee.
+
+Async GX also treats `end_frame()` as a producer/consumer lifetime boundary.
+FIFO decode and rendering may overlap the game thread while a frame is being
+built, but `end_frame()` does not return until that frame has been consumed and
+presented by the GX worker. This prevents the game from recycling frame-owned
+guest memory or display resources while the consumer still references them.
 
 ## CPU3 probe and lane caps
 
