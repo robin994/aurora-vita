@@ -45,7 +45,8 @@ int sceKernelWaitSema(SceUID id,int count,void* timeout) {
 }
 int sceKernelSignalSema(SceUID id,int count) {
   auto s=semaphore(id);std::lock_guard lock(s->mutex);
-  if(s->count+count>s->max){return -1;}
+  require(count>0,"non-positive semaphore signal");
+  require(s->count+count<=s->max,"semaphore signal overflow");
   s->count+=count;s->cv.notify_one();return 0;
 }
 SceUID sceKernelCreateThread(const char*,int(*entry)(SceSize,void*),int,SceSize,int,int,void*) {
@@ -57,6 +58,9 @@ int sceKernelStartThread(SceUID id,SceSize size,void* args) {
 }
 int sceKernelWaitThreadEnd(SceUID id,void*,void*) {threads.at(id)->thread.join();return 0;}
 int sceKernelDeleteThread(SceUID id) {threads.erase(id);return 0;}
-int sceKernelDelayThread(unsigned us) {std::this_thread::sleep_for(std::chrono::microseconds(us));return 0;}
+int sceKernelDelayThread(unsigned us) {
+  require(us>0,"non-positive delay syscall");
+  std::this_thread::sleep_for(std::chrono::microseconds(us));return 0;
+}
 
 SceUID sceKernelGetThreadId() {return currentThreadId;}

@@ -76,7 +76,10 @@ int sceKernelStartThread(SceUID id,SceSize size,void* args) {
 }
 int sceKernelWaitThreadEnd(SceUID id,void*,void*) {threads.at(id)->thread.join();return 0;}
 int sceKernelDeleteThread(SceUID id) {threads.erase(id);return 0;}
-int sceKernelDelayThread(unsigned us) {std::this_thread::sleep_for(std::chrono::microseconds(us));return 0;}
+int sceKernelDelayThread(unsigned us) {
+  require(us>0,"non-positive delay syscall");
+  std::this_thread::sleep_for(std::chrono::microseconds(us));return 0;
+}
 int sceKernelGetCpuId(void) {return currentCpuId;}
 SceUID sceKernelGetThreadId(void) {return currentThreadId;}
 int sceKernelGetThreadCpuAffinityMask(SceUID id) {

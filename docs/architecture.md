@@ -87,7 +87,9 @@ range-aware retirement may replace it without weakening the ordering guarantee.
 GX serial waits use the monotonically increasing completion counter as their
 authority. The wake semaphore is only a hint: waits periodically re-check the
 counter so multiple producer-side waiters cannot deadlock by competing for one
-binary semaphore token.
+binary semaphore token. Because the semaphore has a maximum count of one, the
+consumer publishes only an edge when no wake token is already pending; it must
+not signal once per completed job or Vita reports `SCE_KERNEL_ERROR_SEMA_OVF`.
 
 Async GX also treats `end_frame()` as a producer/consumer lifetime boundary.
 FIFO decode and rendering may overlap the game thread while a frame is being

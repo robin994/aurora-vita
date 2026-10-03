@@ -6,6 +6,9 @@
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "vita_data_paths.hpp"
+#if defined(__vita__)
+#include "vita_thread_utils.hpp"
+#endif
 #if !defined(AURORA_VITA_RENDERER_GXM)
 #include "gfx/vita_gl_util.hpp"
 #endif
@@ -496,7 +499,7 @@ bool initialize(const BackendConfig& c) noexcept {
     if(c.cpu_core3_budget_enabled&&gfx::cpu_core3_available()&&systemRc>=0) {
       const int64_t wallBefore=sceKernelGetSystemTimeWide();
       const uint64_t idleBefore=static_cast<uint64_t>(system.cpuInfo[3].idleClock);
-      sceKernelDelayThread(10000);
+      aurora::vita::thread::delay_us(10000);
       SceKernelSystemInfo after{};after.size=sizeof(after);
       const int afterRc=sceKernelGetSystemInfo(&after);
       const int64_t wallAfter=sceKernelGetSystemTimeWide();

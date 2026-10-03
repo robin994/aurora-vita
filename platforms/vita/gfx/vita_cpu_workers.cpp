@@ -9,6 +9,7 @@
 #include <limits>
 
 #if defined(__vita__)
+#include "../vita_thread_utils.hpp"
 #include <psp2/kernel/cpu.h>
 #include <psp2/kernel/threadmgr.h>
 #endif
@@ -339,7 +340,7 @@ int cpu_worker_main(SceSize, void* opaque) {
   for (;;) {
     const int wait=sceKernelWaitSema(lane.wake,1,nullptr);
     if (lane.stop.load(std::memory_order_acquire)) return 0;
-    if(wait<0){sceKernelDelayThread(100);continue;}
+    if(wait<0){aurora::vita::thread::delay_us(100);continue;}
     if(lane.state.load(std::memory_order_acquire)!=1)continue;
     lane.result = lane.task && lane.task(lane.context, lane.begin, lane.end, index + 1);
     lane.state.store(2, std::memory_order_release);
@@ -552,7 +553,7 @@ static bool cpu_parallel_for_min_lanes_impl(size_t count, size_t minItems, uint3
       const uint32_t i=workerSlots[worker];
       if(!dispatched[i])continue;
       auto& lane=g_workers.lanes[i];
-      while(sceKernelWaitSema(lane.done,1,nullptr)<0)sceKernelDelayThread(100);
+      while(sceKernelWaitSema(lane.done,1,nullptr)<0)aurora::vita::thread::delay_us(100);
       const bool completed=lane.state.load(std::memory_order_acquire)==2;
       workersResult=workersResult&&completed&&lane.result;
       lane.task=nullptr;lane.context=nullptr;lane.state.store(0,std::memory_order_release);
@@ -610,7 +611,7 @@ static bool cpu_parallel_for_min_lanes_impl(size_t count, size_t minItems, uint3
     // state already says done. Conditional signalling can leave a stale token
     // that lets the producer reuse a later job's context while it is running.
     // Separate sleeping/state flags also permit a lost wake on ARM.
-    while(sceKernelWaitSema(lane.done,1,nullptr)<0)sceKernelDelayThread(100);
+    while(sceKernelWaitSema(lane.done,1,nullptr)<0)aurora::vita::thread::delay_us(100);
     const bool completed=lane.state.load(std::memory_order_acquire)==2;
     workersResult=workersResult && completed && lane.result;
     lane.task=nullptr;lane.context=nullptr;

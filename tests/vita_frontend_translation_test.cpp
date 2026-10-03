@@ -279,6 +279,27 @@ void multiple_waiters_recheck_completed_serial() {
   shutdown();
 }
 
+void async_completion_signal_never_overflows() {
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));
+  CHECK(aurora::gx::fifo::start_worker());
+
+  struct Counter {std::atomic<unsigned>* value;};
+  std::atomic<unsigned> completed=0;
+  Counter counter{&completed};
+  constexpr unsigned Jobs=32;
+  for(unsigned i=0;i<Jobs;++i) {
+    CHECK(aurora::gx::fifo::run_async([](void* opaque){
+      auto args=*static_cast<Counter*>(opaque);
+      args.value->fetch_add(1,std::memory_order_release);
+    },&counter,sizeof counter)!=0);
+  }
+  aurora::gx::fifo::wait_idle();
+  CHECK(completed.load(std::memory_order_acquire)==Jobs);
+  shutdown();
+}
+
 void async_end_frame_is_a_lifetime_barrier() {
   BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
   config.log_level=RuntimeLogLevel::Silent;
@@ -323,5 +344,5 @@ void async_worker_rejects_direct_display_list_submit() {
   shutdown();
 }
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

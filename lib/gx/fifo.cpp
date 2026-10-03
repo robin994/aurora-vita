@@ -5,6 +5,7 @@
 #if defined(MKW_TARGET_VITA)
 #include "../../platforms/vita/gfx/vita_telemetry.hpp"
 #include "../../platforms/vita/gfx/vita_memory_revision.hpp"
+#include "../../platforms/vita/vita_thread_utils.hpp"
 #include "display_list_shadow.hpp"
 #endif
 #include "../internal.hpp"
@@ -100,6 +101,7 @@ struct VitaWorkerState {
   std::array<VitaJob, VitaQueueDepth> jobs{};
   std::atomic<uint64_t> submitted{0};
   std::atomic<uint64_t> completed{0};
+  std::atomic<bool> completionWakePending{false};
   uint32_t producer = 0;
   uint32_t consumer = 0;
   std::atomic<bool> running{false};
@@ -124,15 +126,21 @@ void destroy_worker_primitives() noexcept {
 
 void signal_completion(uint64_t serial) noexcept {
   sVitaWorker.completed.store(serial, std::memory_order_release);
-  // Binary wakeup: a stale token is harmless because waiters always re-check
-  // the monotonically increasing completion serial.
-  sceKernelSignalSema(sVitaWorker.completedSignal, 1);
+  // completedSignal is binary. Only publish a new token when none is already
+  // pending; otherwise sceKernelSignalSema would return SCE_KERNEL_ERROR_SEMA_OVF
+  // as soon as two jobs complete before a waiter consumes the first token.
+  bool expected = false;
+  if (sVitaWorker.completionWakePending.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+    if (sceKernelSignalSema(sVitaWorker.completedSignal, 1) < 0)
+      sVitaWorker.completionWakePending.store(false, std::memory_order_release);
+  }
 }
 
 int vita_worker_main(SceSize, void*) {
   for (;;) {
     if (sceKernelWaitSema(sVitaWorker.ready, 1, nullptr) < 0) {
-      sceKernelDelayThread(100);
+      aurora::vita::thread::delay_us(100);
       continue;
     }
 
@@ -180,7 +188,8 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
   {
     // Producer back-pressure: time the game thread waits for a free slot.
     const uint64_t t0 = aurora::vita::gfx::telemetry_now_us();
-    while (sceKernelWaitSema(sVitaWorker.space, 1, nullptr) < 0) sceKernelDelayThread(100);
+    while (sceKernelWaitSema(sVitaWorker.space, 1, nullptr) < 0)
+      aurora::vita::thread::delay_us(100);
     if(aurora::vita::runtime_diagnostics_enabled())
       sProducerWaitUs.fetch_add(aurora::vita::gfx::telemetry_now_us() - t0, std::memory_order_relaxed);
   }
@@ -221,7 +230,9 @@ void wait_serial(uint64_t serial) noexcept {
     // the sole wake token. Use a bounded kernel wait and always re-check the
     // monotonic completion serial instead of sleeping forever on a lost wake.
     unsigned int timeoutUs = 1000;
-    (void)sceKernelWaitSema(sVitaWorker.completedSignal, 1, &timeoutUs);
+    const int waitResult = sceKernelWaitSema(sVitaWorker.completedSignal, 1, &timeoutUs);
+    if (waitResult >= 0)
+      sVitaWorker.completionWakePending.store(false, std::memory_order_release);
   }
 }
 
@@ -244,6 +255,7 @@ bool start_worker() {
   sVitaWorker.producer = sVitaWorker.consumer = 0;
   sVitaWorker.submitted.store(0, std::memory_order_release);
   sVitaWorker.completed.store(0, std::memory_order_release);
+  sVitaWorker.completionWakePending.store(false, std::memory_order_release);
   sVitaWorker.ready = sceKernelCreateSema("melee_gx_ready", 0, 0, VitaQueueDepth, nullptr);
   sVitaWorker.space = sceKernelCreateSema("melee_gx_space", 0, VitaQueueDepth, VitaQueueDepth, nullptr);
   sVitaWorker.completedSignal = sceKernelCreateSema("melee_gx_done", 0, 0, 1, nullptr);
