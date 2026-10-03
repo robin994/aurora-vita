@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstring>
 
+extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes) noexcept;
+
 namespace {
 using namespace aurora::vita;
 unsigned failures=0,checks=0;
@@ -191,6 +193,36 @@ void completed_frame_does_not_fence() {
   CHECK(begin_frame());end_frame();CHECK(completed_memory_snapshot().frameIndex==1);
   shutdown();CHECK(!completed_memory_snapshot().completedFrame);
 }
+
+void guest_memory_reuse_fences_async_gx() {
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));
+  CHECK(aurora::gx::fifo::start_worker());
+
+  struct Blocker {std::atomic<bool>* entered;std::atomic<bool>* release;};
+  std::atomic<bool> entered=false,release=false,writeReturned=false;
+  Blocker blocker{&entered,&release};
+  aurora::gx::fifo::run_async([](void* opaque){auto args=*static_cast<Blocker*>(opaque);
+    args.entered->store(true,std::memory_order_release);
+    while(!args.release->load(std::memory_order_acquire))std::this_thread::yield();},&blocker,sizeof blocker);
+
+  const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+  while(!entered.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+  CHECK(entered.load(std::memory_order_acquire));
+
+  std::array<uint8_t,64> guest{};
+  std::thread writer([&]{
+    aurora_vita_notify_memory_write(guest.data(),guest.size());
+    writeReturned.store(true,std::memory_order_release);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  CHECK(!writeReturned.load(std::memory_order_acquire));
+  release.store(true,std::memory_order_release);
+  writer.join();
+  CHECK(writeReturned.load(std::memory_order_acquire));
+  shutdown();
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();
+}
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_reuse_fences_async_gx();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

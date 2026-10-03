@@ -256,6 +256,15 @@ void emit_periodic_diagnostics() noexcept {
 }
 
 extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes) noexcept {
+#if defined(MKW_TARGET_VITA)
+  // A queued GX draw can still dereference guest arrays, display-list identity
+  // ranges or texture sources after the producer has returned from the GX API.
+  // Ports call this hook before reusing a guest-memory range; make that reuse a
+  // conservative lifetime barrier while async GX is active. This deliberately
+  // fences all pending GX work first; range-aware retirement can replace the
+  // global drain later without weakening the contract.
+  if(gx_worker_active()) aurora::gx::fifo::wait_idle();
+#endif
   aurora::vita::gfx::note_memory_write(address,bytes);
 }
 

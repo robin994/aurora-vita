@@ -75,6 +75,13 @@ revision tracking, texture invalidation and immutable geometry reuse. Preserve
 TLUT and EFB invalidation as well as explicit source-range updates. When source
 stability or feature eligibility is unavailable, preparation uses the CPU path.
 
+On Vita, `aurora_vita_notify_memory_write()` is also the guest-memory reuse
+barrier for async GX. A port must call it before overwriting or recycling a range
+that may have been referenced by GX. While the async consumer is active Aurora
+first retires all earlier FIFO work, then publishes the write revision. The
+current implementation uses a conservative global drain; replacing it with
+range-aware retirement must preserve the same lifetime guarantee.
+
 ## CPU3 probe and lane caps
 
 The default is two helpers, with CPU2 and lower-priority CPU1 affinities. Requesting
