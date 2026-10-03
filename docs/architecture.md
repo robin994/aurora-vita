@@ -100,8 +100,25 @@ guest memory or display resources while the consumer still references them.
 The GX worker is the sole owner of decoded `GXState`, `DrawSink`, renderer state
 and their caches while async GX is active. Producer-side shortcuts must not
 decode or submit draws directly. In particular, the single-draw display-list
-fast path is disabled with the worker running; those bytes are appended to the
-same FIFO as the preceding state commands and decoded in-order by the consumer.
+fast path is disabled with the worker running. Stable display lists are kept in
+immutable revisioned shadow storage and queued as pinned FIFO segments, so the
+producer preserves ordering without copying the complete list into each job.
+Queued shared ownership keeps an older shadow alive until its job completes.
+
+The Vita runtime trusts the guest-memory revision contract for stable display
+lists. Exact byte validation remains available for tests and diagnostics, but
+the hot path avoids rereading uncached CDRAM on every cache hit. Static geometry
+also batches its revision-tracked source checks under one revision-table lock
+after the global write epoch changes.
+
+Translated state uses narrow identities where possible. Pipeline and vertex
+layout generations are independent, so pipeline changes do not rebuild an
+unchanged decode layout. Vertex uniforms, fragment uniforms and resolved texture
+bindings carry independent non-zero revisions through `CommandStream` into the
+native renderer. Equal revisions are immutable-state identity, so the normal GX
+path does not byte-compare MVP/fixed state, TEV/fog blocks or texture-binding
+arrays merely to prove they are unchanged. Byte comparison remains only as the
+zero-revision/bisection fallback.
 
 ## CPU3 probe and lane caps
 
@@ -111,9 +128,11 @@ helper only after it reports physical CPU ID 3 and the expected affinity; failur
 retains the original topology. Plugin installation alone is not proof of CPU3.
 
 `cpu_renderer_execution_lanes` and `cpu_game_execution_lanes` independently cap
-caller plus helper lanes. A cap of three keeps the probed fourth helper outside
-the corresponding dispatch. This infrastructure does not implement a measured
-CPU3 utilization quota or guarantee total CPU3 use by a downstream game.
+caller plus helper lanes. CPU3 remains quota-governed. Vertex-only work uses a
+finer minimum chunk than generic renderer work when CPU3 is available, because
+Razor traces showed the GX frontend saturated while CPU3 was mostly idle. Fused
+decode/transform/pack and static-geometry GPU packing both use this vertex pool;
+other task classes keep the validated generic threshold.
 
 ## Observation and validation
 

@@ -153,12 +153,14 @@ void state_transitions() {
     stage.texCoordId=(mode&1)?GX_TEXCOORD0:GX_TEXCOORD_NULL;
     stage.texMapId=(mode&1)?GX_TEXMAP0:GX_TEXMAP_NULL;
     g.pipelineStateGeneration=aurora::gx::next_gx_state_epoch();g.mark_dirty();
-    const auto prior=telemetry.frame().counters.pipelineTranslations;submit();
+    const auto prior=telemetry.frame().counters.pipelineTranslations;
+    const auto priorLayout=telemetry.frame().counters.layoutTranslations;submit();
     gfx::PipelineDesc expected{};gfx::VertexDecodeLayout decode{};uint64_t key=0;
     gxbridge::translate_current_pipeline_and_layout(GX_TRIANGLES,0,expected,decode,key);
     const auto recipe=gfx::build_draw_recipe(expected);
     CHECK(sink.stream().tail_draw()->vertices.size==3*recipe.gpuStride);
     CHECK(telemetry.frame().counters.pipelineTranslations==prior+1);
+    CHECK(telemetry.frame().counters.layoutTranslations==priorLayout);
   }
   sink.flush();sink.shutdown();renderer.shutdown();
 }
@@ -343,6 +345,27 @@ void async_worker_rejects_direct_display_list_submit() {
   CHECK(!aurora::gx::fifo::submit_simple_display_list(list.data(),list.size()));
   shutdown();
 }
+
+void async_display_list_uses_pinned_segment_without_fifo_copy() {
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));
+  // Strikers' validated INI currently carries gxm_dl_shadow=0. Async transport
+  // must still pin immutable display-list payloads; this switch may only
+  // disable the optional synchronous shadow cache.
+  aurora::gx::fifo::set_display_list_shadow_enabled(false);
+  CHECK(aurora::gx::fifo::start_worker());
+
+  std::array<uint8_t,32> list{};
+  list[0]=GX_NOP;
+  aurora_vita_notify_memory_write(list.data(),list.size());
+  const uint32_t before=aurora::gx::fifo::get_buffer_size();
+  aurora::gx::fifo::write_stable_data(list.data(),static_cast<uint32_t>(list.size()));
+  CHECK(aurora::gx::fifo::get_buffer_size()==before);
+  aurora::gx::fifo::drain_sync();
+  aurora::gx::fifo::set_display_list_shadow_enabled(true);
+  shutdown();
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();
+}
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

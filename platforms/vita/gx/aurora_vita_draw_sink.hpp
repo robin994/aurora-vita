@@ -140,6 +140,7 @@ private:
   // Snapshot reuse across consecutive GPU-geometry draws (see submit()).
   gfx::FixedVertexUniforms* lastFixedUniforms_ = nullptr;
   uint64_t vertexStateVersion_ = 0;
+  uint64_t fragmentUniformVersion_ = 0;
 
   gfx::PipelineDesc translatedGpuPipeline_{};
   gfx::FlatHashMap<uint64_t,uint64_t> fixedPipelineKeys_{};
@@ -171,6 +172,7 @@ private:
   bool translatedLit_ = false;
   bool translatedStateValid_ = false;
   std::array<gfx::TextureBinding,gfx::MaxTextures> resolvedTextureBindings_{};
+  uint64_t resolvedTextureBindingVersion_ = 1;
   uint8_t resolvedTextureMask_ = 0;
   uint8_t resolvedVolatileTextureMask_ = 0;
   uint8_t resolvedFallbackTextureMask_ = 0;

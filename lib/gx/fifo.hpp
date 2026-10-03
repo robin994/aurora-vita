@@ -60,8 +60,9 @@ uint64_t run_async(VitaWorkerTask task, const void* context, size_t contextBytes
 // the GX draw-done token without the CPU blocking at the point it is set.
 uint64_t submit_marker();
 void wait_marker(uint64_t serial);
-// Cached-RAM shadows of CDRAM display lists (default on). Diagnostic exact-byte
-// validation guards reuse and reports writes missed by the revision contract.
+// Cached-RAM shadows of stable display lists. Async GX always uses immutable
+// pinned shadow storage as its ordered transport; this switch controls only
+// the optional synchronous-cache fast path. Writes must publish revisions.
 void set_display_list_shadow_enabled(bool enabled);
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian);
 // Cumulative wall time spent in top-level (non-nested) command processing.

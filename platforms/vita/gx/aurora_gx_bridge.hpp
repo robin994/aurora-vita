@@ -40,7 +40,8 @@ gfx::VertexDecodeLayout translate_current_vertex_layout(uint8_t fmt) noexcept;
 // currently: an exact memo cost more than it saved on hardware).
 bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
                                            gfx::VertexDecodeLayout& layout, uint64_t& key,
-                                           gfx::Telemetry* telemetry = nullptr) noexcept;
+                                           gfx::Telemetry* telemetry = nullptr,
+                                           bool rebuildLayout = true) noexcept;
 // Refreshes GX vertex-program fields that are intentionally excluded from the
 // normal CPU-transformed GXM pipeline identity.
 void refresh_current_vertex_program_state(gfx::PipelineDesc& pipeline) noexcept;

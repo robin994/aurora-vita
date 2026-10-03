@@ -640,11 +640,16 @@ bool cpu_parallel_for(size_t count, CpuRangeTask task, void* context) noexcept {
 
 bool cpu_parallel_for_vertex(size_t count, CpuRangeTask task, void* context) noexcept {
   const uint32_t lanes=g_workers.core3Budget.config.enabled?MaxExecutionLanes:g_workers.defaultExecutionLanes;
+  // CPU3 was nearly idle in Razor while the GX frontend was saturated. Keep
+  // the generic renderer threshold unchanged, but let vertex-only work use
+  // finer chunks when the quota-governed system core is available.
+  const size_t vertexMinItems=g_workers.core3Budget.config.enabled?
+      std::max<size_t>(16,g_workers.minItems/4u):g_workers.minItems;
   if(!runtime_diagnostics_enabled())
-    return cpu_parallel_for_min_lanes_impl(count,g_workers.minItems,lanes,task,context,false);
+    return cpu_parallel_for_min_lanes_impl(count,vertexMinItems,lanes,task,context,false);
   g_workers.vertexStats.calls.fetch_add(1,std::memory_order_relaxed);
   const int64_t started=sceKernelGetSystemTimeWide();
-  const bool result=cpu_parallel_for_min_lanes_impl(count,g_workers.minItems,lanes,task,context,true);
+  const bool result=cpu_parallel_for_min_lanes_impl(count,vertexMinItems,lanes,task,context,true);
   const int64_t finished=sceKernelGetSystemTimeWide();
   if(finished>started)g_workers.vertexStats.totalWallUs.fetch_add(
       static_cast<uint64_t>(finished-started),std::memory_order_relaxed);

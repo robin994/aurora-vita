@@ -128,6 +128,25 @@ void shared_lifetimes() {
   CHECK(!inlineB.sharedState&&inlineB.gpu_uniforms().mvp[0]==22&&inlineA.gpu_uniforms().mvp[0]==18);
   gxm_disable_mask()=0;
 }
+void revision_identity_skips_payload_comparison() {
+  CommandStream stream;DrawUniforms uniforms{};std::array<TextureBinding,MaxTextures> textures{};
+  uniforms.mvp[0]=1.f;textures[0].texture=11;
+  auto& first=stream.emplace_geometry_draw();stream.share_draw_state(first,uniforms,textures,77,88);
+  const auto* source=&first;
+
+  // Equal non-zero revisions are an explicit immutable-state contract. Make
+  // the supplied bytes deliberately different: the fast path must trust the
+  // identities instead of walking the large uniform/texture payloads.
+  uniforms.mvp[0]=9.f;textures[0].texture=99;
+  auto& same=stream.emplace_geometry_draw();stream.share_draw_state(same,uniforms,textures,77,88);
+  CHECK(same.sharedState==source&&same.gpu_uniforms().mvp[0]==1.f&&
+        same.texture_bindings()[0].texture==11);
+
+  auto& changedTexture=stream.emplace_geometry_draw();
+  stream.share_draw_state(changedTexture,uniforms,textures,77,89);
+  CHECK(changedTexture.sharedState==nullptr&&changedTexture.gpu_uniforms().mvp[0]==9.f&&
+        changedTexture.texture_bindings()[0].texture==99);
+}
 void published_copies() {
   struct Snapshot {uint64_t serial=0;std::array<uint64_t,32> values{};};
   PublishedSnapshot<Snapshot> published;std::atomic<bool> done=false,torn=false;
@@ -180,7 +199,7 @@ void submission_views() {
   CommandStream stream;DrawUniforms cpu{};std::array<TextureBinding,MaxTextures> textures{};
   cpu.mvp[12]=7;textures[3].texture=42;
   auto& a=stream.emplace_draw();stream.share_draw_state(a,cpu,textures,21);
-  a.pipelineKey=123;a.vertexCount=5;a.indexCount=6;a.absoluteVertexIndices=true;
+  a.pipelineKey=123;a.vertexCount=5;a.indexCount=6;a.absoluteVertexIndices=true;a.fragmentUniformRevision=31;
   a.vertices={4,8,16};a.indices={5,10,12};a.viewport.x=17;a.scissor.y=18;
   FixedVertexUniforms fixed{};a.fixedVertexUniforms=&fixed;
   DrawSubmissionView inlineView(a);
@@ -188,14 +207,17 @@ void submission_views() {
   auto& b=stream.emplace_geometry_draw();stream.share_draw_state(b,cpu,textures,21);
   b.pipelineKey=a.pipelineKey;b.vertices=a.vertices;b.indices=a.indices;b.vertexCount=a.vertexCount;
   b.indexCount=a.indexCount;b.absoluteVertexIndices=true;b.viewport=a.viewport;b.scissor=a.scissor;b.fixedVertexUniforms=&fixed;
+  b.fragmentUniformRevision=32;
   DrawSubmissionView sharedView(b);
   CHECK(b.sharedState==&a&&&sharedView.uniforms==&a.uniforms&&&sharedView.textures==&a.textures);
   CHECK(sharedView.pipelineKey==123&&sharedView.indexCount==6&&sharedView.vertexCount==5);
+  CHECK(inlineView.fragmentUniformRevision==31&&sharedView.fragmentUniformRevision==32);
   CHECK(sharedView.vertices.offset==8&&sharedView.indices.offset==10&&sharedView.absoluteVertexIndices);
   CHECK(sharedView.fixedVertexUniforms==&fixed&&sharedView.viewport.x==17&&sharedView.scissor.y==18);
   CHECK(!std::memcmp(&inlineView.uniforms,&sharedView.uniforms,sizeof(GpuDrawUniforms)));
   CommandStream copied=stream;CommandStream moved=std::move(stream);
   DrawSubmissionView copyView(copied.draw_packet(1));
+  CHECK(copyView.fragmentUniformRevision==32);
   CHECK(&copyView.uniforms!=&sharedView.uniforms&&copyView.uniforms.mvp[12]==7);
   cpu.mvp[12]=99;textures[3].texture=88;
   CHECK(copyView.uniforms.mvp[12]==7&&copyView.textures[3].texture==42);
@@ -258,6 +280,6 @@ void pipeline_bindings() {
   CHECK(pipeline_setter_count(pipeline_state_changes(previous,next,true))==7);
 }
 }
-int main(){local_batching();shared_lifetimes();published_copies();pipeline_bindings();
+int main(){local_batching();shared_lifetimes();revision_identity_skips_payload_comparison();published_copies();pipeline_bindings();
   fixed_snapshots();submission_views();composed_statistics();published_memory();
   std::printf("submission: %u checks, %u failures\n",checks,failures);return failures?1:0;}

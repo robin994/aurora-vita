@@ -317,6 +317,22 @@ int main() {
   CpuCore3BudgetConfig budget{};
   budget.enabled=true;budget.maxTotalPercent=70;budget.guardPercent=5;
   budget.shortWindowMs=10;budget.longWindowMs=100;budget.chunkTargetUs=250;budget.samplePeriodUs=1000;
+  fakeSystemUs.store(100000);fakeIdle3Us.store(100000);
+  require(initialize_cpu_workers(3,64,3,budget),"medium vertex budget initialize");
+  fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);
+  BudgetJob mediumGeneral;
+  require(cpu_parallel_for(96,budget_task,&mediumGeneral),"medium generic job");
+  verify_budget_coverage(mediumGeneral,96,"medium generic coverage");
+  require((mediumGeneral.laneMask.load()&(1u<<3))==0,"generic threshold unexpectedly used CPU3");
+  fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);
+  BudgetJob mediumVertex;
+  require(cpu_parallel_for_vertex(96,budget_task,&mediumVertex),"medium vertex job");
+  verify_budget_coverage(mediumVertex,96,"medium vertex coverage");
+  require((mediumVertex.laneMask.load()&(1u<<3))!=0,"vertex-specific granularity did not use CPU3");
+  shutdown_cpu_workers();
+  require(semas.empty()&&threads.empty(),"medium vertex shutdown leaked resources");
+
+  fakeSystemUs.store(100000);fakeIdle3Us.store(100000);
   require(initialize_cpu_workers(3,16,3,budget),"sparse budget initialize");
   require(cpu_worker_threads()==2&&cpu_core3_available(),"sparse budget lost CPU3");
   fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);

@@ -131,11 +131,13 @@ enum class FifoCommandClass : uint8_t { Bp, Cp, Xf, Indexed, CallList, Draw, Aur
 struct FifoProfile {
   uint64_t processUs = 0;     // outermost process() wall time
   uint64_t bytes = 0;
-  // GXCallDisplayList: bytes appended from guest display lists, the CPU time
-  // of that copy, how many came from CDRAM (uncached, slow CPU reads) and how
-  // many calls were made.
+  // GXCallDisplayList transport. dlCalls/dlBytes count payloads that still had
+  // to be copied into the FIFO; pinned counters are immutable shadow segments
+  // referenced directly by the async consumer.
   uint64_t dlBytes = 0, dlCopyUs = 0, dlCdramBytes = 0;
   uint32_t dlCalls = 0;
+  uint64_t dlPinnedBytes = 0;
+  uint32_t dlPinnedCalls = 0;
   uint64_t us[static_cast<size_t>(FifoCommandClass::Count)]{};
   uint32_t count[static_cast<size_t>(FifoCommandClass::Count)]{};
 };

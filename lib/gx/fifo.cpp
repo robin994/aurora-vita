@@ -75,10 +75,24 @@ namespace {
 // Keep the producer close to the consumer. Four batches are enough to overlap
 // game simulation with GX decode without letting indexed-array pointers remain
 // outstanding for a large fraction of a frame.
-constexpr uint32_t VitaQueueDepth = 4;
+// Pinned display-list segments keep the large payloads out of the job vectors,
+// so a slightly deeper queue now costs little memory and lets the game thread
+// overlap short producer bursts with the GX consumer instead of stalling on
+// `melee_gx_space`. end_frame() is still the hard lifetime boundary.
+constexpr uint32_t VitaQueueDepth = 8;
 constexpr size_t VitaWorkerStackBytes = 1024u * 1024u;
+constexpr uint32_t VitaJobSegmentCapacity = 128;
 
 enum class VitaJobType : uint8_t { Fifo, Callback, Stop };
+enum class VitaJobSegmentType : uint8_t { Inline, PinnedDisplayList };
+
+struct VitaJobSegment {
+  VitaJobSegmentType type = VitaJobSegmentType::Inline;
+  uint32_t offset = 0;
+  uint32_t bytes = 0;
+  const uint8_t* stableSource = nullptr;
+  DisplayListShadowCache::PinnedBytes pinned{};
+};
 
 struct VitaJob {
   VitaJobType type = VitaJobType::Fifo;
@@ -86,6 +100,8 @@ struct VitaJob {
   bool bigEndian = true;
   std::array<StableSourceSpan, StableSourceSpanCapacity> stableSourceSpans{};
   uint32_t stableSourceSpanCount = 0;
+  std::array<VitaJobSegment, VitaJobSegmentCapacity> segments{};
+  uint32_t segmentCount = 0;
   VitaWorkerTask task = nullptr;
   void* context = nullptr;
   // Owned copy of an asynchronous task's arguments (run_async).
@@ -108,12 +124,35 @@ struct VitaWorkerState {
 };
 
 VitaWorkerState sVitaWorker{};
+std::array<VitaJobSegment, VitaJobSegmentCapacity> sPendingSegments{};
+uint32_t sPendingSegmentCount = 0;
+uint32_t sPendingInlineOffset = 0;
+uint32_t sPendingPinnedBytes = 0;
 // Game-thread time blocked on the worker: waiting for a free queue slot and
 // waiting for a serial/draw-done token. Read and cleared by take_wait_stats().
 std::atomic<uint64_t> sProducerWaitUs{0}, sConsumerWaitUs{0};
 
 bool on_worker_thread() noexcept {
   return sVitaWorker.thread >= 0 && sceKernelGetThreadId() == sVitaWorker.thread;
+}
+
+void reset_pending_segments() noexcept {
+  for (uint32_t i = 0; i < sPendingSegmentCount; ++i) sPendingSegments[i].pinned.reset();
+  sPendingSegmentCount = 0;
+  sPendingInlineOffset = 0;
+  sPendingPinnedBytes = 0;
+}
+
+bool seal_inline_segment() noexcept {
+  if (detail::sBufferSize <= sPendingInlineOffset) return true;
+  if (sPendingSegmentCount == VitaJobSegmentCapacity) return false;
+  auto& segment = sPendingSegments[sPendingSegmentCount++];
+  segment = {};
+  segment.type = VitaJobSegmentType::Inline;
+  segment.offset = sPendingInlineOffset;
+  segment.bytes = detail::sBufferSize - sPendingInlineOffset;
+  sPendingInlineOffset = detail::sBufferSize;
+  return true;
 }
 
 void destroy_worker_primitives() noexcept {
@@ -156,11 +195,36 @@ int vita_worker_main(SceSize, void*) {
     }
 
     if (job.type == VitaJobType::Fifo) {
-      detail::sActiveProcessData = job.bytes.data();
-      detail::sActiveProcessSize = static_cast<uint32_t>(job.bytes.size());
-      detail::sActiveStableSourceSpans = job.stableSourceSpans.data();
-      detail::sActiveStableSourceSpanCount = job.stableSourceSpanCount;
-      if (!job.bytes.empty()) process(job.bytes.data(), static_cast<uint32_t>(job.bytes.size()), job.bigEndian);
+      if (job.segmentCount != 0) {
+        for (uint32_t i = 0; i < job.segmentCount; ++i) {
+          const auto& segment = job.segments[i];
+          if (segment.bytes == 0) continue;
+          if (segment.type == VitaJobSegmentType::Inline) {
+            if (segment.offset > job.bytes.size() || segment.bytes > job.bytes.size() - segment.offset) continue;
+            detail::sActiveProcessData = job.bytes.data();
+            detail::sActiveProcessSize = static_cast<uint32_t>(job.bytes.size());
+            detail::sActiveStableSourceSpans = job.stableSourceSpans.data();
+            detail::sActiveStableSourceSpanCount = job.stableSourceSpanCount;
+            process(job.bytes.data() + segment.offset, segment.bytes, job.bigEndian);
+          } else if (segment.pinned && segment.bytes <= segment.pinned->size()) {
+            StableSourceSpan stable{};
+            stable.offset = 0;
+            stable.bytes = segment.bytes;
+            stable.source = segment.stableSource;
+            detail::sActiveProcessData = segment.pinned->data();
+            detail::sActiveProcessSize = segment.bytes;
+            detail::sActiveStableSourceSpans = &stable;
+            detail::sActiveStableSourceSpanCount = segment.stableSource ? 1u : 0u;
+            process(segment.pinned->data(), segment.bytes, job.bigEndian);
+          }
+        }
+      } else {
+        detail::sActiveProcessData = job.bytes.data();
+        detail::sActiveProcessSize = static_cast<uint32_t>(job.bytes.size());
+        detail::sActiveStableSourceSpans = job.stableSourceSpans.data();
+        detail::sActiveStableSourceSpanCount = job.stableSourceSpanCount;
+        if (!job.bytes.empty()) process(job.bytes.data(), static_cast<uint32_t>(job.bytes.size()), job.bigEndian);
+      }
       detail::sActiveProcessData = nullptr;
       detail::sActiveProcessSize = 0;
       detail::sActiveStableSourceSpans = nullptr;
@@ -172,6 +236,8 @@ int vita_worker_main(SceSize, void*) {
     job.task = nullptr;
     job.context = nullptr;
     job.stableSourceSpanCount = 0;
+    for (uint32_t i = 0; i < job.segmentCount; ++i) job.segments[i].pinned.reset();
+    job.segmentCount = 0;
     signal_completion(serial);
     sceKernelSignalSema(sVitaWorker.space, 1);
     ++sVitaWorker.consumer;
@@ -183,7 +249,8 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
                      const uint8_t* bytes, uint32_t byteCount,
                      const StableSourceSpan* stableSpans, uint32_t stableSpanCount,
                      bool bigEndian = true, const void* ownedContext = nullptr,
-                     size_t ownedContextBytes = 0) {
+                     size_t ownedContextBytes = 0,
+                     const VitaJobSegment* segments = nullptr, uint32_t segmentCount = 0) {
   if (!sVitaWorker.running.load(std::memory_order_acquire)) return 0;
   {
     // Producer back-pressure: time the game thread waits for a free slot.
@@ -209,6 +276,8 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
   }
   if (bytes != nullptr && byteCount != 0) job.bytes.assign(bytes, bytes + byteCount);
   else job.bytes.clear();
+  job.segmentCount = std::min(segmentCount, VitaJobSegmentCapacity);
+  for (uint32_t i = 0; i < job.segmentCount; ++i) job.segments[i] = segments[i];
   job.serial = sVitaWorker.submitted.fetch_add(1, std::memory_order_acq_rel) + 1;
   const uint64_t serial = job.serial;
   std::atomic_thread_fence(std::memory_order_release);
@@ -237,13 +306,17 @@ void wait_serial(uint64_t serial) noexcept {
 }
 
 uint64_t enqueue_current_fifo() {
-  if (detail::sBufferSize == 0) return sVitaWorker.submitted.load(std::memory_order_acquire);
+  if (detail::sBufferSize == 0 && sPendingSegmentCount == 0)
+    return sVitaWorker.submitted.load(std::memory_order_acquire);
+  if (!seal_inline_segment()) return 0;
   const uint64_t serial = enqueue_job(
       VitaJobType::Fifo, nullptr, nullptr, detail::sBufferData, detail::sBufferSize,
-      detail::sStableSourceSpans.data(), detail::sStableSourceSpanCount, true);
+      detail::sStableSourceSpans.data(), detail::sStableSourceSpanCount, true, nullptr, 0,
+      sPendingSegments.data(), sPendingSegmentCount);
   if (serial != 0) {
     detail::sBufferSize = 0;
     detail::sStableSourceSpanCount = 0;
+    reset_pending_segments();
   }
   return serial;
 }
@@ -391,6 +464,9 @@ void init() {
   detail::sDlSize = 0;
   detail::sDlWritePos = 0;
   detail::sStableSourceSpanCount = 0;
+#if defined(MKW_TARGET_VITA)
+  reset_pending_segments();
+#endif
 }
 
 void write_stable_data_from(const void* bytes, const void* stableSource, uint32_t length) {
@@ -438,15 +514,46 @@ namespace {
 // Validate every reuse against the live bytes until hardware establishes why
 // revision-only reuse glitched. This diagnostic guard retains the original
 // guest identity and publishes any untracked write to downstream caches.
-DisplayListShadowCache sDisplayListShadows;
+DisplayListShadowCache sDisplayListShadows(8u * 1024u * 1024u, false);
 bool sDisplayListShadowEnabled = true;
 
-const uint8_t* display_list_shadow(const void* data, uint32_t length) {
-  if (!sDisplayListShadowEnabled) return nullptr;
+DisplayListShadowCache::PinnedBytes display_list_shadow_pin(const void* data, uint32_t length) {
+  // With the async GX consumer the immutable shadow is the transport itself,
+  // not merely an optional cache: keeping the large display-list payload out
+  // of the FIFO is what removes producer memcpy/back-pressure. The runtime
+  // switch still controls the synchronous shadow optimization.
+  if (!sDisplayListShadowEnabled && !worker_running()) return nullptr;
+#if defined(__vita__)
   const uintptr_t address = reinterpret_cast<uintptr_t>(data);
   // Only CDRAM (uncached CPU mapping) benefits; cached RAM is read directly.
   if (address < 0x60000000u || address >= 0x70000000u) return nullptr;
-  return sDisplayListShadows.get(data, length);
+#endif
+  return sDisplayListShadows.pin(data, length);
+}
+
+bool append_pinned_display_list(const void* guestSource, uint32_t length,
+                                DisplayListShadowCache::PinnedBytes pinned) {
+  if (!worker_running() || !pinned || pinned->size() < length || length == 0) return false;
+  constexpr uint32_t StableBatchByteLimit = 256u * 1024u;
+  if (sPendingSegmentCount >= VitaJobSegmentCapacity - 2u ||
+      (sPendingPinnedBytes != 0 &&
+       (length > StableBatchByteLimit || sPendingPinnedBytes > StableBatchByteLimit - length))) {
+    drain();
+  }
+  if (!seal_inline_segment() || sPendingSegmentCount == VitaJobSegmentCapacity) return false;
+  auto& segment = sPendingSegments[sPendingSegmentCount++];
+  segment = {};
+  segment.type = VitaJobSegmentType::PinnedDisplayList;
+  segment.bytes = length;
+  segment.stableSource = static_cast<const uint8_t*>(guestSource);
+  segment.pinned = std::move(pinned);
+  sPendingPinnedBytes += length;
+  if (aurora::vita::gfx::g_fifoProfileEnabled) {
+    auto& p = aurora::vita::gfx::fifo_profile_accumulator();
+    ++p.dlPinnedCalls;
+    p.dlPinnedBytes += length;
+  }
+  return true;
 }
 } // namespace
 #endif
@@ -464,8 +571,9 @@ void write_stable_data(const void* data, uint32_t length) {
 #if defined(MKW_TARGET_VITA)
   // The span keeps the guest address as its stable source identity.
   if (!detail::sInDisplayList && data != nullptr && length != 0) {
-    if (const uint8_t* shadow = display_list_shadow(data, length)) {
-      write_stable_data_from(shadow, data, length);
+    if (auto shadow = display_list_shadow_pin(data, length)) {
+      if (append_pinned_display_list(data, length, shadow)) return;
+      write_stable_data_from(shadow->data(), data, length);
       return;
     }
   }
@@ -524,7 +632,11 @@ void drain() {
     note_drain_wait(static_cast<uint64_t>(waited.count()));
   }
 #endif
+#if defined(MKW_TARGET_VITA)
+  if (detail::sBufferSize == 0 && sPendingSegmentCount == 0) return;
+#else
   if (detail::sBufferSize == 0) return;
+#endif
 #if defined(MKW_TARGET_VITA)
   if (worker_running()) {
     enqueue_current_fifo();
@@ -575,6 +687,9 @@ void clear_buffer() {
   invalidate_bp_write_cache();
   detail::sBufferSize = 0;
   detail::sStableSourceSpanCount = 0;
+#if defined(MKW_TARGET_VITA)
+  reset_pending_segments();
+#endif
 }
 
 } // namespace aurora::gx::fifo

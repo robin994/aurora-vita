@@ -215,9 +215,11 @@ struct PipelineDesc {
   uint8_t nativeTextureWrapMask = 0; // Swizzled samplers perform wrapping/filtering at seams.
   // Per texture unit, baked into the native shader instead of uniform branches
   // in every fetch: force alpha to 1 (RGB565 EFB copies) and the EFB copy
-  // sample mode (efb_copy_sample_mode, 2 bits per unit: 0 color, 1 R4, 2 A8).
+  // sample mode. Four bits per unit cover the color-copy formats that native
+  // GXM can keep as RGBA8 render textures instead of synchronously reading back
+  // and converting them on the CPU.
   uint8_t textureForceOpaqueMask = 0;
-  uint16_t textureCopyModeBits = 0;
+  uint32_t textureCopyModeBits = 0;
   bool fixedVertexOnGpu = false; // Raw object-space inputs; GX vertex processing runs in the shader.
   bool fixedVertexIndexedPn = false; // Per-vertex GX PNMTXIDX selects the 10-entry position/normal palette.
   // Per-vertex GX texture-matrix selectors consumed by the native fixed-vertex
@@ -366,6 +368,17 @@ inline constexpr uint8_t efb_copy_sample_mode(EfbCopyFormat f) noexcept {
   switch (f) {
   case EfbCopyFormat::R4: return 1;
   case EfbCopyFormat::A8: return 2;
+  case EfbCopyFormat::I4: return 3;
+  case EfbCopyFormat::I8: return 4;
+  case EfbCopyFormat::IA4: return 5;
+  case EfbCopyFormat::IA8: return 6;
+  case EfbCopyFormat::RA4: return 7;
+  case EfbCopyFormat::RA8: return 8;
+  case EfbCopyFormat::R8: return 9;
+  case EfbCopyFormat::G8: return 10;
+  case EfbCopyFormat::B8: return 11;
+  case EfbCopyFormat::RG8: return 12;
+  case EfbCopyFormat::GB8: return 13;
   default: return 0;
   }
 }
@@ -525,6 +538,15 @@ struct DrawPacket {
   // Non-zero when `uniforms` is an unchanged copy of a producer snapshot:
   // equal revisions mean equal uniform contents (renderer skips memcmp).
   uint64_t uniformRevision = 0;
+  // Fragment-only identity. Vertex matrices and lighting state change much
+  // more often than TEV/fog state, so keep a narrower revision for the native
+  // fragment uniform cache.
+  uint64_t fragmentUniformRevision = 0;
+  // Vertex-only identity for MVP/default-buffer reuse in the native backend.
+  uint64_t vertexUniformRevision = 0;
+  // Exact identity of the resolved TextureBinding array for this draw. Equal
+  // non-zero revisions allow CommandStream and the renderer to skip byte compares.
+  uint64_t textureBindingRevision = 0;
   // Optional immutable snapshot owned by the submitting command batch. Never
   // points at live GX state; the owner retains it until execute() has returned.
   const FixedVertexUniforms* fixedVertexUniforms = nullptr;
@@ -548,6 +570,9 @@ struct DrawSubmissionView {
   uint32_t vertexCount=0,indexCount=0,firstVertex=0,instanceCount=1;
   bool absoluteVertexIndices=false;
   uint64_t uniformRevision=0;
+  uint64_t fragmentUniformRevision=0;
+  uint64_t vertexUniformRevision=0;
+  uint64_t textureBindingRevision=0;
   const FixedVertexUniforms* fixedVertexUniforms=nullptr;
   Viewport viewport{};
   Scissor scissor{};
@@ -560,7 +585,9 @@ struct DrawSubmissionView {
       : uniforms(p.gpu_uniforms()),textures(p.texture_bindings()),pipelineKey(p.pipelineKey),
         vertices(p.vertices),indices(p.indices),vertexCount(p.vertexCount),indexCount(p.indexCount),
         firstVertex(p.firstVertex),instanceCount(p.instanceCount),absoluteVertexIndices(p.absoluteVertexIndices),
-        uniformRevision(p.uniformRevision),fixedVertexUniforms(p.fixedVertexUniforms),viewport(p.viewport),scissor(p.scissor) {}
+        uniformRevision(p.uniformRevision),fragmentUniformRevision(p.fragmentUniformRevision),
+        vertexUniformRevision(p.vertexUniformRevision),textureBindingRevision(p.textureBindingRevision),
+        fixedVertexUniforms(p.fixedVertexUniforms),viewport(p.viewport),scissor(p.scissor) {}
   const GpuDrawUniforms& gpu_uniforms() const noexcept {return uniforms;}
   const std::array<TextureBinding,MaxTextures>& texture_bindings() const noexcept {return textures;}
 };

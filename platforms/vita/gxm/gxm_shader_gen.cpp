@@ -550,9 +550,20 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
       if(!nativeWrap) fs << ",u_tex_wrap[" << unsigned(s.texture) << "].xy)";
       fs << ");\n";
       // Copy mode and forced opacity are pipeline state: no per-fetch branch.
-      const unsigned copyMode=(d.textureCopyModeBits>>(2u*s.texture))&3u;
-      if(copyMode==2u) fs << "raw_tex=raw_tex.aaaa;\n";
-      else if(copyMode==1u) fs << "raw_tex=float4(min(floor(raw_tex.r*16.0)/15.0,1.0));\n";
+      const unsigned copyMode=(d.textureCopyModeBits>>(4u*s.texture))&15u;
+      if(copyMode==1u) fs << "raw_tex=float4(min(floor(raw_tex.r*16.0)/15.0,1.0));\n"; // R4
+      else if(copyMode==2u) fs << "raw_tex=raw_tex.aaaa;\n"; // A8
+      else if(copyMode==3u) fs << "float gx_i=.257*raw_tex.r+.504*raw_tex.g+.098*raw_tex.b+16.0/255.0;gx_i=min(floor(gx_i*16.0)/15.0,1.0);raw_tex=float4(gx_i);\n"; // I4
+      else if(copyMode==4u) fs << "float gx_i=.257*raw_tex.r+.504*raw_tex.g+.098*raw_tex.b+16.0/255.0;raw_tex=float4(gx_i);\n"; // I8
+      else if(copyMode==5u) fs << "float gx_i=.257*raw_tex.r+.504*raw_tex.g+.098*raw_tex.b+16.0/255.0;gx_i=min(floor(gx_i*16.0)/15.0,1.0);float gx_a=min(floor(raw_tex.a*16.0)/15.0,1.0);raw_tex=float4(gx_i,gx_i,gx_i,gx_a);\n"; // IA4
+      else if(copyMode==6u) fs << "float gx_i=.257*raw_tex.r+.504*raw_tex.g+.098*raw_tex.b+16.0/255.0;raw_tex=float4(gx_i,gx_i,gx_i,raw_tex.a);\n"; // IA8
+      else if(copyMode==7u) fs << "float gx_r=min(floor(raw_tex.r*16.0)/15.0,1.0);float gx_a=min(floor(raw_tex.a*16.0)/15.0,1.0);raw_tex=float4(gx_r,gx_r,gx_r,gx_a);\n"; // RA4
+      else if(copyMode==8u) fs << "raw_tex=float4(raw_tex.r,raw_tex.r,raw_tex.r,raw_tex.a);\n"; // RA8
+      else if(copyMode==9u) fs << "raw_tex=raw_tex.rrrr;\n"; // R8
+      else if(copyMode==10u) fs << "raw_tex=raw_tex.gggg;\n"; // G8
+      else if(copyMode==11u) fs << "raw_tex=raw_tex.bbbb;\n"; // B8
+      else if(copyMode==12u) fs << "raw_tex=float4(raw_tex.r,raw_tex.r,raw_tex.r,raw_tex.g);\n"; // RG8
+      else if(copyMode==13u) fs << "raw_tex=float4(raw_tex.g,raw_tex.g,raw_tex.g,raw_tex.b);\n"; // GB8
       if(d.textureForceOpaqueMask&(1u<<s.texture)) fs << "raw_tex.a=1.0;\n";
     } else fs << "float4(1.0);\n";
     fs << "float4 texc=" << swizzle("raw_tex", d.tev.swapTable[s.texSwap]) << ";\nfloat4 raw_ras=";

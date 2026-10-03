@@ -450,11 +450,13 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   // (including several UI/effect layers in Strikers).
   constexpr bool logicalFlipX=false,logicalFlipY=false;
   const bool forceOpaque=copyFormat==gfx::EfbCopyFormat::RGB565;
-  const bool deferR4=copyFormat==gfx::EfbCopyFormat::R4;
-  const bool deferA8=copyFormat==gfx::EfbCopyFormat::A8;
-  const auto physicalFormat=(forceOpaque||deferR4||deferA8)?gfx::EfbCopyFormat::Passthrough:copyFormat;
-  const auto sampleFormat=deferR4?gfx::EfbCopyFormat::R4:
-      (deferA8?gfx::EfbCopyFormat::A8:gfx::EfbCopyFormat::Passthrough);
+  const bool deferColor=gfx::is_supported_color_copy_format(copyFormat)&&
+      copyFormat!=gfx::EfbCopyFormat::Passthrough&&copyFormat!=gfx::EfbCopyFormat::RGB565;
+  // Keep color copies in RGBA8 render-target storage. The sampling pipeline
+  // reproduces the GX copy-format conversion, avoiding the synchronized
+  // readback/CPU-convert/upload fallback for I/IA/R/RA/RG/GB formats.
+  const auto physicalFormat=(forceOpaque||deferColor)?gfx::EfbCopyFormat::Passthrough:copyFormat;
+  const auto sampleFormat=deferColor?copyFormat:gfx::EfbCopyFormat::Passthrough;
 #else
   constexpr bool physicalFlipX=true,physicalFlipY=true;
   constexpr bool logicalFlipX=false,logicalFlipY=false;
@@ -545,11 +547,13 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if (!translatedCacheHit) {
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     if (telemetry_) telemetry_->count_pipeline_translation();
+    const bool rebuildLayout = !translatedStateValid_ || translatedLayoutGeneration_ != layoutGeneration || translatedFmt_ != fmt;
     {
       gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StatePipeline);
       const bool memoHit=translate_current_pipeline_and_layout(primitive, fmt, translatedPipeline_,
-                                                               translatedLayout_, translatedBaseKey_, telemetry_);
+                                                               translatedLayout_, translatedBaseKey_, telemetry_, rebuildLayout);
       if (telemetry_ && memoHit) telemetry_->count_translation_memo_hit();
+      if (telemetry_ && rebuildLayout) telemetry_->count_layout_translation();
     }
     refresh_current_vertex_program_state(translatedPipeline_);
     translatedPipelineKey_ = translatedBaseKey_;
@@ -683,6 +687,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
         renderer_->texture_supports_hardware_wrap(bindings[slot].texture, bindings[slot].sampler))
       nativeWrapMask |= static_cast<uint8_t>(1u << slot);
   resolvedTextureBindings_=bindings;
+  if(++resolvedTextureBindingVersion_==0)++resolvedTextureBindingVersion_;
   resolvedNativeWrapMask_=nativeWrapMask;
   resolvedTextureMask_=textureMask;
   resolvedVolatileTextureMask_=volatileTextureMask;
@@ -705,15 +710,15 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // shader may leave wrapping to the texture unit (swizzled texture, or clamp
   // on both axes). Without the emulated wrap the fetch stays non-dependent.
   uint8_t forceOpaqueMask = 0;
-  uint16_t copyModeBits = 0;
+  uint32_t copyModeBits = 0;
 #if defined(AURORA_VITA_RENDERER_GXM)
   // The native shader bakes EFB copy sampling (RGB565 opacity, R4/A8
   // expansion) per unit instead of branching on uniforms in every fetch.
   for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
     if (!(textureMask & (1u << slot))) continue;
     if (bindings[slot].forceOpaque) forceOpaqueMask |= static_cast<uint8_t>(1u << slot);
-    copyModeBits |= static_cast<uint16_t>(
-        gfx::efb_copy_sample_mode(bindings[slot].sampleFormat) << (2u * slot));
+    copyModeBits |= static_cast<uint32_t>(
+        gfx::efb_copy_sample_mode(bindings[slot].sampleFormat) << (4u * slot));
   }
 #endif
   if (translatedPipeline_.nativeTextureWrapMask != nativeWrapMask ||
@@ -814,7 +819,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const bool rebuildVertex=!translatedVertexStateValid_ || !translatedCacheHit || broadDirty ||
       translatedVertexRevision_!=revisions.vertex ||
       (translatedVertexStateLightweight_&&!fixedCandidate&&!fixedStreamCandidate);
-  const bool rebuildFragment=!translatedVertexStateValid_ || !translatedCacheHit || broadDirty ||
+  const bool rebuildFragment=!translatedVertexStateValid_ || broadDirty ||
       translatedFragmentRevision_!=revisions.fragment;
   if(rebuildVertex||rebuildFragment){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
@@ -824,6 +829,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(rebuildFragment)telemetry_->count_fragment_translation();
     }
     ++vertexStateVersion_;
+    if(rebuildFragment) fragmentUniformVersion_=revisions.fragment;
     if(rebuildVertex){
       if(fixedCandidate||fixedStreamCandidate){
         translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_,rebuildFragment);
@@ -1086,7 +1092,10 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     packet.pipelineKey=resolvedPipelineKey;packet.vertices=gpuGeometry->vertices;packet.indices=gpuGeometry->indices;
     packet.vertexCount=gpuGeometry->vertexCount;packet.indexCount=gpuGeometry->indexCount;
     packet.firstVertex=0;packet.instanceCount=1;packet.absoluteVertexIndices=false;
-    stream_.share_draw_state(packet,uniforms,bindings,vertexStateVersion_);
+    stream_.share_draw_state(packet,uniforms,bindings,vertexStateVersion_,resolvedTextureBindingVersion_);
+    packet.fragmentUniformRevision=fragmentUniformVersion_;
+    packet.vertexUniformRevision=translatedVertexRevision_;
+    packet.textureBindingRevision=resolvedTextureBindingVersion_;
     packet.viewport=translate_viewport();packet.scissor=translate_scissor();
     packet.fixedVertexUniforms=&shared;
     enqueued=true;
@@ -1096,7 +1105,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       return gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
           translate_viewport(),translate_scissor(),bindings,&error,vertexStateVersion_,
           streamFixed?&buildFixedUniforms():nullptr,
-          localDrawBatching_&&renderer_->uses_local_stream_indices()&&!gfx::gxm_disabled(gfx::GxmDisableLocalBatch)?arena_.get():nullptr,telemetry_);
+          localDrawBatching_&&renderer_->uses_local_stream_indices()&&!gfx::gxm_disabled(gfx::GxmDisableLocalBatch)?arena_.get():nullptr,
+          telemetry_,fragmentUniformVersion_,translatedVertexRevision_,resolvedTextureBindingVersion_);
     };
 #if defined(AURORA_VITA_RENDERER_GXM) && AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT
     if(localDrawBatching_&&!gfx::gxm_disabled(gfx::GxmDisableLocalBatch))enqueued=queueStreamed();
@@ -1123,6 +1133,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
           draw.vertices=streamed.vertices;draw.indices=streamed.indices;
           draw.vertexCount=streamed.vertexCount;draw.indexCount=streamed.indexCount;
           draw.uniformRevision=vertexStateVersion_;
+          draw.fragmentUniformRevision=fragmentUniformVersion_;
+          draw.vertexUniformRevision=translatedVertexRevision_;
+          draw.textureBindingRevision=resolvedTextureBindingVersion_;
           draw.viewport=translate_viewport();draw.scissor=translate_scissor();
           draw.fixedVertexUniforms=streamFixed?&buildFixedUniforms():nullptr;
         };

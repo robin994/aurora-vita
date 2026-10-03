@@ -150,6 +150,12 @@ void shader_operations() {
     REQUIRE(copy.fragment.find("raw_tex.a=1.0;") != std::string::npos);
     d.textureCopyModeBits = 1u;
     REQUIRE(gxm::build_tev_cg(d).fragment.find("floor(raw_tex.r*16.0)/15.0") != std::string::npos);
+    d.textureCopyModeBits = 3u;
+    REQUIRE(gxm::build_tev_cg(d).fragment.find(".257*raw_tex.r") != std::string::npos);
+    d.textureCopyModeBits = 5u;
+    REQUIRE(gxm::build_tev_cg(d).fragment.find("float gx_a=min(floor(raw_tex.a*16.0)/15.0") != std::string::npos);
+    d.textureCopyModeBits = 12u;
+    REQUIRE(gxm::build_tev_cg(d).fragment.find("float4(raw_tex.r,raw_tex.r,raw_tex.r,raw_tex.g)") != std::string::npos);
   }
   for (unsigned av = 0; av < 2; ++av) for (unsigned bv = 0; bv < 2; ++bv)
     for (unsigned op = 0; op < 4; ++op) {
@@ -511,6 +517,17 @@ void native_extended_contract() {
   REQUIRE(efb_copy_sample_mode(EfbCopyFormat::Passthrough)==0);
   REQUIRE(efb_copy_sample_mode(EfbCopyFormat::R4)==1);
   REQUIRE(efb_copy_sample_mode(EfbCopyFormat::A8)==2);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::I4)==3);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::I8)==4);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::IA4)==5);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::IA8)==6);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::RA4)==7);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::RA8)==8);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::R8)==9);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::G8)==10);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::B8)==11);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::RG8)==12);
+  REQUIRE(efb_copy_sample_mode(EfbCopyFormat::GB8)==13);
 
   const char* cg="float4 main(float4 p:POSITION):POSITION{return p;}";
   const auto vh=gxm::gxm_program_source_hash(cg,gxm::ProgramStage::Vertex);

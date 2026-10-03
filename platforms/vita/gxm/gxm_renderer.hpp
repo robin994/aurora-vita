@@ -91,7 +91,9 @@ public:
   bool bind_pipeline(uint64_t key,const gfx::GpuDrawUniforms& uniforms,const gfx::Scissor& scissor={},
                      const gfx::FixedVertexUniforms* fixedVertex=nullptr,
                      const std::array<gfx::TextureBinding,gfx::MaxTextures>* textures=nullptr,
-                     uint64_t uniformRevision=0);
+                     uint64_t vertexUniformRevision=0,
+                     uint64_t fragmentUniformRevision=0,
+                     uint64_t textureBindingRevision=0);
   bool bind_texture(gfx::Handle handle,unsigned unit,const gfx::SamplerDesc& sampler,
                     bool requireNativeWrap=false);
   bool end_frame(bool present = true);

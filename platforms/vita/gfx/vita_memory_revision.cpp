@@ -10,6 +10,21 @@ constexpr uintptr_t PageBytes=64u*1024u;
 std::mutex g_mutex;
 FlatHashMap<uintptr_t,uint64_t> g_pages;
 std::atomic<uint64_t> g_epoch{1};
+
+uint64_t range_revision_locked(const void* address,size_t bytes) noexcept {
+  if(!address||!bytes)return 0;
+  const uintptr_t start=reinterpret_cast<uintptr_t>(address);
+  const uintptr_t last=bytes-1>UINTPTR_MAX-start?UINTPTR_MAX:start+bytes-1;
+  const uintptr_t firstPage=start&~(PageBytes-1u);
+  const uintptr_t lastPage=last&~(PageBytes-1u);
+  uint64_t newest=0;
+  for(uintptr_t page=firstPage;;page+=PageBytes) {
+    const auto it=g_pages.find(page);
+    if(it!=g_pages.end())newest=std::max(newest,it->second);
+    if(page==lastPage||page>UINTPTR_MAX-PageBytes)break;
+  }
+  return newest;
+}
 }
 
 void note_memory_write(const void* address,size_t bytes) noexcept {
@@ -35,19 +50,18 @@ uint64_t memory_write_epoch() noexcept {
 }
 
 uint64_t memory_range_revision(const void* address,size_t bytes) noexcept {
-  if(!address||!bytes)return 0;
-  const uintptr_t start=reinterpret_cast<uintptr_t>(address);
-  const uintptr_t last=bytes-1>UINTPTR_MAX-start?UINTPTR_MAX:start+bytes-1;
-  const uintptr_t firstPage=start&~(PageBytes-1u);
-  const uintptr_t lastPage=last&~(PageBytes-1u);
-  uint64_t newest=0;
   std::lock_guard<std::mutex> lock(g_mutex);
-  for(uintptr_t page=firstPage;;page+=PageBytes) {
-    const auto it=g_pages.find(page);
-    if(it!=g_pages.end())newest=std::max(newest,it->second);
-    if(page==lastPage||page>UINTPTR_MAX-PageBytes)break;
+  return range_revision_locked(address,bytes);
+}
+
+bool memory_ranges_match(const MemoryRevisionCheck* ranges,size_t count) noexcept {
+  if(!ranges||count==0)return true;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  for(size_t i=0;i<count;++i) {
+    const auto& range=ranges[i];
+    if(range_revision_locked(range.address,range.bytes)!=range.revision)return false;
   }
-  return newest;
+  return true;
 }
 
 } // namespace aurora::vita::gfx

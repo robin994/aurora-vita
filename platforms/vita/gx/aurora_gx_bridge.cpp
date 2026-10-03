@@ -200,7 +200,7 @@ gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noe
 
 bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
                                            gfx::VertexDecodeLayout& layout, uint64_t& key,
-                                           gfx::Telemetry* telemetry) noexcept {
+                                           gfx::Telemetry* telemetry,bool rebuildLayout) noexcept {
   // A byte-exact memo of these inputs was measured on hardware to cost more
   // (~21 us per lookup for ~2.5 KiB of hash/compare/copy) than it saved, so
   // translate directly from one ShaderConfig snapshot.
@@ -213,7 +213,7 @@ bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::
   pc.dstAlpha=g.dstAlpha;pc.depthCompare=g.depthCompare;pc.depthUpdate=g.depthUpdate;
   pc.colorUpdate=g.colorUpdate;pc.alphaUpdate=g.alphaUpdate;
   pipeline=translate_pipeline(pc);
-  {
+  if(rebuildLayout) {
     // The vertex layout does not depend on the line mode used for the pipeline.
     gfx::ScopedTelemetryPhase phase(telemetry,gfx::TelemetryPhase::StateLayout);
     layout=translate_vertex_layout(pc.shaderConfig);

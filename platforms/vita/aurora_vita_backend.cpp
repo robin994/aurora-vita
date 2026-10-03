@@ -185,7 +185,7 @@ void emit_periodic_diagnostics() noexcept {
       "fifo_bp_us=%llu fifo_bp=%u fifo_cp_us=%llu fifo_cp=%u fifo_xf_us=%llu fifo_xf=%u "
       "fifo_indx_us=%llu fifo_indx=%u fifo_calldl_us=%llu fifo_calldl=%u "
       "fifo_draw_us=%llu fifo_draw=%u fifo_aurora_us=%llu fifo_aurora=%u fifo_other_us=%llu fifo_other=%u "
-      "dl_calls=%u dl_bytes=%llu dl_cdram_bytes=%llu dl_copy_us=%llu "
+      "dl_calls=%u dl_bytes=%llu dl_cdram_bytes=%llu dl_copy_us=%llu dl_pinned_calls=%u dl_pinned_bytes=%llu "
       "gx_worker=%u game_wait_slot_us=%llu game_wait_done_us=%llu worker_frame_us=%llu",
       static_cast<unsigned long long>(g_telemetry.frame().frame),
       g_config.width,g_config.height,
@@ -218,6 +218,7 @@ void emit_periodic_diagnostics() noexcept {
       g_lastFifoProfile.dlCalls,static_cast<unsigned long long>(g_lastFifoProfile.dlBytes),
       static_cast<unsigned long long>(g_lastFifoProfile.dlCdramBytes),
       static_cast<unsigned long long>(g_lastFifoProfile.dlCopyUs),
+      g_lastFifoProfile.dlPinnedCalls,static_cast<unsigned long long>(g_lastFifoProfile.dlPinnedBytes),
       gx_worker_active()?1u:0u,static_cast<unsigned long long>(g_lastProducerWaitUs),
       static_cast<unsigned long long>(g_lastConsumerWaitUs),static_cast<unsigned long long>(g_lastWorkerFrameUs));
   const std::string invalidationLine="[AURORA-VITA][INVALIDATE] frame="+std::to_string(g_telemetry.frame().frame)+g_lastInvalidations;

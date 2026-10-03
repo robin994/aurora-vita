@@ -1589,6 +1589,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
   // Matrix index A (0x30)
   case 0x30: {
     const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
+    const u32 oldPnMtx = g_gxState.currentPnMtx;
     std::array<GXTexMtx, 4> oldTexMtx{};
     for (u32 i = 0; i < 4 && i < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i].mtx;
     g_gxState.currentPnMtx = bp_get(value, 6, 0) / 3;
@@ -1605,7 +1606,8 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
       activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i].mtx;
     if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-    g_gxState.stateDirty = true;
+    if (oldPnMtx != g_gxState.currentPnMtx || snap.changed())
+      g_gxState.mark_dirty(StateDomain::Vertex);
 #else
     mark_pipeline_state_dirty_if(snap.changed());
 #endif
@@ -1629,7 +1631,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
       activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i + 4].mtx;
     if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-    g_gxState.stateDirty = true;
+    if (snap.changed()) g_gxState.mark_dirty(StateDomain::Vertex);
 #else
     mark_pipeline_state_dirty_if(snap.changed());
 #endif
@@ -1834,7 +1836,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           // Channel lighting is evaluated before the normal Vita GXM shader.
           // Keep all channel-program fields out of the expensive base pipeline;
           // the vertex-program generation refreshes CPU and fixed-GPU state.
-          g_gxState.stateDirty = true;
+          if (vertexProgramChanged) g_gxState.mark_dirty(StateDomain::Vertex);
 #else
           mark_pipeline_state_dirty_if(vertexProgramChanged);
 #endif
@@ -1848,6 +1850,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
       case 0x18: {
         // Matrix index A: PnMtx + TexCoord0-3 matrix indices
         const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
+        const u32 oldPnMtx = g_gxState.currentPnMtx;
         std::array<GXTexMtx, 4> oldTexMtx{};
         for (u32 i = 0; i < 4 && i < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i].mtx;
         g_gxState.currentPnMtx = bp_get(val, 6, 0) / 3;
@@ -1861,7 +1864,8 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i].mtx;
         if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-        g_gxState.stateDirty = true;
+        if (oldPnMtx != g_gxState.currentPnMtx || snap.changed())
+          g_gxState.mark_dirty(StateDomain::Vertex);
 #else
         mark_pipeline_state_dirty_if(snap.changed());
 #endif
@@ -1880,7 +1884,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i + 4].mtx;
         if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-        g_gxState.stateDirty = true;
+        if (snap.changed()) g_gxState.mark_dirty(StateDomain::Vertex);
 #else
         mark_pipeline_state_dirty_if(snap.changed());
 #endif
@@ -1960,7 +1964,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
             const bool projectionShapeChanged =
                 (oldType == GX_TG_MTX3x4) != (tcg.type == GX_TG_MTX3x4);
             if (activeChanged && projectionShapeChanged) mark_pipeline_state_dirty();
-            else g_gxState.stateDirty = true;
+            else if (activeChanged) g_gxState.mark_dirty(StateDomain::Vertex);
 #else
             mark_pipeline_state_dirty_if(activeChanged);
 #endif
@@ -1974,7 +1978,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
             const bool activeChanged = tcIdx < g_gxState.numTexGens && snap.changed();
             if (activeChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-            g_gxState.stateDirty = true;
+            if (activeChanged) g_gxState.mark_dirty(StateDomain::Vertex);
 #else
             mark_pipeline_state_dirty_if(activeChanged);
 #endif

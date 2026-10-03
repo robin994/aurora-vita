@@ -3340,9 +3340,11 @@ TEST_F(GXFifoTest, ChanCtrl_LightMaskBumpsVertexProgramGeneration) {
   reset_gx_state();
   decode_fifo(first);
   const auto firstVertexProgramGeneration = g_gxState.vertexProgramStateGeneration;
+  const auto firstVertexRevision = g_gxState.stateRevisions.vertex;
   decode_fifo(second);
 
   EXPECT_NE(firstVertexProgramGeneration, g_gxState.vertexProgramStateGeneration);
+  EXPECT_NE(firstVertexRevision, g_gxState.stateRevisions.vertex);
   EXPECT_TRUE(g_gxState.colorChannelState[GX_COLOR0].lightMask[1]);
   EXPECT_FALSE(g_gxState.colorChannelState[GX_COLOR0].lightMask[0]);
 }
@@ -3576,6 +3578,7 @@ TEST_F(GXFifoTest, MatrixIndexA_DecodesTexMatricesFromCpPacket) {
   g_gxState.tcgs[2].mtx = GX_TEXMTX0;
   g_gxState.tcgs[3].mtx = GX_IDENTITY;
   const auto beforeVertexProgramGeneration = g_gxState.vertexProgramStateGeneration;
+  const auto beforeVertexRevision = g_gxState.stateRevisions.vertex;
   decode_fifo(bytes);
 
   EXPECT_EQ(g_gxState.currentPnMtx, 3u);
@@ -3584,6 +3587,7 @@ TEST_F(GXFifoTest, MatrixIndexA_DecodesTexMatricesFromCpPacket) {
   EXPECT_EQ(g_gxState.tcgs[2].mtx, GX_IDENTITY);
   EXPECT_EQ(g_gxState.tcgs[3].mtx, GX_TEXMTX7);
   EXPECT_NE(beforeVertexProgramGeneration, g_gxState.vertexProgramStateGeneration);
+  EXPECT_NE(beforeVertexRevision, g_gxState.stateRevisions.vertex);
 }
 
 TEST_F(GXFifoTest, MatrixIndexB_DecodesTexMatricesFromCpPacket) {
@@ -3597,6 +3601,7 @@ TEST_F(GXFifoTest, MatrixIndexB_DecodesTexMatricesFromCpPacket) {
   g_gxState.tcgs[6].mtx = GX_TEXMTX0;
   g_gxState.tcgs[7].mtx = GX_IDENTITY;
   const auto beforeVertexProgramGeneration = g_gxState.vertexProgramStateGeneration;
+  const auto beforeVertexRevision = g_gxState.stateRevisions.vertex;
   decode_fifo(bytes);
 
   EXPECT_EQ(g_gxState.tcgs[4].mtx, GX_TEXMTX4);
@@ -3604,6 +3609,7 @@ TEST_F(GXFifoTest, MatrixIndexB_DecodesTexMatricesFromCpPacket) {
   EXPECT_EQ(g_gxState.tcgs[6].mtx, GX_IDENTITY);
   EXPECT_EQ(g_gxState.tcgs[7].mtx, GX_TEXMTX9);
   EXPECT_NE(beforeVertexProgramGeneration, g_gxState.vertexProgramStateGeneration);
+  EXPECT_NE(beforeVertexRevision, g_gxState.stateRevisions.vertex);
 }
 
 TEST_F(GXFifoTest, MatrixIndexB_InactiveTexgensDoNotBumpVertexProgramGeneration) {

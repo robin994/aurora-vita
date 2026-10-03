@@ -117,6 +117,9 @@ bool enqueue_streamed_draw(CommandStream& stream,const StreamedDraw& prepared,ui
                            const std::array<TextureBinding,MaxTextures>& textures={},
                            PrepareDrawError* error=nullptr,uint64_t uniformRevision=0,
                            const FixedVertexUniforms* fixedVertexUniforms=nullptr,
-                           StreamingArena* batchArena=nullptr,Telemetry* telemetry=nullptr) noexcept;
+                           StreamingArena* batchArena=nullptr,Telemetry* telemetry=nullptr,
+                           uint64_t fragmentUniformRevision=0,
+                           uint64_t vertexUniformRevision=0,
+                           uint64_t textureBindingRevision=0) noexcept;
 
 } // namespace aurora::vita::gfx

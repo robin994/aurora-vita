@@ -345,8 +345,10 @@ Handle EfbManager::capture_from_bound(Handle existing,int32_t x,int32_t y,uint32
   const int64_t top=int64_t(height)-y-sh;
   if(top<0 || top>INT32_MAX || sw>INT32_MAX || sh>INT32_MAX)return 0;
   const Scissor rect{x,int32_t(top),int32_t(sw),int32_t(sh)};
-  const bool nativeTransfer=(format==EfbCopyFormat::Passthrough || format==EfbCopyFormat::RGB565) &&
-      ((sw==dw && sh==dh) || (sw==dw*2u && sh==dh*2u));
+  // Passthrough storage can stay entirely on the GPU for arbitrary scaling:
+  // Renderer::copy_current_to_target selects a direct transfer for 1:1 copies
+  // and a textured draw for scaled/cropped/flipped copies.
+  const bool nativeTransfer=format==EfbCopyFormat::Passthrough || format==EfbCopyFormat::RGB565;
   if(nativeTransfer) {
     Handle target=0;
     const auto existingIt=map_.find(existing);

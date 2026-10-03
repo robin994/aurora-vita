@@ -1,5 +1,6 @@
 #pragma once
 #include "vita_draw_adapter.hpp"
+#include "vita_cpu_workers.hpp"
 #include "vita_fixed_vertex.hpp"
 #include "vita_byte_compare.hpp"
 #include "vita_hash_map.hpp"
@@ -120,18 +121,21 @@ public:
         }
         const uint64_t epoch=memory_write_epoch();
         if(epoch!=e.validationEpoch) {
-          if(memory_range_revision(stableSource,bytes)!=e.stableSourceRevision) {
-            e.volatileSource=true;
-            return lookup_fallback();
-          }
+          std::array<MemoryRevisionCheck,MaxVertexAttributes+1> checks{};
+          size_t checkCount=0;
+          checks[checkCount++]={stableSource,bytes,e.stableSourceRevision};
           for(const auto& s:e.snapshots) {
-            const bool changed=s.revisionTracked?
-              memory_range_revision(s.source,s.size)!=s.revision:
-              !byte_spans_equal(s.source,s.bytes.data(),s.bytes.size());
-            if(changed) {
+            if(s.revisionTracked) {
+              if(checkCount>=checks.size()){e.volatileSource=true;return lookup_fallback();}
+              checks[checkCount++]={s.source,s.size,s.revision};
+            } else if(!byte_spans_equal(s.source,s.bytes.data(),s.bytes.size())) {
               e.volatileSource=true;
               return lookup_fallback();
             }
+          }
+          if(!memory_ranges_match(checks.data(),checkCount)) {
+            e.volatileSource=true;
+            return lookup_fallback();
           }
           e.validationEpoch=epoch;
         }
@@ -266,8 +270,8 @@ public:
          vertexBytes+indexBytes>budget_-committed-storedBytes)return lookup_fallback();
     }
     packed_.resize(vertexBytes);
-    for(size_t i=0;i<scratch_.vertices.size();++i)
-      pack_gpu_vertex_bytes(packed_.data()+i*stride,scratch_.vertices[i],gpuLayout);
+    PackContext pack{packed_.data(),scratch_.vertices.data(),&gpuLayout,stride};
+    if(!cpu_parallel_for_vertex(scratch_.vertices.size(),pack_range,&pack))return lookup_fallback();
     const Handle vb=renderer_.create_vertex_buffer(packed_.data(),vertexBytes,false);
     if(!vb)return lookup_fallback();
     const Handle ib=renderer_.create_index_buffer(scratch_.indices.data(),indexBytes,false);
@@ -351,6 +355,19 @@ public:
   }
 
 private:
+  struct PackContext {
+    uint8_t* destination=nullptr;
+    const CanonicalVertex* vertices=nullptr;
+    const VertexLayout* layout=nullptr;
+    size_t stride=0;
+  };
+  static bool pack_range(void* opaque,size_t begin,size_t end,uint32_t) noexcept {
+    auto& ctx=*static_cast<PackContext*>(opaque);
+    if(!ctx.destination||!ctx.vertices||!ctx.layout||!ctx.stride)return false;
+    for(size_t i=begin;i<end;++i)
+      pack_gpu_vertex_bytes(ctx.destination+i*ctx.stride,ctx.vertices[i],*ctx.layout);
+    return true;
+  }
   Entry* lookup_fallback() noexcept {
     ++lookupFallbacks_;
     return nullptr;

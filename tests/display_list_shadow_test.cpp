@@ -105,4 +105,49 @@ TEST(DisplayListShadow, LengthChangesBudgetEvictionAndClearPreserveFreshBytes) {
   EXPECT_EQ(cache.get(a.data(), 65), nullptr);
   EXPECT_EQ(cache.bytes(), 32u);
 }
+
+TEST(DisplayListShadow, PinnedStorageSurvivesRefreshAndClear) {
+  std::array<uint8_t, 32> list{{0x90, 0, 1, 0, 2}};
+  note_memory_write(list.data(), list.size());
+  DisplayListShadowCache cache;
+  const auto pinned = cache.pin(list.data(), list.size());
+  ASSERT_NE(pinned, nullptr);
+  const auto original = *pinned;
+  list[3] = 7;
+  note_memory_write(list.data() + 3, 1);
+  const auto refreshed = cache.pin(list.data(), list.size());
+  ASSERT_NE(refreshed, nullptr);
+  EXPECT_NE(refreshed.get(), pinned.get());
+  EXPECT_EQ((*refreshed)[3], 7);
+  EXPECT_EQ(*pinned, original);
+  cache.clear();
+  EXPECT_EQ(*pinned, original);
+}
+
+TEST(DisplayListShadow, RevisionOnlyModeReusesUnchangedRevision) {
+  std::array<uint8_t, 32> list{{0x90, 0, 1, 0, 2}};
+  note_memory_write(list.data(), list.size());
+  DisplayListShadowCache cache(1024, false);
+  const auto pinned = cache.pin(list.data(), list.size());
+  ASSERT_NE(pinned, nullptr);
+  EXPECT_EQ(cache.pin(list.data(), list.size()).get(), pinned.get());
+  EXPECT_EQ(cache.untracked_writes(), 0u);
+}
+
+TEST(DisplayListShadow, BatchedRevisionChecksObserveTrackedWrites) {
+  std::array<uint8_t, 32> first{}, second{};
+  note_memory_write(first.data(), first.size());
+  note_memory_write(second.data(), second.size());
+  std::array<MemoryRevisionCheck, 2> checks{{
+      {first.data(), first.size(), memory_range_revision(first.data(), first.size())},
+      {second.data(), second.size(), memory_range_revision(second.data(), second.size())},
+  }};
+  EXPECT_TRUE(memory_ranges_match(checks.data(), checks.size()));
+  second[7] = 1;
+  note_memory_write(second.data() + 7, 1);
+  EXPECT_FALSE(memory_ranges_match(checks.data(), checks.size()));
+  checks[0].revision = memory_range_revision(first.data(), first.size());
+  checks[1].revision = memory_range_revision(second.data(), second.size());
+  EXPECT_TRUE(memory_ranges_match(checks.data(), checks.size()));
+}
 } // namespace

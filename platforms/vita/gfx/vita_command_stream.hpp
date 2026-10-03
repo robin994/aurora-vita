@@ -72,18 +72,23 @@ public:
     }
   }
   void share_draw_state(DrawPacket& packet,const DrawUniforms& uniforms,
-                        const std::array<TextureBinding,MaxTextures>& textures,uint64_t revision){
+                        const std::array<TextureBinding,MaxTextures>& textures,uint64_t revision,
+                        uint64_t textureRevision=0){
     if(gxm_disabled(GxmDisableSharedState)||gxm_disabled(GxmDisableUniformRevision)){
       ++stateCount_;packet.uniforms=uniforms;packet.textures=textures;packet.sharedState=nullptr;
-      packet.uniformRevision=revision;lastState_=&packet;lastStateRevision_=revision;return;
+      packet.uniformRevision=revision;packet.textureBindingRevision=textureRevision;
+      lastState_=&packet;lastStateRevision_=revision;lastTextureRevision_=textureRevision;return;
     }
     const bool sameUniforms=lastState_&&((revision&&revision==lastStateRevision_)||
         (!revision&&!std::memcmp(&lastState_->uniforms,&uniforms,sizeof(GpuDrawUniforms))));
-    if(!sameUniforms||std::memcmp(lastState_->textures.data(),textures.data(),sizeof(textures))){
+    const bool sameTextures=lastState_&&((textureRevision&&textureRevision==lastTextureRevision_)||
+        (!textureRevision&&!std::memcmp(lastState_->textures.data(),textures.data(),sizeof(textures))));
+    if(!sameUniforms||!sameTextures){
       ++stateCount_;packet.uniforms=uniforms;packet.textures=textures;
       packet.sharedState=nullptr;lastState_=&packet;
     }else packet.sharedState=lastState_;
-    packet.uniformRevision=revision;lastStateRevision_=revision;
+    packet.uniformRevision=revision;packet.textureBindingRevision=textureRevision;
+    lastStateRevision_=revision;lastTextureRevision_=textureRevision;
   }
   size_t state_snapshot_count() const noexcept {return stateCount_;}
   void set_render_target(Handle h){commands_.emplace_back();auto&x=commands_.back();x.type=CommandType::SetRenderTarget;x.target.target=h;}
@@ -104,12 +109,14 @@ private:
     commands_.swap(other.commands_);draws_.swap(other.draws_);
     std::swap(stateCount_,other.stateCount_);std::swap(drawCount_,other.drawCount_);
     std::swap(lastState_,other.lastState_);std::swap(lastStateRevision_,other.lastStateRevision_);
+    std::swap(lastTextureRevision_,other.lastTextureRevision_);
   }
   std::vector<Command> commands_;
   std::deque<DrawPacket> draws_;
   size_t stateCount_=0;
   const DrawPacket* lastState_=nullptr;
   uint64_t lastStateRevision_=0;
+  uint64_t lastTextureRevision_=0;
   uint32_t drawCount_=0;
 };
 } // namespace aurora::vita::gfx

@@ -348,6 +348,7 @@ struct Renderer::Impl {
     std::array<std::array<float,4>,MaxTextures> textureTransform{};
     uint64_t pipelineKey = 0;
     uint64_t uniformRevision = 0;
+    uint64_t textureBindingRevision = 0;
     uint8_t usedTextureCount = 0;
     bool valid = false;
   };
@@ -355,8 +356,10 @@ struct Renderer::Impl {
     std::array<float,16> mvp{};
     FixedVertexUniforms fixed{};
     uint64_t fixedRevision = 0;
+    uint64_t uniformRevision = 0;
     uint64_t pipelineKey = 0;
     bool fixedValid = false;
+    bool fixedBytesValid = false;
     bool valid = false;
   };
   Config config{};
@@ -1198,7 +1201,9 @@ bool Renderer::bind_texture(Handle handle,unsigned unit,const SamplerDesc& s,boo
 bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor& scissor,
                              const FixedVertexUniforms* fixedVertex,
                              const std::array<TextureBinding,MaxTextures>* textures,
-                             uint64_t uniformRevision) {
+                             uint64_t vertexUniformRevision,
+                             uint64_t fragmentUniformRevision,
+                             uint64_t textureBindingRevision) {
   auto& d=*impl_;
   Impl::Pipeline* resolved=nullptr;
   if(d.resolvedPipelineHint&&d.resolvedPipelineHintKey==key) resolved=d.resolvedPipelineHint;
@@ -1245,12 +1250,16 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   void* vertex=nullptr;
   const bool needsVertexUniforms=p.mvp || (pipeline.fixedVertexOnGpu && fixedVertex);
   const auto& cachedVertex=d.vertexUniformState;
-  const bool sameMvp=!p.mvp||std::memcmp(cachedVertex.mvp.data(),u.mvp.data(),sizeof(u.mvp))==0;
-  // Revisioned snapshots are immutable: equal revision means equal contents.
+  const bool sameVertexRevision=vertexUniformRevision!=0&&cachedVertex.uniformRevision==vertexUniformRevision&&
+      !gxm_disabled(GxmDisableUniformRevision);
+  const bool sameMvp=!p.mvp||sameVertexRevision||std::memcmp(cachedVertex.mvp.data(),u.mvp.data(),sizeof(u.mvp))==0;
+  // The GX vertex-domain revision is the primary identity. Fixed-snapshot
+  // revision/bytes remain only as the zero-revision and bisection fallback.
   const bool sameFixed=!pipeline.fixedVertexOnGpu||
       (fixedVertex&&cachedVertex.fixedValid&&
-       (fixedVertex->revision&&!gxm_disabled(GxmDisableFixedSnapshot)?fixedVertex->revision==cachedVertex.fixedRevision:
-        std::memcmp(&cachedVertex.fixed,fixedVertex,sizeof(*fixedVertex))==0));
+       (sameVertexRevision||
+        (fixedVertex->revision&&!gxm_disabled(GxmDisableFixedSnapshot)&&fixedVertex->revision==cachedVertex.fixedRevision)||
+        (cachedVertex.fixedBytesValid&&std::memcmp(&cachedVertex.fixed,fixedVertex,sizeof(*fixedVertex))==0)));
   const bool reuseVertex=needsVertexUniforms&&cachedVertex.valid&&cachedVertex.pipelineKey==key&&sameMvp&&sameFixed;
   if(needsVertexUniforms&&!reuseVertex &&
      !d.check(sceGxmReserveVertexDefaultUniformBuffer(d.context,&vertex),"reserve vertex uniforms")) return false;
@@ -1291,7 +1300,12 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
       auto& next=d.vertexUniformState;
       next.mvp=u.mvp;next.pipelineKey=key;next.fixedValid=fixedVertex!=nullptr;
       next.fixedRevision=fixedVertex?fixedVertex->revision:0;
-      if(fixedVertex&&(!fixedVertex->revision||gxm_disabled(GxmDisableFixedSnapshot)))next.fixed=*fixedVertex;
+      next.uniformRevision=vertexUniformRevision;
+      next.fixedBytesValid=false;
+      if(fixedVertex&&(!vertexUniformRevision||gxm_disabled(GxmDisableUniformRevision))&&
+         (!fixedVertex->revision||gxm_disabled(GxmDisableFixedSnapshot))){
+        next.fixed=*fixedVertex;next.fixedBytesValid=true;
+      }
       next.valid=true;
     }
   }
@@ -1318,16 +1332,21 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   };
   const bool sameScissor=!p.clip||(cached.scissor.x==scissor.x&&cached.scissor.y==scissor.y&&
       cached.scissor.width==scissor.width&&cached.scissor.height==scissor.height);
-  const bool sameRevision=uniformRevision!=0&&cached.uniformRevision==uniformRevision&&
+  const bool sameRevision=fragmentUniformRevision!=0&&cached.uniformRevision==fragmentUniformRevision&&
       !gxm_disabled(GxmDisableUniformRevision);
+  const bool sameTextureRevision=textureBindingRevision!=0&&
+      cached.textureBindingRevision==textureBindingRevision&&
+      !gxm_disabled(GxmDisableUniformRevision);
+  const bool sameTextureState=sameTextureRevision||(
+      sameBytes(cached.textureFlags.data(),textureFlags.data(),usedTextureCount*sizeof(textureFlags[0]))&&
+      sameBytes(cached.textureTransform.data(),textureTransform.data(),usedTextureCount*sizeof(textureTransform[0])));
   // The bisection bit must disable the whole optimization, not only the
   // revision shortcut. Goal/scene transitions are exactly where a stale
   // default-uniform reservation would be most damaging on hardware.
   const bool reuseFragment=!gxm_disabled(GxmDisableUniformRevision)&&
       cached.valid&&cached.pipelineKey==key&&
       cached.usedTextureCount==usedTextureCount&&sameScissor&&
-      sameBytes(cached.textureFlags.data(),textureFlags.data(),usedTextureCount*sizeof(textureFlags[0]))&&
-      sameBytes(cached.textureTransform.data(),textureTransform.data(),usedTextureCount*sizeof(textureTransform[0]))&&
+      sameTextureState&&
       (sameRevision||(
       sameBytes(cached.uniforms.kcolor.data(),u.kcolor.data(),sizeof(u.kcolor))&&
       sameBytes(cached.uniforms.tevreg.data(),u.tevreg.data(),sizeof(u.tevreg))&&
@@ -1400,7 +1419,8 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     auto& next=d.fragmentUniformState;
     next.uniforms=u;next.scissor=scissor;next.textureFlags=textureFlags;next.textureTransform=textureTransform;
     next.pipelineKey=key;next.usedTextureCount=static_cast<uint8_t>(usedTextureCount);next.valid=true;
-    next.uniformRevision=uniformRevision;
+    next.uniformRevision=fragmentUniformRevision;
+    next.textureBindingRevision=textureBindingRevision;
   } else if(d.diagnosticsEnabled)++d.stats.nativeFragmentUniformReuses;
   p.inFlight=true;
   return true;
@@ -1469,7 +1489,8 @@ bool Renderer::draw(const DrawSubmissionView& packet) {
   uint64_t profileTick = d.profileDraws ? diagnostic_now_us() : 0;
   d.resolvedPipelineHint=active;d.resolvedPipelineHintKey=activeKey;
   const bool pipelineBound=bind_pipeline(activeKey,packet.gpu_uniforms(),packet.scissor,packet.fixedVertexUniforms,&packet.texture_bindings(),
-                                         packet.uniformRevision);
+                                         packet.vertexUniformRevision,packet.fragmentUniformRevision,
+                                         packet.textureBindingRevision);
   d.resolvedPipelineHint=nullptr;d.resolvedPipelineHintKey=0;
   if(!pipelineBound) return false;
   if(d.profileDraws) { const auto now=diagnostic_now_us(); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }
@@ -1829,12 +1850,10 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
   const uint32_t sourceWidth=d.width(),sourceHeight=d.height();
   const bool sameSize=uint32_t(source.width)==destination.width &&
       uint32_t(source.height)==destination.height;
-  const bool halfScale=uint32_t(source.width)==destination.width*2u &&
-      uint32_t(source.height)==destination.height*2u;
+  const bool scaled=!sameSize;
   if(uint64_t(source.x)+uint64_t(source.width)>sourceWidth ||
      uint64_t(source.y)+uint64_t(source.height)>sourceHeight ||
-     (format!=EfbCopyFormat::Passthrough && format!=EfbCopyFormat::RGB565) ||
-     (!sameSize && !halfScale))
+     (format!=EfbCopyFormat::Passthrough && format!=EfbCopyFormat::RGB565))
     return d.fail("unsupported native EFB GPU copy");
 
   const Handle originalTarget=d.boundTarget;
@@ -1842,7 +1861,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
   // 960x544 -> 480x272 GXCopyTex copies, can return SCE_GXM transfer errors and
   // serialize End Frame. The draw path below already performs the same 2x
   // reduction with linear sampling while preserving crop/flip/copy semantics.
-  const bool gpuFixup=halfScale||flipX||flipY||format==EfbCopyFormat::RGB565;
+  const bool gpuFixup=scaled||flipX||flipY||format==EfbCopyFormat::RGB565;
   if(gpuFixup && handle==originalTarget)
     return d.fail("native EFB feedback copy requires cached CPU fallback");
 
@@ -1898,7 +1917,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     auto& binding=packet.textures[0];
     binding.texture=sourceTexture;binding.source=TextureSource::Efb;
     binding.sampler.wrapS=binding.sampler.wrapT=WrapMode::Clamp;
-    binding.sampler.minFilter=binding.sampler.magFilter=halfScale?Filter::Linear:Filter::Nearest;
+    binding.sampler.minFilter=binding.sampler.magFilter=scaled?Filter::Linear:Filter::Nearest;
     binding.flipX=flipX;binding.flipY=flipY;
     binding.forceOpaque=format==EfbCopyFormat::RGB565;
     binding.uvScaleX=float(source.width)/float(sourceWidth);
