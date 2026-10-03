@@ -33,9 +33,14 @@ SceUID sceKernelCreateSema(const char*,int,int count,int max,void*) {
   const int id=nextId++;semas.emplace(id,std::move(s));return id;
 }
 int sceKernelDeleteSema(SceUID id) {std::lock_guard lock(registryMutex);semas.erase(id);return 0;}
-int sceKernelWaitSema(SceUID id,int count,void*) {
+int sceKernelWaitSema(SceUID id,int count,void* timeout) {
   auto s=semaphore(id);std::unique_lock lock(s->mutex);
-  require(s->cv.wait_for(lock,std::chrono::seconds(3),[&]{return s->count>=count;}),"lost wake/completion (3 s timeout)");
+  if(timeout!=nullptr) {
+    const auto us=*static_cast<unsigned int*>(timeout);
+    if(!s->cv.wait_for(lock,std::chrono::microseconds(us),[&]{return s->count>=count;}))return -1;
+  } else {
+    require(s->cv.wait_for(lock,std::chrono::seconds(3),[&]{return s->count>=count;}),"lost wake/completion (3 s timeout)");
+  }
   s->count-=count;return 0;
 }
 int sceKernelSignalSema(SceUID id,int count) {

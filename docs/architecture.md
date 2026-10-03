@@ -75,15 +75,19 @@ revision tracking, texture invalidation and immutable geometry reuse. Preserve
 TLUT and EFB invalidation as well as explicit source-range updates. When source
 stability or feature eligibility is unavailable, preparation uses the CPU path.
 
-On Vita, `aurora_vita_notify_memory_write()` can also be used as a conservative
-guest-memory reuse barrier for async GX when it is called before a recycled range
-is handed back to code that will overwrite it. While the async consumer is active
-Aurora first retires all earlier FIFO work, then publishes the write revision.
-A notification made only after an arbitrary CPU write cannot retroactively make
-that write race-free, so callers that recycle GPU-visible storage must fence
-before the new owner starts modifying it. The current implementation uses a
-global drain; range-aware retirement may replace it without weakening that
-ordering guarantee.
+On Vita, guest-memory reuse has two explicit phases. A caller that is about to
+overwrite or recycle GPU-visible storage calls `aurora_vita_prepare_memory_write()`;
+while the async consumer is active this conservatively retires earlier FIFO work.
+After bytes have changed, `aurora_vita_notify_memory_write()` publishes the new
+revision without fencing. Keeping these operations separate is important because
+GameCube cache-store/flush calls also occur on audio and other pthreads that have
+no relationship to GX. The current prepare operation uses a global drain;
+range-aware retirement may replace it without weakening the ordering guarantee.
+
+GX serial waits use the monotonically increasing completion counter as their
+authority. The wake semaphore is only a hint: waits periodically re-check the
+counter so multiple producer-side waiters cannot deadlock by competing for one
+binary semaphore token.
 
 Async GX also treats `end_frame()` as a producer/consumer lifetime boundary.
 FIFO decode and rendering may overlap the game thread while a frame is being

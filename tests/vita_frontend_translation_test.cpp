@@ -13,6 +13,7 @@
 #include <cstring>
 
 extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes) noexcept;
+extern "C" void aurora_vita_prepare_memory_write(const void* address,size_t bytes) noexcept;
 
 namespace {
 using namespace aurora::vita;
@@ -195,7 +196,7 @@ void completed_frame_does_not_fence() {
   shutdown();CHECK(!completed_memory_snapshot().completedFrame);
 }
 
-void guest_memory_reuse_fences_async_gx() {
+void guest_memory_prepare_fences_async_gx() {
   BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
   config.log_level=RuntimeLogLevel::Silent;
   CHECK(initialize(config));
@@ -214,7 +215,7 @@ void guest_memory_reuse_fences_async_gx() {
 
   std::array<uint8_t,64> guest{};
   std::thread writer([&]{
-    aurora_vita_notify_memory_write(guest.data(),guest.size());
+    aurora_vita_prepare_memory_write(guest.data(),guest.size());
     writeReturned.store(true,std::memory_order_release);
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -222,6 +223,59 @@ void guest_memory_reuse_fences_async_gx() {
   release.store(true,std::memory_order_release);
   writer.join();
   CHECK(writeReturned.load(std::memory_order_acquire));
+  shutdown();
+}
+
+void memory_write_notification_does_not_fence_async_gx() {
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));
+  CHECK(aurora::gx::fifo::start_worker());
+
+  struct Blocker {std::atomic<bool>* entered;std::atomic<bool>* release;};
+  std::atomic<bool> entered=false,release=false;
+  Blocker blocker{&entered,&release};
+  aurora::gx::fifo::run_async([](void* opaque){auto args=*static_cast<Blocker*>(opaque);
+    args.entered->store(true,std::memory_order_release);
+    while(!args.release->load(std::memory_order_acquire))std::this_thread::yield();},&blocker,sizeof blocker);
+  const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+  while(!entered.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+  CHECK(entered.load(std::memory_order_acquire));
+
+  std::array<uint8_t,64> guest{};
+  const auto start=std::chrono::steady_clock::now();
+  aurora_vita_notify_memory_write(guest.data(),guest.size());
+  CHECK(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(5));
+  release.store(true,std::memory_order_release);
+  aurora::gx::fifo::wait_idle();
+  shutdown();
+}
+
+void multiple_waiters_recheck_completed_serial() {
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));
+  CHECK(aurora::gx::fifo::start_worker());
+
+  struct Blocker {std::atomic<bool>* entered;std::atomic<bool>* release;};
+  std::atomic<bool> entered=false,release=false;
+  Blocker blocker{&entered,&release};
+  const uint64_t serial=aurora::gx::fifo::run_async([](void* opaque){auto args=*static_cast<Blocker*>(opaque);
+    args.entered->store(true,std::memory_order_release);
+    while(!args.release->load(std::memory_order_acquire))std::this_thread::yield();},&blocker,sizeof blocker);
+  const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+  while(!entered.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+  CHECK(entered.load(std::memory_order_acquire));
+
+  std::atomic<unsigned> waiting=0,finished=0;
+  const auto waiter=[&]{waiting.fetch_add(1,std::memory_order_release);aurora::gx::fifo::wait_marker(serial);finished.fetch_add(1,std::memory_order_release);};
+  std::thread first(waiter),second(waiter);
+  while(waiting.load(std::memory_order_acquire)!=2&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+  CHECK(waiting.load(std::memory_order_acquire)==2);
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  release.store(true,std::memory_order_release);
+  first.join();second.join();
+  CHECK(finished.load(std::memory_order_acquire)==2);
   shutdown();
 }
 
@@ -269,5 +323,5 @@ void async_worker_rejects_direct_display_list_submit() {
   shutdown();
 }
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_reuse_fences_async_gx();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

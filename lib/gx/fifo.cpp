@@ -216,7 +216,12 @@ void wait_serial(uint64_t serial) noexcept {
     if(aurora::vita::runtime_diagnostics_enabled())
       sConsumerWaitUs.fetch_add(aurora::vita::gfx::telemetry_now_us() - t0, std::memory_order_relaxed); } } account{t0};
   while (sVitaWorker.completed.load(std::memory_order_acquire) < serial) {
-    if (sceKernelWaitSema(sVitaWorker.completedSignal, 1, nullptr) < 0) sceKernelDelayThread(100);
+    // completedSignal is intentionally binary. More than one producer-side
+    // waiter can observe the same outstanding serial, so one waiter may consume
+    // the sole wake token. Use a bounded kernel wait and always re-check the
+    // monotonic completion serial instead of sleeping forever on a lost wake.
+    unsigned int timeoutUs = 1000;
+    (void)sceKernelWaitSema(sVitaWorker.completedSignal, 1, &timeoutUs);
   }
 }
 
