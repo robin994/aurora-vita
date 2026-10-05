@@ -164,6 +164,47 @@ void state_transitions() {
   }
   sink.flush();sink.shutdown();renderer.shutdown();
 }
+void fixed_geometry_vertex_program_transitions() {
+  using aurora::gx::StateDomain;
+  auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+  g.proj.m0={1,0,0,0};g.proj.m1={0,1,0,0};g.proj.m2={0,0,1,0};g.proj.m3={0,0,0,1};
+  g.pnMtx[0].pos.m0={1,0,0,0};g.pnMtx[0].pos.m1={0,1,0,0};g.pnMtx[0].pos.m2={0,0,1,0};
+  g.renderViewport={0,0,960,544,0,1};g.logicalViewport=g.renderViewport;
+  g.renderScissor={0,0,960,544};g.logicalScissor=g.renderScissor;
+  g.numChans=1;g.numTevStages=1;g.tevStages[0].channelId=GX_COLOR0A0;
+  g.tevStages[0].colorPass.d=GX_CC_RASC;g.tevStages[0].alphaPass.d=GX_CA_RASA;
+  g.vtxDesc[GX_VA_POS]=GX_DIRECT;g.vtxFmts[0].attrs[GX_VA_POS]={GX_POS_XYZ,GX_F32,0};
+  g.vtxDesc[GX_VA_CLR0]=GX_DIRECT;g.vtxFmts[0].attrs[GX_VA_CLR0]={GX_CLR_RGBA,GX_RGBA8,0};
+  std::array<uint8_t,48> raw{};
+  for(unsigned i=0;i<3;++i){
+    const std::array<float,3> pos{float(i==1),float(i==2),0};
+    for(unsigned j=0;j<3;++j){const auto bits=std::bit_cast<uint32_t>(pos[j]);
+      for(unsigned b=0;b<4;++b)raw[i*16+j*4+b]=uint8_t(bits>>(24-b*8));}
+    raw[i*16+12]=32;raw[i*16+13]=64;raw[i*16+14]=128;raw[i*16+15]=255;
+  }
+  gfx::Renderer renderer;CHECK(renderer.initialize());renderer.begin_frame();
+  gxbridge::DrawSink sink;gxbridge::DrawSinkConfig config{};
+  config.staticGeometryBudget=1024*1024;config.staticGeometryMinVertices=3;
+  CHECK(sink.initialize(renderer,config));sink.begin_frame(0);
+  const auto baseGeneration=g.pipelineStateGeneration;
+  for(unsigned mode=0;mode<8;++mode){
+    // Channel source changes invalidate the vertex program, without changing
+    // the fragment/base pipeline. The GPU input stride must still follow it.
+    g.colorChannelConfig[GX_COLOR0].matSrc=(mode&1)?GX_SRC_VTX:GX_SRC_REG;
+    g.vertexProgramStateGeneration=aurora::gx::next_gx_state_epoch();g.mark_dirty(StateDomain::Vertex);
+    const auto result=sink.submit(GX_TRIANGLES,0,raw.data(),raw.size(),3,nullptr,0,raw.data());
+    CHECK(result.ok);g.stateDirty=false;CHECK(g.pipelineStateGeneration==baseGeneration);
+    const auto* draw=sink.stream().tail_draw();CHECK(draw&&draw->fixedVertexUniforms);
+    if(!draw)continue;
+    const auto* compiled=renderer.pipelines().find(draw->pipelineKey);CHECK(compiled);
+    if(!compiled)continue;
+    const auto expected=gfx::fixed_vertex_gpu_layout(compiled->desc);
+    CHECK(compiled->desc.fixedVertexOnGpu);
+    CHECK(compiled->desc.layout.attributes[0].stride==expected.attributes[0].stride);
+    CHECK(draw->vertices.size==size_t(draw->vertexCount)*expected.attributes[0].stride);
+  }
+  sink.flush();sink.shutdown();renderer.shutdown();
+}
 void completed_frame_does_not_fence() {
   BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
   config.log_level=RuntimeLogLevel::Silent;
@@ -367,5 +408,5 @@ void async_display_list_uses_pinned_segment_without_fifo_copy() {
   shutdown();
 }
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();fixed_geometry_vertex_program_transitions();completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

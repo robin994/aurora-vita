@@ -16,7 +16,27 @@ dump `psp2core-1791191504-GPUCRASH.psp2dmp` contains BIF_INT_STAT `0x90400`
 and BIF_FAULT `0x72e14061` in one of four register columns. The fault page is
 inside an `aurora-gxm` 16 KiB USER allocation. No CPU thread has an exception
 stop reason. The GX thread was in buffer allocation, which does not by itself
-establish the cause of an asynchronous GPU fault. Root cause remains unresolved.
+establish the cause of an asynchronous GPU fault.
+
+Follow-up: `DrawSink::submit` refreshed XF vertex-program state without rebuilding
+the CPU recipe or invalidating the GPU recipe. The transition regression keeps
+the fragment/base pipeline generation unchanged while alternating register and
+vertex material sources: 30,891 checks / 8 failures before, 0 failures after the
+patch. The refresh now rebuilds the CPU recipe and invalidates the GPU recipe so
+its layout and packing follow the current program after primitive flags are set.
+
+The post-fix Strikers SELF is
+`be6d1a0ebe17889181ff1de623c63e1864a81a9df3227be46d83f209ba9d643f`.
+It passed 16/16 host tests, the frontend regression under ASan/UBSan, the full
+Release Vita/VPK build and the GXM-only ELF/map audit (12,686 executable symbols).
+With native candidates active (`gxm_disable=0x8`), it completed 180 diagnostic
+live-play frames, then a diagnostics-OFF run with screenshot at play-frame 60
+and 1,200 sampled live-play frames 600–1799 without a new dump. A second long run
+without screenshot completed 1,200 live-play frames 0–1199 without a new dump.
+The three post-fix sessions contain 2,580 samples. These bounded tests do not prove the original
+fault was caused by this recipe defect: pipeline validation can reject some
+stale layouts and the original dump lacks the offending draw/buffer contents.
+Matched performance comparison and broader device acceptance remain incomplete.
 
 Current implementation limits:
 

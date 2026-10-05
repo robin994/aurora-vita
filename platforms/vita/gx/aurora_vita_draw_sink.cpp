@@ -591,6 +591,11 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if(translatedCacheHit && translatedVertexProgramStateGeneration_ != vertexProgramGeneration) {
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     refresh_current_vertex_program_state(translatedPipeline_);
+    // XF channel/texgen changes can add or remove vertex inputs while leaving
+    // the fragment/base pipeline unchanged. Rebuild both recipes so packing
+    // and the shader attribute layout consume the same vertex-program state.
+    cpuRecipe_=gfx::build_draw_recipe(translatedPipeline_);
+    gpuRecipeValid_=false;
     translatedLit_=false;
     for(const auto& c:translatedPipeline_.colorChannels)translatedLit_=translatedLit_||c.lightingEnabled;
     if(staticGeometry_) {
