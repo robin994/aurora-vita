@@ -7,6 +7,7 @@
 #include "../gfx/vita_memory_budget.hpp"
 #include "../gfx/vita_static_geometry.hpp"
 #include "../gfx/vita_fixed_uniform_pool.hpp"
+#include "../gfx/vita_fixed_vertex.hpp"
 #include "../integration/vita_feature_coverage.hpp"
 #include "../integration/vita_frame_trace.hpp"
 #include <cstddef>
@@ -137,6 +138,7 @@ private:
   gfx::PreparedDraw preparedScratch_{};
   std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
   gfx::FixedUniformPool fixedVertexUniforms_{};
+  gfx::FixedVertexUniformBuilder fixedUniformBuilder_{};
   // Snapshot reuse across consecutive GPU-geometry draws (see submit()).
   gfx::FixedVertexUniforms* lastFixedUniforms_ = nullptr;
   uint64_t vertexStateVersion_ = 0;

@@ -48,6 +48,23 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp)
     target_link_libraries(aurora_vita_backend_contract_test PRIVATE aurora::vita_common)
     add_test(NAME vita_backend_contract COMMAND aurora_vita_backend_contract_test)
+    add_executable(aurora_vita_native_material_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_material_test.cpp
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp)
+    target_link_libraries(aurora_vita_native_material_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_native_material COMMAND aurora_vita_native_material_test)
+    add_executable(aurora_vita_compact_texture_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_compact_texture_test.cpp)
+    target_link_libraries(aurora_vita_compact_texture_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_compact_texture COMMAND aurora_vita_compact_texture_test)
+    add_executable(aurora_vita_geometry_recipe_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_geometry_recipe_test.cpp)
+    target_link_libraries(aurora_vita_geometry_recipe_test PRIVATE aurora::vita_backend)
+    add_test(NAME vita_geometry_recipe COMMAND aurora_vita_geometry_recipe_test)
+    # Explicit benchmark only, excluded from CTest and device FPS claims.
+    add_executable(aurora_vita_fixed_builder_bench
+        ${AURORA_VITA_SOURCE_DIR}/tools/vita_fixed_builder_bench.cpp)
+    target_link_libraries(aurora_vita_fixed_builder_bench PRIVATE aurora::vita_common)
     add_executable(aurora_vita_byte_compare_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_byte_compare_test.cpp)
     target_link_libraries(aurora_vita_byte_compare_test PRIVATE aurora::vita_common)
@@ -56,6 +73,10 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_vertex_pack_test.cpp)
     target_link_libraries(aurora_vita_vertex_pack_test PRIVATE aurora::vita_common)
     add_test(NAME vita_vertex_pack COMMAND aurora_vita_vertex_pack_test)
+    add_executable(aurora_vita_fixed_uniform_builder_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_fixed_uniform_builder_test.cpp)
+    target_link_libraries(aurora_vita_fixed_uniform_builder_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_fixed_uniform_builder COMMAND aurora_vita_fixed_uniform_builder_test)
     add_executable(aurora_vita_regression_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_regression_test.cpp)
     target_link_libraries(aurora_vita_regression_test PRIVATE aurora::vita_backend)

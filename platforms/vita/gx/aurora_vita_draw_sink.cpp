@@ -882,7 +882,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::GeometryCache);
       const auto before=staticGeometry_->hits();
       gpuGeometry=staticGeometry_->get(rawVertices,rawBytes,vertexCount,source,layout,
-          translatedGpuPipeline_,vertexState,telemetry_,stableSource,rawIndices,indexCount);
+          translatedGpuPipeline_,vertexState,telemetry_,stableSource,rawIndices,indexCount,&gpuRecipe_);
 #if defined(__vita__)
       if(debugGpu)AURORA_VITA_LOG_DEBUG("[aurora-vita] gpu_vertex_probe geometry=%p entries=%u\n",static_cast<const void*>(gpuGeometry),static_cast<unsigned>(staticGeometry_->size()));
 #endif
@@ -1072,9 +1072,15 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // snapshot whose inputs had changed). Snapshots live until the next flush.
   const auto buildFixedUniforms=[&]() noexcept -> gfx::FixedVertexUniforms& {
     const bool spriteExpand=translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite;
-    auto& scratch=fixedVertexUniforms_.scratch();
-    gfx::fixed_vertex_uniforms_into(scratch,translatedGpuPipeline_,vertexState);
-    auto& shared=fixedVertexUniforms_.publish(!gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot),spriteExpand);
+    const bool reference=gfx::gxm_disabled(gfx::GxmDisableFixedBuild);
+    const gfx::FixedVertexUniforms* candidate;
+    if(reference) {
+      auto& scratch=fixedVertexUniforms_.scratch();
+      gfx::fixed_vertex_uniforms_into(scratch,translatedGpuPipeline_,vertexState);
+      candidate=&scratch;
+    } else candidate=&fixedUniformBuilder_.build(translatedGpuPipeline_,vertexState);
+    auto& shared=fixedVertexUniforms_.publish_from(*candidate,
+        !gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot),spriteExpand);
     if(spriteExpand){
       shared.primitiveExpand={{
         std::max(expansion.viewportWidth,1.f),std::max(expansion.viewportHeight,1.f),

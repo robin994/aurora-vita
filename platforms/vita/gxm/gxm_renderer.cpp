@@ -233,11 +233,28 @@ struct NativeTextureUpload {
   std::vector<uint8_t> pixels;
   SceGxmTextureFormat format=SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR;
   uint32_t stride=0;
+  uint32_t mipCount=1;
   bool swizzled=false;
   bool valid=false;
 };
 NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
   NativeTextureUpload out;
+#if AURORA_VITA_NATIVE_GX_TEXTURES
+  if(!gxm_disabled(GxmDisableNativeTextureMips)&&(desc.mipCount>1||desc.format==TextureFormat::CMPR)) {
+    auto compact=prepare_compact_texture(desc);
+    if(compact.ok()) {
+      switch(compact.format) {
+      case NativeTextureFormat::Intensity8:out.format=SCE_GXM_TEXTURE_FORMAT_U8_RRRR;break;
+      case NativeTextureFormat::LuminanceAlpha8:out.format=SCE_GXM_TEXTURE_FORMAT_A8L8;break;
+      case NativeTextureFormat::Rgb565:out.format=SCE_GXM_TEXTURE_FORMAT_R5G6B5;break;
+      case NativeTextureFormat::Bc1:out.format=SCE_GXM_TEXTURE_FORMAT_UBC1_ABGR;break;
+      default:return out;
+      }
+      out.pixels=std::move(compact.pixels);out.stride=compact.stride;out.mipCount=compact.mipCount;
+      out.swizzled=compact.swizzled;out.valid=true;return out;
+    }
+  }
+#endif
   if(desc.mipCount>1||desc.generateMipmaps)return out;
   if(desc.format==TextureFormat::CMPR) {
 #if AURORA_VITA_NATIVE_CMPR
@@ -478,7 +495,7 @@ struct Renderer::Impl {
         p.fragmentCode ? unsigned(p.fragmentCode->code.size() * 4u) : 0u,
         static_cast<unsigned long long>(packet.pipelineKey));
     if (diagDumpedKeys.insert(packet.pipelineKey).second) {
-      const auto source = build_tev_cg(p.desc);
+      const auto source = build_material_cg(p.desc,!gxm_disabled(GxmDisableNativeMaterial));
       char name[96];
       std::snprintf(name, sizeof name, "diagnostics/cg_%016llx.txt", static_cast<unsigned long long>(packet.pipelineKey));
       auto cgPath = data_path(name);
@@ -640,7 +657,7 @@ struct Renderer::Impl {
   void create_scissor_free_variant(Pipeline& owner, const std::string& vertexSource) noexcept {
     PipelineDesc desc = owner.desc;
     desc.fragmentScissor = false;
-    const auto source = build_tev_cg(desc);
+    const auto source = build_material_cg(desc,!gxm_disabled(GxmDisableNativeMaterial));
     if (!source.ok() || source.discardAll || source.vertex != vertexSource) return;
     const std::string savedError = error;
     const uint64_t savedBlocked = blockedStageCompiles;
@@ -900,7 +917,7 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   const uint64_t key = pipeline_key(nativeDesc);
   if (d.pipelines.find(key) != d.pipelines.end()) { ++d.stats.pipelineHits; return key; }
   if (d.pipelines.size() >= d.config.maxPipelines) { d.fail("native pipeline budget exhausted"); return 0; }
-  const auto source = build_tev_cg(nativeDesc);
+  auto source = build_material_cg(nativeDesc,!gxm_disabled(GxmDisableNativeMaterial));
   if (!source.ok()) { d.fail(source.error.c_str()); return 0; }
   if (source.discardAll) {
     nativeDesc.depthTest = false;
@@ -926,7 +943,18 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.vertexCode = d.compile_stage(source.vertex, SHARK_VERTEX_SHADER, ProgramStage::Vertex);
   if (!p.vertexCode) return 0;
   p.fragmentCode = d.compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
+  if(!p.fragmentCode && source.nativeMaterial && d.runtimeShaderCompileEnabled) {
+    AURORA_VITA_LOG_INFO("[aurora-gxm] native material compile fallback key=%016llx\n",
+        static_cast<unsigned long long>(key));
+    source=build_tev_cg(nativeDesc);
+    d.error.clear();
+    p.fragmentCode=d.compile_stage(source.fragment,SHARK_FRAGMENT_SHADER,ProgramStage::Fragment);
+  }
   if (!p.fragmentCode) return 0;
+  if(d.diagnosticsEnabled)
+    AURORA_VITA_LOG_INFO("[aurora-gxm] material key=%016llx native=%u stages=%u fragment_bytes=%u\n",
+        static_cast<unsigned long long>(key),source.nativeMaterial?1u:0u,
+        unsigned(nativeDesc.tev.stageCount),unsigned(p.fragmentCode->code.size()*4u));
   const auto* vp = reinterpret_cast<const SceGxmProgram*>(p.vertexCode->code.data());
   const auto* fp = reinterpret_cast<const SceGxmProgram*>(p.fragmentCode->code.data());
   const auto abort = [&]() { d.destroy_pipeline(p); return uint64_t{0}; };
@@ -1041,15 +1069,19 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
     auto owned=std::make_unique<Impl::Texture>();
     auto& texture=*owned;
     texture.width=desc.width;texture.height=desc.height;texture.stride=native.stride;
-    texture.mipCount=1;texture.swizzled=native.swizzled;
+    texture.mipCount=native.mipCount;texture.swizzled=native.swizzled;
     if(d.alloc(texture.memory,native.pixels.size(),MemoryKind::GpuResource)) {
       std::memcpy(texture.memory.data(),native.pixels.data(),native.pixels.size());
       const int nativeResult=native.swizzled?
           sceGxmTextureInitSwizzled(&texture.descriptor,texture.memory.data(),native.format,
-                                    desc.width,desc.height,1):
+                                    desc.width,desc.height,texture.mipCount):
           sceGxmTextureInitLinear(&texture.descriptor,texture.memory.data(),native.format,
-                                  desc.width,desc.height,1);
+                                  desc.width,desc.height,texture.mipCount);
       if(nativeResult>=0) {
+        if(d.diagnosticsEnabled)
+          AURORA_VITA_LOG_INFO("[aurora-gxm] compact_texture fmt=%u size=%ux%u mips=%u bytes=%u bc1=%u\n",
+            unsigned(desc.format),desc.width,desc.height,texture.mipCount,unsigned(native.pixels.size()),
+            native.format==SCE_GXM_TEXTURE_FORMAT_UBC1_ABGR?1u:0u);
         d.resourceBytes+=texture.memory.size();
         const Handle handle=d.nextHandle++;
         d.textures.emplace(handle,std::move(owned));
@@ -1681,7 +1713,7 @@ bool Renderer::update_texture(Handle handle,const TextureDesc& desc,bool storage
   LinearTextureData fallback{};
   if(native.valid && !native.pixels.empty()) {
     pixels=native.pixels.data();pixelBytes=native.pixels.size();stride=native.stride;
-    swizzled=native.swizzled;
+    swizzled=native.swizzled;mipCount=native.mipCount;
   } else {
     swizzled=(desc.width&(desc.width-1u))==0 && (desc.height&(desc.height-1u))==0;
     fallback=swizzled?prepare_swizzled_texture(desc):prepare_linear_texture(desc);
@@ -1689,7 +1721,9 @@ bool Renderer::update_texture(Handle handle,const TextureDesc& desc,bool storage
     pixels=fallback.pixels.data();pixelBytes=fallback.pixels.size();
     stride=((desc.width+7u)&~7u);mipCount=fallback.mipCount;
   }
-  if(swizzled!=texture.swizzled || stride!=texture.stride || mipCount!=texture.mipCount ||
+  const auto format=native.valid?native.format:SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR;
+  if(format!=sceGxmTextureGetFormat(&texture.descriptor)||
+     swizzled!=texture.swizzled || stride!=texture.stride || mipCount!=texture.mipCount ||
      pixelBytes>texture.memory.size()) return false;
 
   if(texture.inFlight && !storageRetired && !finish(FinishReason::TextureMutation)) return false;

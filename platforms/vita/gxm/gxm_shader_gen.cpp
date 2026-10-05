@@ -328,10 +328,52 @@ void emit_fixed_channel_cg(std::ostringstream& vs,const PipelineDesc& d,unsigned
     vs<<"gxq=clamp(("<<mat<<"*clamp(gx_lit,0.0,1.0)).rgb*255.0,0.0,255.0);v_color"<<n<<".rgb=floor(gxq+0.5)/255.0;}\n";
 }
 
-ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
+bool native_material_supported(const PipelineDesc& d) noexcept {
+  if (!d.tev.stageCount || d.tev.stageCount > MaxTevStages || d.tev.indirectStageCount) return false;
+  for (unsigned i=0;i<d.tev.stageCount;++i) {
+    const auto& s=d.tev.stages[i];
+    if (s.indirectEnabled || s.rasterSource==RasterSource::AlphaBump ||
+        s.rasterSource==RasterSource::AlphaBumpN ||
+        (s.colorOp!=TevOp::Add && s.colorOp!=TevOp::Sub) ||
+        (s.alphaOp!=TevOp::Add && s.alphaOp!=TevOp::Sub)) return false;
+  }
+  return true;
+}
+
+namespace {
+// Constant specialization is deliberately restricted to literal 0/1. Signed
+// accumulators, eight-bit wrapping, stage clamps, bias and scale stay explicit.
+std::string material_arithmetic(const std::array<std::string,4>& v, bool alpha,
+                               TevOp op, TevBias bias, TevScale scale) {
+  const auto zero=alpha?"0.0":"float3(0.0)";
+  const auto one=alpha?"1.0":"float3(1.0)";
+  std::string mix;
+  if(v[2]==zero) mix=v[0];
+  else if(v[2]==one) mix=v[1];
+  else if(v[0]==zero) mix="("+v[1]+"*"+v[2]+")";
+  else mix="lerp("+v[0]+","+v[1]+","+v[2]+")";
+  std::string result;
+  if(mix==zero) result=v[3];
+  else if(v[3]==zero) result=op==TevOp::Add?mix:"(-"+mix+")";
+  else result="("+v[3]+(op==TevOp::Add?"+":"-")+mix+")";
+  if(bias!=TevBias::Zero) result="("+result+(bias==TevBias::AddHalf?"+0.5)":"-0.5)");
+  static constexpr const char* scales[]{"1.0","2.0","4.0","0.5"};
+  if(scale!=TevScale::Scale1) result="("+result+"*"+scales[unsigned(scale)]+")";
+  return result;
+}
+std::string material_reg_arg(const std::array<std::string,4>& values,
+                             const std::array<bool,4>& normalized, unsigned regIndex,
+                             bool alpha, bool wrap) {
+  const auto& value=values[regIndex];
+  return wrap&&!normalized[regIndex]?(alpha?"tev_wrap1(":"tev_wrap3(")+value+")":value;
+}
+}
+
+ShaderSources build_material_cg(const gfx::PipelineDesc& d, bool native) {
   ShaderSources out;
   out.error = validate_pipeline(d);
   if (!out.error.empty()) return out;
+  out.nativeMaterial=native&&native_material_supported(d);
   out.textureMask = pipeline_sampled_texture_mask(d);
   out.texcoordMask = pipeline_texcoord_mask(d);
   const uint8_t fixedTexgenMask=d.fixedVertexOnGpu?pipeline_texgen_compute_mask(d):0;
@@ -534,13 +576,21 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   fs << ") : COLOR {\n";
   if (d.fragmentScissor)
     fs << "if(window_position.x<u_clip_rect.x||window_position.y<u_clip_rect.y||window_position.x>=u_clip_rect.z||window_position.y>=u_clip_rect.w) discard;\n";
-  fs << "float4 prev=u_tevreg[0],reg0=u_tevreg[1],reg1=u_tevreg[2],reg2=u_tevreg[3];\n"
-        "float2 prev_ind_uv=float2(0.0);\n";
+  if(!out.nativeMaterial)
+    fs << "float4 prev=u_tevreg[0],reg0=u_tevreg[1],reg1=u_tevreg[2],reg2=u_tevreg[3];\n"
+          "float2 prev_ind_uv=float2(0.0);\n";
   std::array<bool, 4> cn{}, an{};
+  std::array<std::string,4> materialColor,materialAlpha;
+  for(unsigned r=0;r<4;++r) {
+    materialColor[r]="u_tevreg["+std::to_string(r)+"].rgb";
+    materialAlpha[r]="u_tevreg["+std::to_string(r)+"].a";
+  }
   for (unsigned i = 0; i < d.tev.stageCount; ++i) {
     const auto& s = d.tev.stages[i];
+    if(out.nativeMaterial)
+      fs << "float3 material_c" << i << ";float material_a" << i << ";\n";
     fs << "{\nfloat ind_alpha=0.0;\nfloat2 tev_uv="<<coordinate(d,s.texCoord)<<";\n";
-    indirect(fs,d,s);
+    if(!out.nativeMaterial) indirect(fs,d,s);
     fs << "float4 raw_tex=";
     if (tev_stage_uses_texture(s) && s.texture < MaxTextures) {
       const bool nativeWrap=(d.nativeTextureWrapMask&(1u<<s.texture))!=0;
@@ -574,6 +624,27 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     fs << ";\nfloat4 rasc=" << swizzle("raw_ras", d.tev.swapTable[s.rasSwap]) << ";\n";
     const TevColorArg colors[]{s.color.a,s.color.b,s.color.c,s.color.d};
     const TevAlphaArg alphas[]{s.alpha.a,s.alpha.b,s.alpha.c,s.alpha.d};
+    if(out.nativeMaterial) {
+      std::array<std::string,4> c,a;
+      for(unsigned j=0;j<4;++j) {
+        const unsigned cv=unsigned(colors[j]),av=unsigned(alphas[j]);
+        if(cv<8) {
+          const bool isAlpha=(cv&1)!=0;
+          c[j]=material_reg_arg(isAlpha?materialAlpha:materialColor,isAlpha?an:cn,cv/2,isAlpha,j!=3);
+          if(isAlpha)c[j]=splat(c[j]);
+        } else c[j]=color_arg(colors[j],s,cn,an,j!=3);
+        a[j]=av<4?material_reg_arg(materialAlpha,an,av,true,j!=3):alpha_arg(alphas[j],s,an,j!=3);
+      }
+      const std::string cName="material_c"+std::to_string(i),aName="material_a"+std::to_string(i);
+      fs << cName << "=clamp(" << material_arithmetic(c,false,s.colorOp,s.colorBias,s.colorScale)
+         << (s.colorClamp?",0.0,1.0);\n":",-4.0,4.0);\n")
+         << aName << "=clamp(" << material_arithmetic(a,true,s.alphaOp,s.alphaBias,s.alphaScale)
+         << (s.alphaClamp?",0.0,1.0);\n":",-4.0,4.0);\n") << "}\n";
+      materialColor[unsigned(s.colorOut)]=cName;
+      materialAlpha[unsigned(s.alphaOut)]=aName;
+      cn[unsigned(s.colorOut)]=s.colorClamp;an[unsigned(s.alphaOut)]=s.alphaClamp;
+      continue;
+    }
     for (unsigned j = 0; j < 4; ++j) {
       // GX truncates A/B/C to eight bits, but D is the signed accumulator.
       // Wrapping D turns negative material offsets into bright positive ones.
@@ -589,7 +660,9 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
     an[unsigned(s.alphaOut)] = s.alphaClamp;
   }
   const auto& last = d.tev.stages[d.tev.stageCount - 1];
-  fs << "float4 result=float4(" << reg(unsigned(last.colorOut)) << ".rgb," << reg(unsigned(last.alphaOut)) << ".a);\n";
+  if(out.nativeMaterial)
+    fs << "float4 result=float4(" << materialColor[unsigned(last.colorOut)] << "," << materialAlpha[unsigned(last.alphaOut)] << ");\n";
+  else fs << "float4 result=float4(" << reg(unsigned(last.colorOut)) << ".rgb," << reg(unsigned(last.alphaOut)) << ".a);\n";
   if (!last.colorClamp) fs << "result.rgb=tev_wrap3(result.rgb);\n";
   if (!last.alphaClamp) fs << "result.a=tev_wrap1(result.a);\n";
   const auto& ac = d.tev.alphaCompare;
@@ -631,4 +704,5 @@ ShaderSources build_tev_cg(const gfx::PipelineDesc& d) {
   out.vertex = vs.str(); out.fragment = fs.str();
   return out;
 }
+ShaderSources build_tev_cg(const gfx::PipelineDesc& d) { return build_material_cg(d,false); }
 } // namespace aurora::vita::gxm

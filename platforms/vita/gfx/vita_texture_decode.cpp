@@ -357,6 +357,30 @@ bool transcode_cmpr_to_dxt1(const TextureDesc& d,std::vector<uint8_t>& out) noex
   return cpu_parallel_for(static_cast<size_t>(macroTilesX)*macroTilesY,transcode_cmpr_range,&job);
 }
 
+bool transcode_cmpr_to_dxt1_exact(const TextureDesc& d,std::vector<uint8_t>& out) noexcept {
+  out.clear();
+  if(d.format!=TextureFormat::CMPR||!d.data||!d.width||!d.height||
+     d.dataSize<encoded_texture_size(d.width,d.height,d.format))return false;
+  const auto* src=static_cast<const uint8_t*>(d.data);
+  const uint32_t tilesX=uint32_t(blocks(d.width,8)),tilesY=uint32_t(blocks(d.height,8));
+  for(uint32_t ty=0;ty<tilesY;++ty)for(uint32_t tx=0;tx<tilesX;++tx)for(unsigned sub=0;sub<4;++sub) {
+    const uint32_t bx=tx*8+(sub&1)*4,by=ty*8+(sub>>1)*4;
+    const auto* b=src+(size_t(ty)*tilesX+tx)*32+sub*8;
+    const uint16_t a=be16(b),z=be16(b+2);const auto p=decode_rgb565(a),q=decode_rgb565(z);
+    const uint8_t pc[]{p.r,p.g,p.b},qc[]{q.r,q.g,q.b};
+    bool equal[4]{true,true,true,true};
+    for(unsigned c=0;c<3;++c) {
+      if(a>z) {
+        equal[2]=equal[2]&&((5u*pc[c]+3u*qc[c])/8u==(2u*pc[c]+qc[c])/3u);
+        equal[3]=equal[3]&&((3u*pc[c]+5u*qc[c])/8u==(pc[c]+2u*qc[c])/3u);
+      } else equal[3]=equal[3]&&((unsigned(pc[c])+qc[c])/2u==0);
+    }
+    for(unsigned y=0;y<4&&by+y<d.height;++y)for(unsigned x=0;x<4&&bx+x<d.width;++x)
+      if(!equal[(b[4+y]>>(6-2*x))&3])return false;
+  }
+  return transcode_cmpr_to_dxt1(d,out);
+}
+
 bool decode_texture_rgba8(const TextureDesc& d,std::vector<uint8_t>& out) noexcept {
   out.clear();
   if(!d.data || !d.width || !d.height) return false;

@@ -7,8 +7,8 @@
 
 namespace aurora::vita::gfx {
 
-// CPU snapshot storage only. Every acquisition is value-initialized and the
-// caller rebuilds all uniforms. Live snapshots have distinct stable addresses
+// CPU snapshot storage only. Public acquisition is value-initialized; publication
+// copies a complete candidate. Live snapshots have distinct stable addresses
 // until reset(), which is legal only after executing/discarding their commands.
 // GXM reservation lifetime, snapshot sharing and GX memory are independent.
 class FixedUniformPool {
@@ -26,6 +26,24 @@ public:
   }
 
   FixedVertexUniforms& emplace_back() {
+    return acquire(true);
+  }
+
+  // A complete candidate overwrites every field before publication. Warm slots
+  // need no additional 3 KiB reset, unlike public emplace_back() acquisition.
+  FixedVertexUniforms& publish_from(const FixedVertexUniforms& candidate,
+                                   bool reuse=true,bool distinct=false) {
+    if(reuse&&!distinct&&last_&&
+       std::memcmp(last_,&candidate,offsetof(FixedVertexUniforms,revision))==0)return *last_;
+    auto& stored=acquire(false);
+    stored=candidate;
+    stored.revision=++revision_;
+    last_=distinct?nullptr:&stored;
+    return stored;
+  }
+
+private:
+  FixedVertexUniforms& acquire(bool initialize) {
     if (used_ == limit_) {
       if (limit_) ++fallbacks_;
       return overflow_.emplace_back();
@@ -34,20 +52,19 @@ public:
       slots_.push_back(std::make_unique<FixedVertexUniforms>());
       ++allocations_;
     } else {
-      *slots_[used_] = FixedVertexUniforms{};
+      if(initialize)*slots_[used_] = FixedVertexUniforms{};
       ++reuses_;
     }
     return *slots_[used_++];
   }
 
+public:
+
   // Build into scratch first; duplicates never acquire/reset a live pool slot.
   FixedVertexUniforms& scratch() noexcept { return scratch_; }
   FixedVertexUniforms& publish(bool reuse=true,bool distinct=false) {
-    if(reuse&&!distinct&&last_&&
-       std::memcmp(last_,&scratch_,offsetof(FixedVertexUniforms,revision))==0)return *last_;
-    scratch_.revision=++revision_;
-    auto& stored=emplace_back();stored=scratch_;
-    last_=distinct?nullptr:&stored;
+    auto& stored=publish_from(scratch_,reuse,distinct);
+    scratch_.revision=stored.revision;
     return stored;
   }
 

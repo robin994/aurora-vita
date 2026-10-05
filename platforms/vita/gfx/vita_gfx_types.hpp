@@ -620,6 +620,9 @@ enum GxmDisableBits : uint32_t {
   GxmDisableStateDiff = 1u << 13, // reference: emit the complete native pipeline state
   GxmDisableLocalBatch = 1u << 14, // reference: one native draw per logical draw
   GxmDisableSharedState = 1u << 15, // reference: copy inline uniform/texture state into every packet
+  GxmDisableFixedBuild = 1u << 16, // reference: clear/rebuild the complete fixed-vertex payload
+  GxmDisableNativeMaterial = 1u << 17, // reference fragment generator; set before renderer init
+  GxmDisableNativeTextureMips = 1u << 18, // reference RGBA8 for compact mip chains/CMPR
 };
 inline uint32_t& gxm_disable_mask() noexcept { static uint32_t mask = 0; return mask; }
 inline bool gxm_disabled(uint32_t bit) noexcept {

@@ -3,6 +3,51 @@
 #include <cstring>
 
 namespace aurora::vita::gxm {
+CompactTextureData prepare_compact_texture(const gfx::TextureDesc& desc,bool exactCmpr) {
+  CompactTextureData out;
+  const auto fail=[&](const char* message){out.error=message;out.pixels.clear();return out;};
+  if(!desc.data||!desc.width||!desc.height||desc.width>4096||desc.height>4096||desc.generateMipmaps)
+    return fail("compact upload requires explicit valid levels");
+  const bool pow2=(desc.width&(desc.width-1))==0&&(desc.height&(desc.height-1))==0;
+  const unsigned levels=std::max<unsigned>(desc.mipCount,1);
+  unsigned maximum=1;for(unsigned n=std::max(desc.width,desc.height);n>1;n>>=1)++maximum;
+  if(levels>maximum||(!pow2&&levels>1))return fail("unsupported compact mip dimensions");
+  out.mipCount=levels;
+  if(desc.format==gfx::TextureFormat::CMPR) {
+    if(!exactCmpr||!desc.cacheable||levels!=1||!pow2||desc.width<8||desc.height<8||
+       !gfx::transcode_cmpr_to_dxt1_exact(desc,out.pixels))return fail("CMPR requires RGBA8 to preserve texels");
+    out.format=gfx::NativeTextureFormat::Bc1;out.stride=desc.width;return out;
+  }
+  const size_t bpp=gfx::native_texture_bytes_per_pixel(desc.format);
+  if(!bpp)return fail("no compact encoding for this GX format");
+  out.swizzled=pow2;out.stride=pow2?desc.width:(desc.width+7u)&~7u;
+  size_t offset=0;
+  for(unsigned level=0;level<levels;++level) {
+    auto mip=desc;mip.width=std::max(1u,desc.width>>level);mip.height=std::max(1u,desc.height>>level);
+    mip.mipCount=1;mip.generateMipmaps=false;
+    const size_t encoded=gfx::encoded_texture_size(mip.width,mip.height,mip.format);
+    if(offset>desc.dataSize||encoded>desc.dataSize-offset)return fail("truncated compact GX mip chain");
+    mip.data=static_cast<const uint8_t*>(desc.data)+offset;mip.dataSize=encoded;offset+=encoded;
+    std::vector<uint8_t> tight;
+    if(!gfx::transcode_texture_native(mip,out.format,tight))return fail("compact transcode failed");
+    const size_t base=out.pixels.size();
+    if(pow2) {
+      out.pixels.resize(base+size_t(mip.width)*mip.height*bpp);
+      unsigned shared=0;while((1u<<shared)<std::min(mip.width,mip.height))++shared;
+      const auto spread=[shared](uint32_t v,unsigned axis){uint32_t o=0;for(unsigned b=0;b<shared;++b)o|=((v>>b)&1u)<<(2*b+axis);return o|((v>>shared)<<(2*shared));};
+      std::vector<uint32_t> xs(mip.width);for(uint32_t x=0;x<mip.width;++x)xs[x]=spread(x,1);
+      for(uint32_t y=0;y<mip.height;++y)for(uint32_t x=0;x<mip.width;++x)
+        std::memcpy(out.pixels.data()+base+size_t(xs[x]|spread(y,0))*bpp,
+                    tight.data()+(size_t(y)*mip.width+x)*bpp,bpp);
+    } else {
+      out.pixels.resize(base+size_t(out.stride)*mip.height*bpp,0);
+      for(uint32_t y=0;y<mip.height;++y)
+        std::memcpy(out.pixels.data()+base+size_t(y)*out.stride*bpp,tight.data()+size_t(y)*mip.width*bpp,size_t(mip.width)*bpp);
+    }
+  }
+  return out;
+}
+
 LinearTextureData prepare_swizzled_texture(const gfx::TextureDesc& desc) {
   LinearTextureData out;
   if (!desc.data || !desc.width || !desc.height || desc.width > 4096 || desc.height > 4096 ||

@@ -180,4 +180,74 @@ inline FixedVertexUniforms fixed_vertex_uniforms(const PipelineDesc& pipeline,
   return result;
 }
 
+// Same complete payload as fixed_vertex_uniforms_into(), without clearing all
+// 3 KiB before copying the active fields. Inputs are read on every build; this
+// is not revision-based snapshot reuse. Inactive fields are cleared on their
+// active-to-inactive transition, including pipeline/layout changes.
+class FixedVertexUniformBuilder {
+  FixedVertexUniforms value_{};
+  bool palettes_=false, texturePalette_=false;
+  uint8_t lights_=0, textures_=0, posts_=0;
+public:
+  const FixedVertexUniforms& build(const PipelineDesc& pipeline,
+                                  const VertexTransformState& state) noexcept {
+    static constexpr std::array<float,12> identity{{1,0,0,0, 0,1,0,0, 0,0,1,0}};
+    value_.position=state.currentPnMatrix<state.postexMatrices.size()?
+        state.postexMatrices[state.currentPnMatrix].v:identity;
+    value_.normal=state.normalMatrices.empty()?identity:
+        state.normalMatrices[std::min<unsigned>(state.currentPnMatrix,state.normalMatrices.size()-1)].v;
+    const bool palettes=pipeline.fixedVertexIndexedPn||pipeline.fixedVertexTexMtxMask;
+    if(palettes)for(unsigned i=0;i<10;++i) {
+      value_.positionPalette[i]=state.postexMatrices[i].v;
+      value_.normalPalette[i]=i<state.normalMatrices.size()?state.normalMatrices[i].v:
+          std::array<float,12>{};
+    } else if(palettes_) {
+      value_.positionPalette={};value_.normalPalette={};
+    }
+    palettes_=palettes;
+    const bool texturePalette=pipeline.fixedVertexTexMtxMask!=0;
+    if(texturePalette)for(unsigned i=0;i<10;++i)
+      value_.texturePalette[i]=state.postexMatrices[10u+i].v;
+    else if(texturePalette_)value_.texturePalette={};
+    texturePalette_=texturePalette;
+    value_.material=state.channelMaterial;value_.ambient=state.channelAmbient;
+    uint8_t lightMask=0;
+    for(unsigned ch=0;ch<4;++ch)if(pipeline.colorChannels[ch].lightingEnabled)
+      lightMask|=pipeline.colorChannels[ch].lightMask;
+    const uint8_t generated=pipeline_texgen_compute_mask(pipeline);
+    for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;++i)if(generated&(1u<<i)) {
+      const auto type=pipeline.texgens[i].type;
+      if(texgen_type_is_bump(type))
+        lightMask|=static_cast<uint8_t>(1u<<(static_cast<unsigned>(type)-static_cast<unsigned>(TexGenType::Bump0)));
+    }
+    for(unsigned i=0;i<MaxLights;++i) {
+      if(lightMask&(1u<<i)) {
+        const auto& src=state.lights[i];
+        value_.light[i*5+0]=src.position;value_.light[i*5+1]=src.direction;
+        value_.light[i*5+2]=src.color;value_.light[i*5+3]=src.cosAtt;
+        value_.light[i*5+4]=src.distAtt;
+      } else if(lights_&(1u<<i))for(unsigned row=0;row<5;++row)value_.light[i*5+row]={};
+    }
+    lights_=lightMask;
+    uint8_t textures=0,posts=0;
+    for(unsigned i=0;i<pipeline.texgenCount&&i<MaxTextures;++i)if(generated&(1u<<i)) {
+      const auto& t=pipeline.texgens[i];
+      if(t.matrix>=0&&10u+static_cast<unsigned>(t.matrix)<state.postexMatrices.size()) {
+        value_.texture[i]=state.postexMatrices[10u+static_cast<unsigned>(t.matrix)].v;
+        textures|=static_cast<uint8_t>(1u<<i);
+      }
+      if(t.postMatrix>=0&&static_cast<unsigned>(t.postMatrix)<state.postMatrices.size()) {
+        value_.post[i]=state.postMatrices[static_cast<unsigned>(t.postMatrix)].v;
+        posts|=static_cast<uint8_t>(1u<<i);
+      }
+    }
+    for(unsigned i=0;i<MaxTextures;++i) {
+      if((textures_&~textures)&(1u<<i))value_.texture[i]={};
+      if((posts_&~posts)&(1u<<i))value_.post[i]={};
+    }
+    textures_=textures;posts_=posts;
+    return value_;
+  }
+};
+
 } // namespace aurora::vita::gfx

@@ -89,14 +89,15 @@ public:
              const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
              const VertexTransformState& state,Telemetry* telemetry,
              const uint8_t* stableSource=nullptr,
-             const uint16_t* sourceIndices=nullptr,uint32_t sourceIndexCount=0) noexcept {
+             const uint16_t* sourceIndices=nullptr,uint32_t sourceIndexCount=0,
+             const DrawRecipe* recipe=nullptr) noexcept {
     if(!raw||!count||!layout.streamStride||layout.count>layout.attributes.size()||
        count>bytes/layout.streamStride||!pipeline.fixedVertexOnGpu)return lookup_fallback();
     if(sourceIndexCount&&(!sourceIndices||primitive!=SourcePrimitive::Triangles||
                          pipeline.fixedPointSprite||pipeline.fixedLineSprite))return lookup_fallback();
     bytes=static_cast<size_t>(count)*layout.streamStride;
-    const VertexLayout gpuLayout=fixed_vertex_gpu_layout(pipeline);
-    const VertexSemanticMask used=fixed_vertex_gpu_inputs(pipeline);
+    const VertexLayout gpuLayout=recipe?recipe->gpuLayout:fixed_vertex_gpu_layout(pipeline);
+    const VertexSemanticMask used=recipe?recipe->decodeSemantics:fixed_vertex_gpu_inputs(pipeline);
     uint64_t key=0;
     auto* detailed=telemetry&&telemetry->split_vertex_phases()?telemetry:nullptr;
     { ScopedTelemetryPhase phase(detailed,TelemetryPhase::GeometryKey);
