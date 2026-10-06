@@ -237,11 +237,11 @@ struct NativeTextureUpload {
   bool swizzled=false;
   bool valid=false;
 };
-NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
+NativeTextureUpload prepare_native_texture(const TextureDesc& desc,bool exactBc1) {
   NativeTextureUpload out;
 #if AURORA_VITA_NATIVE_GX_TEXTURES
   if(!gxm_disabled(GxmDisableNativeTextureMips)&&(desc.mipCount>1||desc.format==TextureFormat::CMPR)) {
-    auto compact=prepare_compact_texture(desc,desc.immutableSource);
+    auto compact=prepare_compact_texture(desc,exactBc1);
     if(compact.ok()) {
       switch(compact.format) {
       case NativeTextureFormat::Intensity8:out.format=SCE_GXM_TEXTURE_FORMAT_U8_RRRR;break;
@@ -1064,7 +1064,7 @@ Handle Renderer::create_texture(const TextureDesc& desc,CompactTextureData* prep
     const auto it = d.textureCache.find(key);
     if (it != d.textureCache.end()) { ++d.stats.textureHits; return it->second; }
   }
-  auto native=prepared?NativeTextureUpload{}:prepare_native_texture(desc);
+  auto native=prepared?NativeTextureUpload{}:prepare_native_texture(desc,d.config.exactBc1);
   if(prepared&&prepared->ok()) {
     switch(prepared->format) {
     case NativeTextureFormat::Intensity8:native.format=SCE_GXM_TEXTURE_FORMAT_U8_RRRR;break;
@@ -1716,7 +1716,7 @@ bool Renderer::update_texture(Handle handle,const TextureDesc& desc,bool storage
 
   auto& texture=*it->second;
   if(texture.width!=desc.width || texture.height!=desc.height) return false;
-  auto native=prepare_native_texture(desc);
+  auto native=prepare_native_texture(desc,d.config.exactBc1);
   const uint8_t* pixels=nullptr;
   size_t pixelBytes=0;
   uint32_t stride=0;
