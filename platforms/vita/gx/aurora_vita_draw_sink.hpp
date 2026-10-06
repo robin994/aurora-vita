@@ -108,6 +108,9 @@ public:
   // a texture object backed by dest is sampled. The backend owns the copied image;
   // native GXM currently uses a synchronized CPU conversion for color copies.
   bool copy_tex(const void* dest, bool clear) noexcept;
+  // Materialize supported color copies only when the CPU needs the tiled GX bytes.
+  // This is a synchronized readback; normal texture sampling stays on the GPU.
+  bool materialize_copy_tex(void* dest,void (*notify)(const void*,size_t)=nullptr) noexcept;
   void evict_copy_tex(const void* dest) noexcept;
   void clear_copy_textures() noexcept;
 #endif
@@ -213,6 +216,8 @@ private:
     uint32_t revision=0;
     bool logicalFlipX=false,logicalFlipY=false,forceOpaque=false;
     gfx::EfbCopyFormat sampleFormat=gfx::EfbCopyFormat::Passthrough;
+    uint32_t guestWidth=0,guestHeight=0,rawFormat=0;
+    bool ramPending=false;
   };
   gfx::FlatHashMap<uintptr_t,CopyTextureEntry> copyTextures_{};
   bool initialized_ = false;

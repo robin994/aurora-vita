@@ -29,6 +29,7 @@ function(aurora_vita_attach_frontend target)
         target_sources(${target} PRIVATE
             ${AURORA_VITA_SOURCE_DIR}/lib/vita/runtime.cpp
             ${AURORA_VITA_SOURCE_DIR}/lib/vita/gx_frontend_state.cpp
+            ${AURORA_VITA_SOURCE_DIR}/lib/gfx/efb_ram_encoder.cpp
             ${AURORA_VITA_SOURCE_DIR}/lib/gx/fifo.cpp
             ${AURORA_VITA_SOURCE_DIR}/lib/gx/command_processor.cpp
             ${AURORA_VITA_SOURCE_DIR}/lib/dolphin/vi/vi.cpp)

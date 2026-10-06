@@ -3,6 +3,10 @@
 #include "../gfx/vita_renderer.hpp"
 #include "../gfx/vita_pipeline_key.hpp"
 #include "../gfx/vita_hash.hpp"
+#if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+#include "../../../lib/gfx/efb_ram_encoder.hpp"
+#include "../gfx/vita_efb_copy.hpp"
+#endif
 
 #if defined(AURORA_VITA_UPSTREAM)
 #if defined(AURORA_VITA_UPSTREAM_STUB)
@@ -476,6 +480,11 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   }
   if (telemetry_) telemetry_->efb_copy();
   copyTextures_[copyKey] = CopyTextureEntry{h, dstW, dstH, oldRevision + 1, logicalFlipX, logicalFlipY, forceOpaque, sampleFormat};
+#if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  auto& entry=copyTextures_[copyKey];
+  entry.guestWidth=g.texCopyDstWidth;entry.guestHeight=g.texCopyDstHeight;
+  entry.rawFormat=rawCopyFormat;entry.ramPending=true;
+#endif
   resolvedTextureBindingsValid_=false;
   if (clear) {
 #if defined(AURORA_VITA_UPSTREAM_STUB)
@@ -486,6 +495,36 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
 #endif
   }
   return true;
+}
+
+bool DrawSink::materialize_copy_tex(void* dest,void (*notify)(const void*,size_t)) noexcept {
+#if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  if(!initialized_ || !renderer_)return false;
+  bool okay=true;
+  for(auto& [key,entry]:copyTextures_) {
+    if((dest && key!=reinterpret_cast<uintptr_t>(dest)) || !entry.ramPending)continue;
+    std::vector<uint8_t> pixels,converted;
+    if(!renderer_->efb().read_rgba(entry.handle,pixels)) { okay=false;continue; }
+    const auto format=static_cast<GXTexFmt>(entry.rawFormat);
+    const size_t bytes=aurora::gfx::efb_ram::encoded_size(format,entry.guestWidth,entry.guestHeight);
+    const auto conversion=entry.forceOpaque?gfx::EfbCopyFormat::RGB565:entry.sampleFormat;
+    const uint8_t* source=pixels.data();
+    if(conversion!=gfx::EfbCopyFormat::Passthrough) {
+      if(!gfx::copy_efb_rgba8(source,entry.width,entry.height,
+          {0,0,static_cast<int32_t>(entry.width),static_cast<int32_t>(entry.height)},
+          entry.width,entry.height,conversion,false,false,converted)) { okay=false;continue; }
+      source=converted.data();
+    }
+    if(!bytes || !aurora::gfx::efb_ram::encode(reinterpret_cast<void*>(key),bytes,format,
+        entry.guestWidth,entry.guestHeight,source,entry.width,entry.height,entry.width*4,
+        aurora::gfx::efb_ram::HostPixelOrder::RGBA)) { okay=false;continue; }
+    entry.ramPending=false;
+    if(notify)notify(reinterpret_cast<void*>(key),bytes);
+  }
+  return okay;
+#else
+  (void)dest;(void)notify;return false;
+#endif
 }
 
 void DrawSink::evict_copy_tex(const void* dest) noexcept {
