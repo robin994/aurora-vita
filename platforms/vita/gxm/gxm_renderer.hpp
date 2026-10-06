@@ -6,6 +6,7 @@
 #include <vector>
 
 namespace aurora::vita::gxm {
+struct CompactTextureData;
 struct Config {
   uint32_t width = 960;
   uint32_t height = 544;
@@ -21,6 +22,8 @@ struct Config {
   bool waitVblank = true;
   bool d16Depth = false;
   bool fragmentPrepareCache = false;
+  bool residentGeometryInCdram = false;
+  bool exactBc1 = false;
   const char* shaderCompilerPath = nullptr;
   const char* programCachePath = nullptr;
   bool preloadProgramCache = false;
@@ -50,7 +53,7 @@ public:
   uint32_t program_cache_misses() const noexcept;
   uint64_t create_pipeline(const gfx::PipelineDesc& desc);
   void destroy_pipeline(uint64_t key);
-  gfx::Handle create_buffer(const void* data, size_t bytes);
+  gfx::Handle create_buffer(const void* data, size_t bytes,bool resident=false);
   // Swizzled textures wrap/mirror in hardware; clamp works for every layout.
   bool texture_supports_hardware_wrap(gfx::Handle texture, const gfx::SamplerDesc& sampler) const noexcept;
   // Return CPU-visible storage for a dynamic streaming buffer. CpuGpu blocks
@@ -64,7 +67,7 @@ public:
   // storageRetired: the caller guarantees the GPU finished every use (for
   // example after more frames than the display queue holds); no finish().
   void destroy_buffer(gfx::Handle handle, bool storageRetired=false);
-  gfx::Handle create_texture(const gfx::TextureDesc& desc);
+  gfx::Handle create_texture(const gfx::TextureDesc& desc,CompactTextureData* prepared=nullptr);
   // Update a texture whose storage/layout is unchanged. `storageRetired` is
   // used by the facade's small volatile-texture ring after enough display
   // frames have elapsed that the slot can no longer be referenced by GXM.

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include "../lib/gx/display_list_shadow.hpp"
 #include <cstring>
 
 extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes) noexcept;
@@ -164,7 +165,7 @@ void state_transitions() {
   }
   sink.flush();sink.shutdown();renderer.shutdown();
 }
-void fixed_geometry_vertex_program_transitions() {
+void fixed_geometry_vertex_program_transitions(bool streamed = false) {
   using aurora::gx::StateDomain;
   auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
   g.proj.m0={1,0,0,0};g.proj.m1={0,1,0,0};g.proj.m2={0,0,1,0};g.proj.m3={0,0,0,1};
@@ -185,6 +186,8 @@ void fixed_geometry_vertex_program_transitions() {
   gfx::Renderer renderer;CHECK(renderer.initialize());renderer.begin_frame();
   gxbridge::DrawSink sink;gxbridge::DrawSinkConfig config{};
   config.staticGeometryBudget=1024*1024;config.staticGeometryMinVertices=3;
+  config.staticGeometryStableOnly=streamed;
+  config.allowStreamedFixedVertexGpu=streamed;
   CHECK(sink.initialize(renderer,config));sink.begin_frame(0);
   const auto baseGeneration=g.pipelineStateGeneration;
   for(unsigned mode=0;mode<8;++mode){
@@ -192,7 +195,10 @@ void fixed_geometry_vertex_program_transitions() {
     // the fragment/base pipeline. The GPU input stride must still follow it.
     g.colorChannelConfig[GX_COLOR0].matSrc=(mode&1)?GX_SRC_VTX:GX_SRC_REG;
     g.vertexProgramStateGeneration=aurora::gx::next_gx_state_epoch();g.mark_dirty(StateDomain::Vertex);
-    const auto result=sink.submit(GX_TRIANGLES,0,raw.data(),raw.size(),3,nullptr,0,raw.data());
+    // A dynamic source has no resident geometry identity. It must use the
+    // streamed GPU layout and still follow every vertex-program transition.
+    const auto result=sink.submit(GX_TRIANGLES,0,raw.data(),raw.size(),3,nullptr,0,
+                                  streamed?nullptr:raw.data());
     CHECK(result.ok);g.stateDirty=false;CHECK(g.pipelineStateGeneration==baseGeneration);
     const auto* draw=sink.stream().tail_draw();CHECK(draw&&draw->fixedVertexUniforms);
     if(!draw)continue;
@@ -202,6 +208,18 @@ void fixed_geometry_vertex_program_transitions() {
     CHECK(compiled->desc.fixedVertexOnGpu);
     CHECK(compiled->desc.layout.attributes[0].stride==expected.attributes[0].stride);
     CHECK(draw->vertices.size==size_t(draw->vertexCount)*expected.attributes[0].stride);
+    if(streamed){
+      CHECK(sink.memory_budget().staticGeometryBytes==0);
+      // Live OFF/ON transitions must restore the full CPU state after the
+      // lightweight GPU translation, without changing the base pipeline.
+      const auto features=sink.runtime_feature_flags();
+      sink.set_runtime_feature_flags(features&~gxbridge::RuntimeStreamedFixedVertex);
+      CHECK(sink.submit(GX_TRIANGLES,0,raw.data(),raw.size(),3).ok);
+      const auto* cpuDraw=sink.stream().tail_draw();CHECK(cpuDraw&&!cpuDraw->fixedVertexUniforms);
+      if(cpuDraw){const auto* cpuPipeline=renderer.pipelines().find(cpuDraw->pipelineKey);
+        CHECK(cpuPipeline&&!cpuPipeline->desc.fixedVertexOnGpu);}
+      sink.set_runtime_feature_flags(features);
+    }
   }
   sink.flush();sink.shutdown();renderer.shutdown();
 }
@@ -407,6 +425,46 @@ void async_display_list_uses_pinned_segment_without_fifo_copy() {
   aurora::gx::fifo::set_display_list_shadow_enabled(true);
   shutdown();
 }
+void prepared_async_display_list_equivalence() {
+  // Tokens survive hits but never recur after replacement, eviction or clear.
+  {
+    aurora::gx::fifo::DisplayListShadowCache cache(64);
+    std::array<uint8_t,64> a{},b{};uint64_t first=0,hit=0,fresh=0;
+    auto pin=cache.pin(a.data(),a.size(),&first);CHECK(pin&&first);
+    CHECK(cache.pin(a.data(),a.size(),&hit)&&hit==first);
+    a[1]=1;aurora_vita_notify_memory_write(a.data(),a.size());
+    CHECK(cache.pin(a.data(),a.size(),&fresh)&&fresh>first);CHECK((*pin)[1]==0);
+    first=fresh;CHECK(cache.pin(b.data(),b.size(),&fresh)&&fresh>first);
+    first=fresh;cache.clear();CHECK(cache.pin(b.data(),b.size(),&fresh)&&fresh>first);
+  }
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;config.prepared_display_lists=true;
+  CHECK(initialize(config));CHECK(aurora::gx::fifo::start_worker());CHECK(begin_frame());
+  // All state mutation stays on the GX owner. Producer never submits directly.
+  aurora::gx::fifo::run_sync([](void*) {
+    auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+    g.proj.m0={1,0,0,0};g.proj.m1={0,1,0,0};g.proj.m2={0,0,1,0};g.proj.m3={0,0,0,1};
+    g.pnMtx[0].pos.m0={1,0,0,0};g.pnMtx[0].pos.m1={0,1,0,0};g.pnMtx[0].pos.m2={0,0,1,0};
+    g.renderViewport={0,0,960,544,0,1};g.renderScissor={0,0,960,544};
+    g.vtxDesc[GX_VA_POS]=GX_DIRECT;g.vtxFmts[0].attrs[GX_VA_POS]={GX_POS_XYZ,GX_F32,0};
+    g.mark_dirty();
+  },nullptr);
+  std::array<uint8_t,64> list{};list[0]=0x90;list[2]=3;
+  aurora_vita_notify_memory_write(list.data(),list.size());
+  for(unsigned i=0;i<3;++i) {
+    aurora::gx::fifo::write_stable_data(list.data(),list.size());
+    aurora::gx::fifo::drain_sync();
+  }
+  end_frame();auto perf=completed_performance_snapshot();CHECK(perf.preparedListMisses==1);CHECK(perf.preparedListHits==2);
+  CHECK(perf.preparedListRejected==0);
+  // Revision changes replace the pin; a padding side effect uses process().
+  CHECK(begin_frame());list[63]=0x48;
+  aurora_vita_notify_memory_write(list.data(),list.size());
+  aurora::gx::fifo::write_stable_data(list.data(),list.size());end_frame();
+  perf=completed_performance_snapshot();CHECK(perf.preparedListRejected==1);
+  shutdown();
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();fixed_geometry_vertex_program_transitions();completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();
+
+}
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

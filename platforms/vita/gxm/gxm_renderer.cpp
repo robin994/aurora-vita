@@ -241,7 +241,7 @@ NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
   NativeTextureUpload out;
 #if AURORA_VITA_NATIVE_GX_TEXTURES
   if(!gxm_disabled(GxmDisableNativeTextureMips)&&(desc.mipCount>1||desc.format==TextureFormat::CMPR)) {
-    auto compact=prepare_compact_texture(desc);
+    auto compact=prepare_compact_texture(desc,desc.immutableSource);
     if(compact.ok()) {
       switch(compact.format) {
       case NativeTextureFormat::Intensity8:out.format=SCE_GXM_TEXTURE_FORMAT_U8_RRRR;break;
@@ -1023,13 +1023,13 @@ bool Renderer::texture_supports_hardware_wrap(Handle texture,const SamplerDesc& 
   return it!=d.textures.end()&&it->second->swizzled;
 }
 
-Handle Renderer::create_buffer(const void* data, size_t bytes) {
+Handle Renderer::create_buffer(const void* data, size_t bytes,bool resident) {
   auto& d = *impl_;
   if (!d.initialized || !bytes || bytes > UINT32_MAX || !d.nextHandle || !d.has_budget(bytes)) {
     d.fail("invalid buffer upload or resource budget exhausted"); return 0;
   }
   Impl::Buffer buffer;
-  if (!d.alloc(buffer.memory, bytes, MemoryKind::CpuGpu)) return 0;
+  if (!d.alloc(buffer.memory, bytes, resident&&d.config.residentGeometryInCdram?MemoryKind::GpuResource:MemoryKind::CpuGpu)) return 0;
   buffer.bytes = bytes;
   if (data) std::memcpy(buffer.memory.data(), data, bytes);
   else std::memset(buffer.memory.data(), 0, bytes);
@@ -1051,7 +1051,7 @@ void* Renderer::writable_buffer(Handle handle,size_t bytes,size_t offset) {
   return static_cast<uint8_t*>(it->second.memory.data())+offset;
 }
 
-Handle Renderer::create_texture(const TextureDesc& desc) {
+Handle Renderer::create_texture(const TextureDesc& desc,CompactTextureData* prepared) {
   auto& d = *impl_;
   if (!d.initialized || !desc.data || !desc.width || desc.width > 4096 || !desc.height || desc.height > 4096 || !d.nextHandle) {
     d.fail("texture upload requires a bounded image"); return 0;
@@ -1064,7 +1064,19 @@ Handle Renderer::create_texture(const TextureDesc& desc) {
     const auto it = d.textureCache.find(key);
     if (it != d.textureCache.end()) { ++d.stats.textureHits; return it->second; }
   }
-  auto native=prepare_native_texture(desc);
+  auto native=prepared?NativeTextureUpload{}:prepare_native_texture(desc);
+  if(prepared&&prepared->ok()) {
+    switch(prepared->format) {
+    case NativeTextureFormat::Intensity8:native.format=SCE_GXM_TEXTURE_FORMAT_U8_RRRR;break;
+    case NativeTextureFormat::LuminanceAlpha8:native.format=SCE_GXM_TEXTURE_FORMAT_A8L8;break;
+    case NativeTextureFormat::Rgb565:native.format=SCE_GXM_TEXTURE_FORMAT_R5G6B5;break;
+    case NativeTextureFormat::Bc1:native.format=SCE_GXM_TEXTURE_FORMAT_UBC1_ABGR;break;
+    case NativeTextureFormat::Rgba8:native.format=SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR;break;
+    default:return 0;
+    }
+    native.pixels=std::move(prepared->pixels);native.stride=prepared->stride;native.mipCount=prepared->mipCount;
+    native.swizzled=prepared->swizzled;native.valid=true;
+  }
   if(native.valid&&!native.pixels.empty()&&d.has_budget(native.pixels.size())) {
     auto owned=std::make_unique<Impl::Texture>();
     auto& texture=*owned;

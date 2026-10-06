@@ -91,6 +91,7 @@ struct VitaJobSegment {
   uint32_t offset = 0;
   uint32_t bytes = 0;
   const uint8_t* stableSource = nullptr;
+  uint64_t pinnedIdentity=0;
   DisplayListShadowCache::PinnedBytes pinned{};
 };
 
@@ -215,7 +216,8 @@ int vita_worker_main(SceSize, void*) {
             detail::sActiveProcessSize = segment.bytes;
             detail::sActiveStableSourceSpans = &stable;
             detail::sActiveStableSourceSpanCount = segment.stableSource ? 1u : 0u;
-            process(segment.pinned->data(), segment.bytes, job.bigEndian);
+            if(!job.bigEndian || !submit_prepared_display_list(segment.pinned,segment.bytes,segment.stableSource,segment.pinnedIdentity))
+              process(segment.pinned->data(), segment.bytes, job.bigEndian);
           }
         }
       } else {
@@ -517,7 +519,7 @@ namespace {
 DisplayListShadowCache sDisplayListShadows(8u * 1024u * 1024u, false);
 bool sDisplayListShadowEnabled = true;
 
-DisplayListShadowCache::PinnedBytes display_list_shadow_pin(const void* data, uint32_t length) {
+DisplayListShadowCache::PinnedBytes display_list_shadow_pin(const void* data, uint32_t length,uint64_t* identity) {
   // With the async GX consumer the immutable shadow is the transport itself,
   // not merely an optional cache: keeping the large display-list payload out
   // of the FIFO is what removes producer memcpy/back-pressure. The runtime
@@ -528,11 +530,11 @@ DisplayListShadowCache::PinnedBytes display_list_shadow_pin(const void* data, ui
   // Only CDRAM (uncached CPU mapping) benefits; cached RAM is read directly.
   if (address < 0x60000000u || address >= 0x70000000u) return nullptr;
 #endif
-  return sDisplayListShadows.pin(data, length);
+  return sDisplayListShadows.pin(data, length,identity);
 }
 
 bool append_pinned_display_list(const void* guestSource, uint32_t length,
-                                DisplayListShadowCache::PinnedBytes pinned) {
+                                DisplayListShadowCache::PinnedBytes pinned,uint64_t identity) {
   if (!worker_running() || !pinned || pinned->size() < length || length == 0) return false;
   constexpr uint32_t StableBatchByteLimit = 256u * 1024u;
   if (sPendingSegmentCount >= VitaJobSegmentCapacity - 2u ||
@@ -546,6 +548,7 @@ bool append_pinned_display_list(const void* guestSource, uint32_t length,
   segment.type = VitaJobSegmentType::PinnedDisplayList;
   segment.bytes = length;
   segment.stableSource = static_cast<const uint8_t*>(guestSource);
+  segment.pinnedIdentity=identity;
   segment.pinned = std::move(pinned);
   sPendingPinnedBytes += length;
   if (aurora::vita::gfx::g_fifoProfileEnabled) {
@@ -571,8 +574,9 @@ void write_stable_data(const void* data, uint32_t length) {
 #if defined(MKW_TARGET_VITA)
   // The span keeps the guest address as its stable source identity.
   if (!detail::sInDisplayList && data != nullptr && length != 0) {
-    if (auto shadow = display_list_shadow_pin(data, length)) {
-      if (append_pinned_display_list(data, length, shadow)) return;
+    uint64_t identity=0;
+    if (auto shadow = display_list_shadow_pin(data, length,&identity)) {
+      if (append_pinned_display_list(data, length, shadow,identity)) return;
       write_stable_data_from(shadow->data(), data, length);
       return;
     }

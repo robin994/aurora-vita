@@ -98,5 +98,6 @@ int cpu_core3_affinity_mask() noexcept;
 CpuCore3BudgetSnapshot cpu_core3_budget_snapshot() noexcept;
 CpuWorkerProbeSnapshot cpu_worker_probe_snapshot() noexcept;
 CpuVertexParallelSnapshot cpu_vertex_parallel_snapshot() noexcept;
+uint64_t cpu_pool_busy_fallbacks() noexcept;
 
 } // namespace aurora::vita::gfx

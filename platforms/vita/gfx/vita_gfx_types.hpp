@@ -345,6 +345,7 @@ struct TextureDesc {
   uint32_t paletteRevision = 0;
   uint8_t mipCount = 1; // Wii mip levels stored consecutively after level 0.
   bool cacheable = true;
+  bool immutableSource = false; // Conversion eligibility, independent of cache ownership.
   bool generateMipmaps = false; // Generate a full chain only when the source provides level 0 alone.
 };
 struct SamplerDesc {

@@ -14,7 +14,7 @@ CompactTextureData prepare_compact_texture(const gfx::TextureDesc& desc,bool exa
   if(levels>maximum||(!pow2&&levels>1))return fail("unsupported compact mip dimensions");
   out.mipCount=levels;
   if(desc.format==gfx::TextureFormat::CMPR) {
-    if(!exactCmpr||!desc.cacheable||levels!=1||!pow2||desc.width<8||desc.height<8||
+    if(!exactCmpr||!(desc.cacheable||desc.immutableSource)||levels!=1||!pow2||desc.width<8||desc.height<8||
        !gfx::transcode_cmpr_to_dxt1_exact(desc,out.pixels))return fail("CMPR requires RGBA8 to preserve texels");
     out.format=gfx::NativeTextureFormat::Bc1;out.stride=desc.width;return out;
   }
@@ -160,4 +160,17 @@ LinearTextureData prepare_linear_texture(const gfx::TextureDesc& desc) {
   }
   return out;
 }
+CompactTextureData prepare_texture_upload(const gfx::TextureDesc& desc,bool compact,bool exactCmpr) {
+  if(compact) {auto out=prepare_compact_texture(desc,exactCmpr);if(out.ok())return out;}
+  const bool swizzled=desc.width&&desc.height&&!(desc.width&(desc.width-1u))&&!(desc.height&(desc.height-1u));
+  auto rgba=swizzled?prepare_swizzled_texture(desc):prepare_linear_texture(desc);
+  CompactTextureData out;out.pixels=std::move(rgba.pixels);out.error=std::move(rgba.error);
+  out.mipCount=rgba.mipCount;out.format=gfx::NativeTextureFormat::Rgba8;
+  out.swizzled=swizzled;out.stride=swizzled?desc.width:(desc.width+7u)&~7u;
+  return out;
 }
+size_t texture_upload_budget_bytes(const CompactTextureData& upload) noexcept {
+  if(!upload.ok()||upload.pixels.size()>SIZE_MAX-4095u)return 0;
+  return (upload.pixels.size()+4095u)&~size_t(4095u);
+}
+} // namespace aurora::vita::gxm

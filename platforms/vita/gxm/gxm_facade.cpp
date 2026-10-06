@@ -1,4 +1,6 @@
 #include "gxm_renderer.hpp"
+#include "gxm_texture_layout.hpp"
+#include "gfx/vita_native_assets.hpp"
 #include "../gfx/vita_frame_stats.hpp"
 #include "../vita_log.hpp"
 #include "gfx/vita_renderer.hpp"
@@ -30,7 +32,7 @@ static_assert(std::is_trivially_copyable_v<PipelineDesc>);
 BufferPool::~BufferPool() { clear(); }
 Handle BufferPool::create_vertex(const void* data,size_t bytes,bool dynamic) noexcept {
   if(!native_) return 0;
-  const auto h=native_->create_buffer(data,bytes);
+  const auto h=native_->create_buffer(data,bytes,!dynamic);
   if(h) map_.emplace(h,Entry{h,0,bytes,dynamic});
   return h;
 }
@@ -99,23 +101,27 @@ Handle TextureCache::get_or_upload(const TextureDesc& desc,uint64_t frame,FrameS
   if(failedFrame_!=frame) {failedFrame_=frame;failedKeys_.clear();}
   if(failedKeys_.contains(stableKey)) {++retrySuppressTotal_;return 0;}
   if(!desc.width || !desc.height || desc.width>4096 || desc.height>4096 || !desc.data) return 0;
-  // Native RGBA backing, including per-level row padding and one memblock page.
-  size_t required=0;
-  const unsigned levels=std::min<unsigned>(desc.generateMipmaps?13:std::max<unsigned>(desc.mipCount,1),13);
-  for(unsigned i=0;i<levels;++i) {
-    const auto w=std::max(1u,desc.width>>i),h=std::max(1u,desc.height>>i);
-    required+=size_t((w+7u)&~7u)*h*4;
-    if(w==1 && h==1) break;
-  }
-  required=(required+4095u)&~size_t(4095u);lastRequestedBytes_=required;
+  auto nativeDesc=desc;
+  nativeDesc.immutableSource=desc.cacheable; // Stable cache source survives ownership handoff.
+  nativeDesc.cacheable=false; // This facade is the only cache/retirement owner.
+  gxm::CompactTextureData prepared;
+  if(gxm_disabled(GxmDisableNativeTextureMips)||!load_native_texture(nativeDesc,prepared,exactBc1_))
+    prepared=gxm::prepare_texture_upload(nativeDesc,!gxm_disabled(GxmDisableNativeTextureMips),exactBc1_);
+  const size_t required=gxm::texture_upload_budget_bytes(prepared);lastRequestedBytes_=required;
+  if(!required){++allocFailTotal_;failedKeys_.insert(stableKey);return 0;}
   pre_evict(required,frame,stableKey);
   if(required>budget_ || bytes_>budget_-required) {
     ++allocFailTotal_;failedKeys_.insert(stableKey);return 0;
   }
-  auto nativeDesc=desc;
-  nativeDesc.cacheable=false; // This facade is the only cache/retirement owner.
-  const auto handle=native_->create_texture(nativeDesc);
+  const auto handle=native_->create_texture(nativeDesc,&prepared);
   if(!handle) {++allocFailTotal_;failedKeys_.insert(stableKey);return 0;}
+  // Driver format rejection can use RGBA fallback. Budget the actual allocated
+  // layout before publishing a cache entry; never let that fallback exceed it.
+  const size_t actual=native_->texture_bytes(handle);
+  pre_evict(actual,frame,stableKey);
+  if(actual>budget_||bytes_>budget_-actual) {
+    native_->destroy_texture(handle);++allocFailTotal_;failedKeys_.insert(stableKey);return 0;
+  }
   uint64_t key=stableKey;
   bool volatileRing=false;
   if(!desc.cacheable) {
@@ -413,6 +419,8 @@ bool Renderer::initialize() noexcept {
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
   c.d16Depth=cfg_.nativeD16Depth;
   c.fragmentPrepareCache=cfg_.nativeFragmentPrepareCache;
+  c.residentGeometryInCdram=cfg_.residentGeometryInCdram;c.exactBc1=cfg_.exactBc1;
+  textures_.set_exact_bc1(cfg_.exactBc1);
   c.programCachePath=cfg_.programBinaryCachePath;
   c.preloadProgramCache=cfg_.preloadProgramBinaryCache;
   c.programCachePreloadLimit=cfg_.programBinaryPreloadLimit;

@@ -15,6 +15,8 @@
 #endif
 
 namespace aurora::vita::gfx {
+namespace { std::atomic<uint64_t> sPoolBusyFallbacks{0}; }
+uint64_t cpu_pool_busy_fallbacks() noexcept {return sPoolBusyFallbacks.load(std::memory_order_relaxed);}
 
 #if defined(__vita__)
 namespace {
@@ -491,8 +493,10 @@ static bool cpu_parallel_for_min_lanes_impl(size_t count, size_t minItems, uint3
   // Renderer and game phases intentionally share one persistent producer. If
   // a callback ever recurses into another parallel-for, keep the inner call on
   // the caller instead of deadlocking on this pool's completion semaphores.
-  if (g_workers.busy.test_and_set(std::memory_order_acquire))
+  if (g_workers.busy.test_and_set(std::memory_order_acquire)) {
+    if(runtime_diagnostics_enabled())sPoolBusyFallbacks.fetch_add(1,std::memory_order_relaxed);
     return runCaller(0,count);
+  }
   struct BusyGuard {
     ~BusyGuard() { g_workers.busy.clear(std::memory_order_release); }
   } busyGuard;

@@ -38,7 +38,7 @@ fault was caused by this recipe defect: pipeline validation can reject some
 stale layouts and the original dump lacks the offending draw/buffer contents.
 Matched performance comparison and broader device acceptance remain incomplete.
 
-Current implementation limits:
+Historical implementation limits at the 2026-10-05 snapshot:
 
 - Resident geometry uses `create_buffer` / `MemoryKind::CpuGpu`; migration to
   the CDRAM GPU resource pool remains pending.
@@ -64,3 +64,39 @@ See the integrating Strikers repository's `GPU_CRASH_ANALYSIS_2026-10-05.md`
 and `PERFORMANCE_NATIVE_WORKFLOW_2026-10-05.md` for the exact build identities,
 excluded benchmark runs, dump evidence and next hardware checks. Dumps, retail
 assets and compiled artifacts are kept locally outside the source commit.
+
+## Follow-up implementation, 2026-10-06
+
+The subsequent performance-plan candidate separates `immutableSource` from cache
+ownership, budgets the actual prepared native texture layout, and gates the exact
+BC1 subset with an explicit runtime selector. Immutable geometry can prefer the
+CDRAM resource allocator while dynamic streams remain CPU-visible USER buffers.
+Both experiments retain original fallback and GPU retirement rules.
+
+It also adds single-draw descriptors consumed in FIFO order on the GX owner,
+completed consumer snapshots for bounded attribution, pool-contention counters,
+and a reusable AVNR compiler/consumer contract for native PSARC sidecars. The
+source request is compared exactly; hashes are lookup keys. GLG sidecars contain
+canonical object-space attributes and still require current GPU layout packing
+on first cache admission. Original materials, scene callbacks and EFB semantics
+remain active. Arithmetic material specialization already exists; additional
+pass/material work remains conditional on new hardware attribution.
+
+Post-change host validation: 18/18 tests, including prepared-list state/order,
+native source/payload invalidation and compact format budget equivalence. The
+ASan/UBSan subset passes 5/5. These results establish source/host correctness,
+not Vita acceptance. The integrating Strikers repository records exact installed
+SELF/configuration and hardware comparisons in
+`PERFORMANCE_IMPLEMENTATION_2026-10-06.md`.
+
+The first prepared-list hardware candidate produced a CPU allocator data abort
+on the GX thread, not a GPU exception. The dump contains corrupted malloc
+free-list links overlapping DrawPacket fields; it does not establish the
+original writer. Matching dump/SELF/ELF/map/VELF were preserved. The descriptor
+cache now uses a fixed table and monotonic immutable-copy tokens transported
+by FIFO jobs, without additional weak/shared ownership or hot-path allocation.
+Tokens are not reused across replacement, eviction or clear. The corrected
+prepared-list candidate completed 1,200 quiet live-play samples without a new
+dump. This bounded result does not prove the corruption's origin or full-game
+stability. New prepared-list, resident-CDRAM, exact-BC1 and native-asset paths
+remain independently selected and default OFF in Strikers.

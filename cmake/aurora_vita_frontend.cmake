@@ -6,7 +6,8 @@ function(aurora_vita_attach_frontend target)
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gx/aurora_vita_draw_sink.cpp
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_memory_budget.cpp
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_streaming_arena.cpp
-        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_draw_adapter.cpp)
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_draw_adapter.cpp
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_native_assets.cpp)
     foreach(name vita_feature_coverage vita_frame_trace vita_fifo_packet_queue
                  vita_gx_capture vita_gx_replay wiicompiled_aurora_adapter vita_gx_backend)
         target_sources(${target} PRIVATE ${AURORA_VITA_SOURCE_DIR}/platforms/vita/integration/${name}.cpp)

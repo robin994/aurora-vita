@@ -157,6 +157,7 @@ ScopedTelemetryPhase::~ScopedTelemetryPhase() {
   if (telemetry_) telemetry_->add_time(phase_, telemetry_now_us() - startUs_);
 }
 
+bool g_fifoCommandTimingsEnabled=true;
 bool g_fifoProfileEnabled = false;
 FifoProfile& fifo_profile_accumulator() noexcept {
   static FifoProfile profile{};

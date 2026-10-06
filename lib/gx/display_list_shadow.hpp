@@ -28,7 +28,8 @@ public:
     return pinned && !pinned->empty() ? pinned->data() : nullptr;
   }
 
-  PinnedBytes pin(const void* data, uint32_t length) {
+  PinnedBytes pin(const void* data, uint32_t length, uint64_t* identity = nullptr) {
+    if(identity)*identity=0;
     if (!data || !length || length > budget_) return nullptr;
     const uintptr_t address = reinterpret_cast<uintptr_t>(data);
     uint64_t revision = aurora::vita::gfx::memory_range_revision(data, length);
@@ -37,8 +38,10 @@ public:
       auto& shadow = it->second;
       if (shadow.bytes && shadow.bytes->size() == length && shadow.revision == revision) {
         if (!exactValidation_ ||
-            aurora::vita::gfx::byte_spans_equal(data, shadow.bytes->data(), length))
+            aurora::vita::gfx::byte_spans_equal(data, shadow.bytes->data(), length)) {
+          if(identity)*identity=shadow.identity;
           return shadow.bytes;
+        }
 
         // A revision-only hit would have returned stale bytes. Publish the
         // actual write before submitting fresh bytes under the same guest
@@ -68,6 +71,10 @@ public:
     shadow.bytes = std::make_shared<std::vector<uint8_t>>(
         static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + length);
     shadow.revision = revision;
+    // Never reuse a token after eviction/replacement or clear. The FIFO pin
+    // owns the bytes; the GX consumer caches only metadata under this token.
+    shadow.identity=nextIdentity_ ? nextIdentity_++ : 0;
+    if(identity)*identity=shadow.identity;
     bytes_ += length;
     return shadow.bytes;
   }
@@ -85,12 +92,14 @@ private:
   struct Shadow {
     PinnedBytes bytes;
     uint64_t revision = 0;
+    uint64_t identity = 0;
   };
   aurora::vita::gfx::FlatHashMap<uintptr_t, Shadow> shadows_;
   size_t budget_;
   bool exactValidation_ = true;
   size_t bytes_ = 0;
   uint64_t untrackedWrites_ = 0;
+  uint64_t nextIdentity_ = 1;
 };
 
 } // namespace aurora::gx::fifo

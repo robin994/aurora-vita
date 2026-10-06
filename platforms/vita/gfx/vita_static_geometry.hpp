@@ -1,5 +1,6 @@
 #pragma once
 #include "vita_draw_adapter.hpp"
+#include "vita_native_assets.hpp"
 #include "vita_cpu_workers.hpp"
 #include "vita_fixed_vertex.hpp"
 #include "vita_byte_compare.hpp"
@@ -250,7 +251,9 @@ public:
       }
       scratch_.primitive=Primitive::Triangles;scratch_.positionIsClipSpace=false;
     } else {
-      if(!prepare_draw_into(scratch_,raw,bytes,count,primitive,layout,pipeline,state,nullptr,{},telemetry,
+      const bool precompiled=stableSource&&!sourceIndexCount&&
+          load_native_geometry(raw,bytes,count,primitive,layout,scratch_);
+      if(!precompiled&&!prepare_draw_into(scratch_,raw,bytes,count,primitive,layout,pipeline,state,nullptr,{},telemetry,
                             sourceIndexCount==0))return lookup_fallback();
       if(sourceIndexCount){
         for(uint32_t i=0;i<sourceIndexCount;++i)if(sourceIndices[i]>=scratch_.vertices.size())return lookup_fallback();

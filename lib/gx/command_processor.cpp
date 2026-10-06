@@ -1,4 +1,6 @@
 #include "command_processor.hpp"
+#include "prepared_display_list.hpp"
+#include <array>
 
 #include <cstring>
 #include <type_traits>
@@ -543,7 +545,7 @@ struct FifoProcessScope {
 };
 struct FifoCommandScope {
   FifoClass cls;
-  bool on = aurora::vita::gfx::g_fifoProfileEnabled;
+  bool on = aurora::vita::gfx::g_fifoProfileEnabled && aurora::vita::gfx::g_fifoCommandTimingsEnabled;
   uint64_t start = on ? aurora::vita::gfx::telemetry_now_us() : 0;
   uint64_t nestedBefore = sProfileNestedUs;
   explicit FifoCommandScope(FifoClass c) noexcept : cls(c) {}
@@ -2103,6 +2105,52 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
       nullptr, 0, stableSource);
   if (result.ok) g_gxState.stateDirty = false;
   return result.ok;
+}
+
+namespace {
+bool sPreparedListsEnabled=false;
+struct PreparedListEntry {
+  uint64_t identity=0;
+  PreparedDisplayList draw{};
+  uint32_t size=0;
+};
+std::array<PreparedListEntry,2048> sPreparedLists{};
+uint64_t sPreparedHits=0,sPreparedMisses=0,sPreparedRejected=0;
+}
+void set_prepared_display_lists_enabled(bool enabled) {
+  sPreparedListsEnabled=enabled;
+  for(auto& entry:sPreparedLists)entry={};
+  sPreparedHits=sPreparedMisses=sPreparedRejected=0;
+}
+void prepared_display_list_stats(uint64_t& hits,uint64_t& misses,uint64_t& rejected) {
+  hits=sPreparedHits;misses=sPreparedMisses;rejected=sPreparedRejected;
+}
+bool submit_prepared_display_list(const std::shared_ptr<const std::vector<uint8_t>>& bytes,
+                                  uint32_t size,const uint8_t* stableSource,uint64_t immutableIdentity) {
+  if(!sPreparedListsEnabled||!bytes||size<3||size>bytes->size()||
+      aurora::vita::gfx::gxm_disabled(aurora::vita::gfx::GxmDisableDirectDisplayList))return false;
+  ProcessTimeScope processTimeScope;
+  const auto fmt=static_cast<GXVtxFmt>((*bytes)[0]&CP_VAT_MASK);
+  const uint32_t stride=g_gxState.lastVtxFmt==fmt?g_gxState.lastVtxSize:calculate_last_vtx_size(fmt);
+  auto& entry=sPreparedLists[immutableIdentity%sPreparedLists.size()];
+  PreparedDisplayList draw{};
+  if(immutableIdentity&&entry.identity==immutableIdentity&&
+      entry.size==size&&entry.draw.stride==stride) {
+    draw=entry.draw;++sPreparedHits;
+  } else {
+    ++sPreparedMisses;draw=prepare_display_list(bytes->data(),size,stride);
+    // No allocations or extra snapshot references on the GX hot path.
+    // Tokens are assigned when the producer creates an immutable copy.
+    if(immutableIdentity){entry={immutableIdentity,draw,size};entry.draw.stride=stride;}
+  }
+  if(!draw.valid){++sPreparedRejected;return false;}
+  const auto result=aurora::vita::draw_sink().submit(
+      uint8_t(primitive_from_draw_cmd(draw.command)),uint8_t(fmt),bytes->data()+3,
+      draw.vertexBytes,draw.count,nullptr,0,stableSource?stableSource+3:nullptr);
+  if(result.ok)g_gxState.stateDirty=false;
+  // A recognized draw has executed even when unsupported by DrawSink. Do not
+  // replay it through process(), which would duplicate side effects/counters.
+  return true;
 }
 
 bool submit_simple_display_list(const uint8_t* data, uint32_t size) {

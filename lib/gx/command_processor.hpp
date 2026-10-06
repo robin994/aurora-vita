@@ -1,6 +1,8 @@
 #pragma once
 
 #include "dolphin/gx/GXEnum.h"
+#include <memory>
+#include <vector>
 #include "../internal.hpp"
 
 namespace aurora::gx::fifo {
@@ -21,6 +23,12 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
 // the async worker is active it returns false so GXCallDisplayList falls back
 // to the ordered FIFO and keeps DrawSink/GXState single-owner.
 bool submit_simple_display_list(const uint8_t* data, uint32_t size);
+// Consumer only: preceding CP/XF/BP segments have already executed. No producer
+// dirty-state access, FIFO drain, reordering or additional lifetime barrier.
+void set_prepared_display_lists_enabled(bool enabled);
+bool submit_prepared_display_list(const std::shared_ptr<const std::vector<uint8_t>>& bytes,
+                                  uint32_t size,const uint8_t* stableSource,uint64_t immutableIdentity);
+void prepared_display_list_stats(uint64_t& hits,uint64_t& misses,uint64_t& rejected);
 #endif
 
 } // namespace aurora::gx::fifo

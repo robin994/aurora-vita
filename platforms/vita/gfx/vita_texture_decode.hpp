@@ -17,6 +17,7 @@ enum class NativeTextureFormat : uint8_t {
   LuminanceAlpha8,
   Rgb565,
   Bc1,
+  Rgba8,
 };
 size_t encoded_texture_size(uint32_t width, uint32_t height, TextureFormat format) noexcept;
 size_t encoded_mip_chain_size(uint32_t width, uint32_t height, TextureFormat format, uint8_t mipCount) noexcept;

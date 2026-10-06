@@ -16,6 +16,7 @@
 #include "../../lib/vita/render_size.hpp"
 #if defined(MKW_TARGET_VITA)
 #include "../../lib/gx/fifo.hpp"
+#include "../../lib/gx/command_processor.hpp"
 #endif
 #include <algorithm>
 #include <atomic>
@@ -341,13 +342,18 @@ bool initialize(const BackendConfig& c) noexcept {
 #if defined(MKW_TARGET_VITA)
   gfx::gxm_disable_mask()=c.gxm_disable_mask;
 #endif
-  g_telemetryEnabled=c.diagnostics_enabled&&(c.diagnostics||c.telemetry_log_path||gfx::gxm_disabled(gfx::GxmDiagPhases));
+  gfx::configure_native_assets(c.native_asset_reader,c.native_asset_context);
+  g_telemetryEnabled=c.diagnostics_enabled&&(c.diagnostics||c.performance_attribution||c.telemetry_log_path||gfx::gxm_disabled(gfx::GxmDiagPhases));
   // GxmDiagPhases is the lightweight shipping-style profiling switch used by
   // Strikers.  Keep FIFO timing in the same diagnostic envelope so per-view
   // phase snapshots can attribute display-list/command-processor cost without
   // enabling full diagnostics or file telemetry.
   gfx::set_fifo_profile_enabled(g_telemetryEnabled);
+  // Completed-frame attribution avoids two syscalls for every CP/XF/BP byte
+  // command. Top-level FIFO and draw/phase timers remain available.
+  gfx::g_fifoCommandTimingsEnabled=!c.performance_attribution;
 #if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::set_prepared_display_lists_enabled(c.prepared_display_lists);
   aurora::gx::fifo::set_bp_write_cache_enabled(c.bp_write_cache);
   aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow&&
       !gfx::gxm_disabled(gfx::GxmDisableDisplayListShadow));
@@ -446,6 +452,7 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
   rc.nativeFragmentPrepareCache=c.gxm_fragment_prepare_cache;
+  rc.residentGeometryInCdram=c.resident_geometry_cdram;rc.exactBc1=c.exact_bc1;
   rc.nativeScenesPerFrame=std::max(c.gxm_scenes_per_frame,1u);
   rc.nativeParameterBufferBytes=c.gxm_parameter_buffer_bytes;
   // The native budget covers persistent streaming buffers as well as textures.
@@ -791,6 +798,7 @@ void shutdown() noexcept {
   g_diagnosticsEnabled=false;
   g_telemetryEnabled=false;
   gfx::set_fifo_profile_enabled(false);
+  gfx::configure_native_assets(nullptr,nullptr);
   g_coverageEnabled=false;
   g_traceEnabled=false;
   g_initialized=false;
@@ -822,7 +830,11 @@ PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* su
   PerformanceSnapshot out{};
 #if defined(MKW_TARGET_VITA)
   out.gxProcessTotalUs=aurora::gx::fifo::process_time_total_us();
+  aurora::gx::fifo::prepared_display_list_stats(out.preparedListHits,out.preparedListMisses,out.preparedListRejected);
 #endif
+  out.producerWaitUs=g_lastProducerWaitUs;out.consumerWaitUs=g_lastConsumerWaitUs;
+  out.poolBusyFallbacks=gfx::cpu_pool_busy_fallbacks();
+  out.frontend=g_telemetry.frame();out.nativeAssets=gfx::native_asset_stats();
   out.frameIndex=g_frame;
   out.frameUs=g_last;
   out.displayQueueLastUs=g_displayQueueLastUs;
@@ -941,6 +953,7 @@ bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* cont
 
 uint32_t worker_threads() noexcept { return gfx::cpu_worker_threads(); }
 uint32_t execution_lanes() noexcept { return gfx::cpu_execution_lanes(); }
+uint32_t game_execution_lanes() noexcept {return g_config.cpu_game_execution_lanes?g_config.cpu_game_execution_lanes:gfx::cpu_execution_lanes();}
 bool core3_available() noexcept { return gfx::cpu_core3_available(); }
 int core3_cpu_id() noexcept { return gfx::cpu_core3_cpu_id(); }
 int core3_affinity_mask() noexcept { return gfx::cpu_core3_affinity_mask(); }

@@ -57,6 +57,23 @@ int main(){
   for(unsigned i=0;i<4;++i){blocks[i*8]=0;blocks[i*8+1]=0;blocks[i*8+2]=0xff;blocks[i*8+3]=0xff;}
   blocks[4]=0xc0;CHECK(!gxm::prepare_compact_texture(d).ok());blocks[4]=0;
   d.cacheable=false;CHECK(!gxm::prepare_compact_texture(d).ok());d.cacheable=true;
+  d.immutableSource=true;d.cacheable=false;
+  CHECK(gxm::prepare_compact_texture(d).ok());
+  auto native=gxm::prepare_texture_upload(d,true,true);
+  CHECK(native.ok());CHECK(native.format==NativeTextureFormat::Bc1);
+  CHECK(gxm::texture_upload_budget_bytes(native)==4096);
+  auto reference=gxm::prepare_texture_upload(d,false,false);
+  CHECK(reference.ok());CHECK(reference.format==NativeTextureFormat::Rgba8);
+  CHECK(reference.pixels==gxm::prepare_swizzled_texture(d).pixels);
+  d.immutableSource=false;
+  CHECK(gxm::prepare_texture_upload(d,true,true).format==NativeTextureFormat::Rgba8);
   d.dataSize=31;CHECK(!gxm::prepare_compact_texture(d).ok());
+  CHECK(!gxm::prepare_texture_upload(d).ok());
+  std::vector<uint8_t> intensity(128*128,0x5a);
+  d={};d.width=128;d.height=128;d.format=TextureFormat::I8;d.data=intensity.data();d.dataSize=intensity.size();
+  native=gxm::prepare_texture_upload(d);reference=gxm::prepare_texture_upload(d,false);
+  CHECK(gxm::texture_upload_budget_bytes(native)==16384);
+  CHECK(gxm::texture_upload_budget_bytes(reference)==65536);
+  CHECK(native.pixels.size()==16384);
   std::printf("compact texture levels/bounds/texel equivalence: %zu checks\n",checks);
 }

@@ -24,4 +24,8 @@ struct CompactTextureData : LinearTextureData {
 // formats/generated levels use the existing RGBA8 path. BC1 is single-level,
 // aligned and accepted only by the exact CMPR conversion.
 CompactTextureData prepare_compact_texture(const gfx::TextureDesc& desc,bool exactCmpr=true);
+// Prepare once before cache budget admission. bytes are the exact selected
+// layout including explicit mip levels and row padding, before pool alignment.
+CompactTextureData prepare_texture_upload(const gfx::TextureDesc& desc,bool compact=true,bool exactCmpr=true);
+size_t texture_upload_budget_bytes(const CompactTextureData& upload) noexcept;
 }

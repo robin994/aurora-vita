@@ -147,6 +147,7 @@ void note_pipeline_invalidation(unsigned line) noexcept;
 // Formats the top entries ("line:count ...") and clears the table.
 std::string take_pipeline_invalidation_report();
 extern bool g_fifoProfileEnabled;
+extern bool g_fifoCommandTimingsEnabled;
 inline void set_fifo_profile_enabled(bool enabled) noexcept { g_fifoProfileEnabled = enabled; }
 // Returns the accumulated profile and clears the accumulator.
 FifoProfile fifo_profile_take() noexcept;

@@ -7,6 +7,7 @@
 #include "integration/vita_feature_coverage.hpp"
 #include "integration/vita_frame_trace.hpp"
 #include "gfx/vita_memory_budget.hpp"
+#include "gfx/vita_native_assets.hpp"
 namespace aurora::vita::gfx { class Renderer; }
 namespace aurora::vita::gxbridge { class DrawSink; }
 namespace aurora::vita {
@@ -71,6 +72,11 @@ struct PerformanceSnapshot {
   // Cumulative wall time in top-level GX command processing (Aurora's share of
   // the frame when the GX worker is off). Consumers diff consecutive values.
   uint64_t gxProcessTotalUs=0;
+  uint64_t producerWaitUs=0,consumerWaitUs=0;
+  uint64_t preparedListHits=0,preparedListMisses=0,preparedListRejected=0;
+  uint64_t poolBusyFallbacks=0;
+  gfx::FrameTelemetry frontend{};
+  gfx::NativeAssetStats nativeAssets{};
   // gxm_disable bit 0x100 diagnostic: GPU time per scene of the last frame.
   uint32_t diagSceneGpuUs[4]{};
   bool core3Available=false;
@@ -174,6 +180,7 @@ struct BackendConfig {
   // Expensive per-draw coverage/trace instrumentation is opt-in for shipping
   // ports. Supplying any diagnostic output path still enables it automatically.
   bool diagnostics=false;
+  bool performance_attribution=false; // Phase counters only, without coverage/trace.
   // Profiling only: separate CPU decode and transform passes. Leave disabled for
   // normal fused execution; enabling it changes cache locality and worker wakes.
   bool profile_split_vertex_phases=false;
@@ -193,6 +200,10 @@ struct BackendConfig {
   // Keep cached-RAM copies of CDRAM display lists between frames. Requires the
   // port to publish every write to display-list memory (see fifo.hpp).
   bool display_list_shadow=true;
+  bool prepared_display_lists=false;
+  bool resident_geometry_cdram=false,exact_bc1=false;
+  gfx::NativeAssetReader native_asset_reader=nullptr;
+  void* native_asset_context=nullptr;
   // Exact producer-side BP material-write elision; enable separately for A/B.
   bool bp_write_cache=false;
   // Prepared fragment bytes only; each draw still reserves a fresh GXM buffer.
@@ -290,6 +301,7 @@ size_t invalidate_texture_source_range(uint64_t start,size_t bytes) noexcept;
 bool parallel_for(size_t count,size_t minItems,ParallelRangeTask task,void* context) noexcept;
 uint32_t worker_threads() noexcept;
 uint32_t execution_lanes() noexcept;
+uint32_t game_execution_lanes() noexcept;
 bool core3_available() noexcept;
 int core3_cpu_id() noexcept;
 int core3_affinity_mask() noexcept;

@@ -14,6 +14,7 @@ public:
   void erase(Handle h) noexcept;void clear() noexcept;void trim(uint64_t frame) noexcept;
   size_t invalidate_source_range(uint64_t start,size_t bytes) noexcept;
   size_t bytes()const noexcept{return bytes_;}size_t entries()const noexcept{return byKey_.size();}
+  void set_exact_bc1(bool enabled) noexcept {exactBc1_=enabled;}
   size_t budget() const noexcept{return budget_;}
   size_t high_water_bytes() const noexcept{return highWaterBytes_;}
   uint64_t evictions() const noexcept{return evictions_;}
@@ -24,6 +25,7 @@ public:
   uint64_t last_requested_bytes() const noexcept{return lastRequestedBytes_;}
 private:
   friend class Renderer;
+  bool exactBc1_=false;
 #if defined(AURORA_VITA_RENDERER_GXM)
   gxm::Renderer* native_=nullptr;
 #endif
