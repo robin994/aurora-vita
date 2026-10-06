@@ -59,7 +59,10 @@ static double alpha(unsigned arg,const TevStage& s,const std::array<RGBA,4>& reg
 }
 static double reference(std::array<double,4> v,TevOp op,TevBias bias,TevScale scale,bool clamp) {
   const double b[]{0.,.5,-.5},sc[]{1.,2.,4.,.5};
-  const double mix=v[0]*(1.-v[2])+v[1]*v[2];
+  // Match the emitted/Cg lerp evaluation order. The algebraically equivalent
+  // A*(1-C)+B*C form accumulates different host double rounding and made this
+  // equivalence test depend on the standard library's random sample sequence.
+  const double mix=v[0]+(v[1]-v[0])*v[2];
   return std::clamp((v[3]+(op==TevOp::Add?mix:-mix)+b[unsigned(bias)])*sc[unsigned(scale)],clamp?0.:-4.,clamp?1.:4.);
 }
 static std::string rhs(const std::string& source,const std::string& lhs) {
