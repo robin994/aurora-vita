@@ -7,6 +7,16 @@
 
 namespace aurora::gx::fifo {
 
+struct XfEqualPositionStats {
+  uint64_t inspected=0;
+  uint64_t unchanged=0;
+  uint64_t changed=0;
+};
+// A2a: position palette XF writes only. OFF is the existing reference path.
+// Configure before starting the GX worker; read statistics only after joining.
+void set_xf_equal_position_writes(bool enabled) noexcept;
+XfEqualPositionStats xf_equal_position_stats() noexcept;
+
 // Reset the CP write-deduplication state whenever the GX shadow state is reinitialized.
 void reset_cp_register_cache();
 

@@ -50,6 +50,8 @@ struct PerformanceSnapshot {
   uint32_t nativeScissorFreeDraws=0;
   uint32_t nativePipelineSetters=0,nativePipelineSettersSkipped=0,nativeUniformUploadCalls=0;
   uint64_t nativeUniformUploadBytes=0;
+  uint32_t nativeVertexDeltaCopies=0,nativeVertexDeltaSavedCalls=0,nativeVertexDeltaFallbacks=0;
+  uint64_t nativeVertexDeltaCopiedBytes=0,nativeVertexDeltaSavedBytes=0;
   uint64_t batchCandidates=0,batchMerged=0,batchRejectedState=0,batchRejectedIndices=0;
   uint64_t staticGeometryHits=0;
   uint64_t staticGeometryMisses=0;
@@ -72,6 +74,9 @@ struct PerformanceSnapshot {
   // Cumulative wall time in top-level GX command processing (Aurora's share of
   // the frame when the GX worker is off). Consumers diff consecutive values.
   uint64_t gxProcessTotalUs=0;
+  uint64_t xfPositionWritesInspected=0;
+  uint64_t xfPositionWritesUnchanged=0;
+  uint64_t xfPositionWritesChanged=0;
   uint64_t producerWaitUs=0,consumerWaitUs=0;
   uint64_t preparedListHits=0,preparedListMisses=0,preparedListRejected=0;
   uint64_t poolBusyFallbacks=0;
@@ -206,8 +211,16 @@ struct BackendConfig {
   void* native_asset_context=nullptr;
   // Exact producer-side BP material-write elision; enable separately for A/B.
   bool bp_write_cache=false;
+  // A2a: bit-exact redundant XF position-matrix write suppression. Opt-in.
+  bool gxm_xf_equal_pos_writes=false;
   // Prepared fragment bytes only; each draw still reserves a fresh GXM buffer.
   bool gxm_fragment_prepare_cache=false;
+  // A3 experimental: copy a CPU-owned GXP vertex buffer image and upload only
+  // changed indexed-PN parameter spans. Defaults OFF and never skips a draw.
+  bool gxm_uniform_delta_upload=false;
+  // A4 opt-in native-TEV shader specialization, 0 reference, 1 fetch CSE,
+  // 2 dead RGB/alpha channels, 3 both. Does not skip any draw or render view.
+  uint8_t gxm_a4_fragment_opt=0;
   // Retain CPU storage for fully rebuilt fixed-vertex snapshots, opt-in.
   bool gxm_fixed_uniform_pool=false;
   // Skip speculative geometry decode when even its minimum size cannot fit
@@ -269,6 +282,10 @@ bool begin_frame() noexcept;void end_frame() noexcept;void shutdown() noexcept;
 // Block until the GX worker (if running) has processed every queued command,
 // before reading renderer state or the framebuffer from the game thread.
 void wait_for_render_idle() noexcept;
+// Called only by the GX consumer at an ordered diagnostic FIFO view marker.
+// Drains deferred draw packets before switching the recorded view, without
+// waiting for GPU completion. Does nothing when capture is not active.
+void view_draw_mark_consumer(uint64_t producerFrame, uint32_t view) noexcept;
 void set_presentation_aspect(float aspect) noexcept;
 // GameCube glDiscardFrame means that the completed EFB must not become the
 // visible XFB.  The Vita host loop owns vglSwapBuffers(), so the GX layer uses

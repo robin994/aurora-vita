@@ -3,6 +3,12 @@
 #include "gfx/vita_memory_revision.hpp"
 #include "gfx/vita_published_snapshot.hpp"
 #include "gfx/vita_renderer.hpp"
+#include <aurora_vita_shader_debug.h>
+#include <aurora_vita_view_draw_capture.h>
+#include "gfx/vita_view_draw_capture.hpp"
+#if defined(AURORA_VITA_RENDERER_GXM)
+#include "gfx/vita_shader_debug_registry.hpp"
+#endif
 #include "gfx/vita_vertex_decode.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "vita_data_paths.hpp"
@@ -297,6 +303,73 @@ extern "C" void aurora_vita_debug_set_shader_runtime_compile(int enabled) noexce
   set_runtime_shader_compilation_enabled(enabled!=0);
 }
 
+extern "C" void aurora_vita_shader_debug_capture(int enabled) {
+#if defined(AURORA_VITA_RENDERER_GXM)
+  gfx::shader_debug_registry().set_recording(enabled!=0);
+#else
+  (void)enabled;
+#endif
+}
+
+extern "C" size_t aurora_vita_shader_debug_snapshot(AuroraVitaDebugFragment* out, size_t capacity) {
+#if defined(AURORA_VITA_RENDERER_GXM)
+  return gfx::shader_debug_registry().snapshot(out,capacity);
+#else
+  (void)out;(void)capacity;return 0;
+#endif
+}
+
+extern "C" int aurora_vita_shader_debug_set_enabled(uint64_t hash, int enabled) {
+#if defined(AURORA_VITA_RENDERER_GXM)
+  return gfx::shader_debug_registry().set_enabled(hash,enabled!=0)?1:0;
+#else
+  (void)hash;(void)enabled;return 0;
+#endif
+}
+
+extern "C" void aurora_vita_shader_debug_restore_all(void) {
+#if defined(AURORA_VITA_RENDERER_GXM)
+  gfx::shader_debug_registry().restore_all();
+#endif
+}
+
+extern "C" void aurora_vita_shader_debug_bypass(int enabled) {
+#if defined(AURORA_VITA_RENDERER_GXM)
+  gfx::shader_debug_registry().set_bypass(enabled!=0);
+#else
+  (void)enabled;
+#endif
+}
+
+extern "C" int aurora_vita_view_draw_start(size_t capacity) {
+  return aurora_vita_view_draw_start_ex(capacity,0);
+}
+extern "C" int aurora_vita_view_draw_start_ex(size_t capacity, int capturePayloads) {
+  return gfx::view_draw_capture().start(capacity,capturePayloads!=0) ? 1 : 0;
+}
+extern "C" void aurora_vita_view_draw_stop(void) {
+  gfx::view_draw_capture().stop();
+}
+extern "C" size_t aurora_vita_view_draw_count(void) {
+  return gfx::view_draw_capture().count();
+}
+extern "C" size_t aurora_vita_view_draw_capacity(void) {
+  return gfx::view_draw_capture().capacity();
+}
+extern "C" uint64_t aurora_vita_view_draw_lost(void) {
+  return gfx::view_draw_capture().lost();
+}
+extern "C" size_t aurora_vita_view_draw_read(size_t first, AuroraViewDrawRecord* out, size_t maximum) {
+  return gfx::view_draw_capture().read(first,out,maximum);
+}
+extern "C" void aurora_vita_view_draw_mark(uint32_t view, uint64_t producerFrame) {
+#if defined(MKW_TARGET_VITA)
+  aurora::gx::fifo::write_view_marker(view,producerFrame);
+#else
+  gfx::view_draw_capture().mark(producerFrame,view);
+#endif
+}
+
 extern "C" uint32_t aurora_vita_debug_build_flags(void) noexcept {
   uint32_t flags=0;
 #if defined(AURORA_VITA_RENDERER_GXM)
@@ -313,6 +386,11 @@ extern "C" uint32_t aurora_vita_debug_build_flags(void) noexcept {
 
 bool initialize(const BackendConfig& c) noexcept {
   if (g_initialized) return true;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  // The previous renderer has been shut down; reset slot identities while
+  // preserving the boot-time diagnostic capture option.
+  gfx::shader_debug_registry().clear_catalog();
+#endif
   g_config=c;
   set_runtime_diagnostics_enabled(c.diagnostics_enabled);
   g_completedPerformance.publish(PerformanceSnapshot{});
@@ -355,6 +433,7 @@ bool initialize(const BackendConfig& c) noexcept {
 #if defined(MKW_TARGET_VITA)
   aurora::gx::fifo::set_prepared_display_lists_enabled(c.prepared_display_lists);
   aurora::gx::fifo::set_bp_write_cache_enabled(c.bp_write_cache);
+  aurora::gx::fifo::set_xf_equal_position_writes(c.gxm_xf_equal_pos_writes);
   aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow&&
       !gfx::gxm_disabled(gfx::GxmDisableDisplayListShadow));
 #endif
@@ -452,6 +531,8 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
   rc.nativeFragmentPrepareCache=c.gxm_fragment_prepare_cache;
+  rc.nativeVertexUniformDelta=c.gxm_uniform_delta_upload;
+  rc.nativeTevA4Mask=c.gxm_a4_fragment_opt;
   rc.residentGeometryInCdram=c.resident_geometry_cdram;rc.exactBc1=c.exact_bc1;
   rc.nativeScenesPerFrame=std::max(c.gxm_scenes_per_frame,1u);
   rc.nativeParameterBufferBytes=c.gxm_parameter_buffer_bytes;
@@ -710,6 +791,10 @@ void end_frame_now() noexcept {
   g_renderer->end_frame();
   const uint64_t presentStart = now_us();
   g_renderer->present(!g_discardPresent);
+  if(g_renderer->failed())gfx::view_draw_capture().suppressed_draw();
+  // Published after all native draws from this frame have been submitted.
+  // The worker owns capture mutations until end_frame() joins it.
+  gfx::view_draw_capture().complete(g_frame+1);
   const uint64_t end = now_us();
   g_last=end-g_start;
   if(g_config.diagnostics_enabled&&!g_discardPresent) {
@@ -763,6 +848,18 @@ void invalidate_texture_task(void* p) {
     g_drawSink->invalidate_texture_resolve_cache();
 }
 } // namespace
+
+void view_draw_mark_consumer(uint64_t producerFrame, uint32_t view) noexcept {
+  auto& capture=gfx::view_draw_capture();
+  if(!capture.enabled())return;
+  // Some GX commands enqueue native draw packets for later execution. The
+  // marker follows those commands in the FIFO, but without this flush the
+  // native draws could execute under the *next* view's label. A diagnostic
+  // flush submits those packets in-order and never calls sceGxmFinish().
+  if(g_drawSink)g_drawSink->flush();
+  if(g_renderer&&g_renderer->failed())capture.suppressed_draw();
+  capture.mark(producerFrame,view);
+}
 
 void end_frame() noexcept {
   if(!g_initialized) return;
@@ -830,6 +927,10 @@ PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* su
   PerformanceSnapshot out{};
 #if defined(MKW_TARGET_VITA)
   out.gxProcessTotalUs=aurora::gx::fifo::process_time_total_us();
+  const auto xf=aurora::gx::fifo::xf_equal_position_stats();
+  out.xfPositionWritesInspected=xf.inspected;
+  out.xfPositionWritesUnchanged=xf.unchanged;
+  out.xfPositionWritesChanged=xf.changed;
   aurora::gx::fifo::prepared_display_list_stats(out.preparedListHits,out.preparedListMisses,out.preparedListRejected);
 #endif
   out.producerWaitUs=g_lastProducerWaitUs;out.consumerWaitUs=g_lastConsumerWaitUs;
@@ -897,6 +998,11 @@ PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* su
   out.nativePipelineSettersSkipped=stats.nativePipelineSettersSkipped;
   out.nativeUniformUploadCalls=stats.nativeUniformUploadCalls;
   out.nativeUniformUploadBytes=stats.nativeUniformUploadBytes;
+  out.nativeVertexDeltaCopies=stats.nativeVertexDeltaCopies;
+  out.nativeVertexDeltaSavedCalls=stats.nativeVertexDeltaSavedCalls;
+  out.nativeVertexDeltaFallbacks=stats.nativeVertexDeltaFallbacks;
+  out.nativeVertexDeltaCopiedBytes=stats.nativeVertexDeltaCopiedBytes;
+  out.nativeVertexDeltaSavedBytes=stats.nativeVertexDeltaSavedBytes;
   const auto& counters=g_telemetry.frame().counters;
   out.batchCandidates=counters.batchCandidates;out.batchMerged=counters.batchMerged;
   out.batchRejectedState=counters.batchRejectedState;out.batchRejectedIndices=counters.batchRejectedIndices;

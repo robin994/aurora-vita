@@ -1,5 +1,6 @@
 #include "gxm/gxm_shader_gen.hpp"
 #include "gfx/vita_fixed_vertex.hpp"
+#include "../platforms/vita/gxm/gxm_tev_opt.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -124,6 +125,152 @@ static void equivalence() {
   d.tev.stages[0].colorOp=TevOp::Add;d.tev.stages[0].indirectEnabled=true;
   CHECK(!gxm::native_material_supported(d));
 }
+
+// A1b: independent Boolean truth table for alpha predicates whose outcome
+// must not depend on fragment input. A4 may only drop a kill after this oracle
+// and the device-level threshold tests agree; this test does not model FP32.
+static void unconditional_alpha_oracles() {
+  PipelineDesc d{};
+  d.fragmentScissor=false;
+  d.layout=gpu_vertex_layout();
+  d.tev.stageCount=1;
+  for(unsigned first=0;first<2;++first)
+    for(unsigned second=0;second<2;++second)
+      for(unsigned op=0;op<4;++op)
+        for(unsigned ref0=0;ref0<256;++ref0) {
+          d.tev.alphaCompare={first?Compare::Always:Compare::Never,
+                              static_cast<uint8_t>(ref0),static_cast<uint8_t>(op),
+                              second?Compare::Always:Compare::Never,
+                              static_cast<uint8_t>(255-ref0)};
+          const bool lhs=first!=0,rhs=second!=0;
+          const bool expected=op==0?(lhs&&rhs):op==1?(lhs||rhs):op==2?(lhs!=rhs):(lhs==rhs);
+          const auto cg=gxm::build_material_cg(d);
+          CHECK(cg.ok());
+          CHECK(cg.discardAll==!expected);
+          CHECK(cg.fragment.find("if(!(")==std::string::npos);
+        }
+  for(unsigned comp=0;comp<8;++comp)
+    for(unsigned ref:{0u,1u,127u,255u}) {
+      for(unsigned op=2;op<4;++op) {
+        d.tev.alphaCompare={Compare(comp),static_cast<uint8_t>(ref),static_cast<uint8_t>(op),
+                            Compare(comp),static_cast<uint8_t>(ref)};
+        const auto cg=gxm::build_material_cg(d);
+        CHECK(cg.ok());
+        CHECK(cg.discardAll==(op==2)); // A XOR A = false; A XNOR A = true.
+        CHECK(cg.fragment.find("if(!(")==std::string::npos);
+      }
+    }
+}
+
+static unsigned count_text(const std::string& text,const std::string& needle) {
+  unsigned result=0;size_t at=0;
+  while((at=text.find(needle,at))!=std::string::npos) {++result;at+=needle.size();}
+  return result;
+}
+
+static void a4_source_oracles() {
+  std::mt19937 rng(0x41555234);
+  unsigned reused=0,removed=0;
+  for(unsigned trial=0;trial<320;++trial) {
+    PipelineDesc d{};d.fragmentScissor=trial%2==0;
+    d.layout=gpu_vertex_layout(255,3);d.tev.stageCount=uint8_t(1+trial%16);
+    d.texgenCount=4;
+    d.tev.alphaCompare.comp0=trial&1?Compare::LessEqual:Compare::Always;
+    d.tev.alphaCompare.ref0=uint8_t(trial);
+    for(unsigned i=0;i<d.tev.stageCount;++i) {
+      auto& s=d.tev.stages[i];
+      s.colorOut=TevReg(rng()%4);s.alphaOut=TevReg(rng()%4);
+      s.texture=uint8_t(i%4);s.texCoord=uint8_t(i%4);
+      s.color={TevColorArg(rng()%16),TevColorArg(rng()%16),
+               TevColorArg(rng()%16),TevColorArg(rng()%16)};
+      s.alpha={TevAlphaArg(rng()%8),TevAlphaArg(rng()%8),
+               TevAlphaArg(rng()%8),TevAlphaArg(rng()%8)};
+      s.colorOp=TevOp(rng()%2);s.alphaOp=TevOp(rng()%2);
+      s.colorBias=TevBias(rng()%3);s.alphaBias=TevBias(rng()%3);
+      s.colorScale=TevScale(rng()%4);s.alphaScale=TevScale(rng()%4);
+      s.colorClamp=rng()%2;s.alphaClamp=rng()%2;
+      s.color.d=TevColorArg::TexColor;s.alpha.d=TevAlphaArg::TexAlpha;
+    }
+    const auto reference=gxm::build_material_cg(d);
+    CHECK(reference.ok()&&reference.nativeMaterial);
+    CHECK(reference.fragment==gxm::build_material_cg(d,true,0).fragment);
+    for(unsigned mask=1;mask<=3;++mask) {
+      const auto source=gxm::build_material_cg(d,true,uint8_t(mask));
+      CHECK(source.ok()&&source.nativeMaterial);
+      CHECK(source.vertex==reference.vertex);
+      CHECK(source.textureMask==reference.textureMask);
+      CHECK(source.texcoordMask==reference.texcoordMask);
+      CHECK(source.colorMask==reference.colorMask);
+      CHECK(source.discardAll==reference.discardAll);
+      const auto plan=gxm::plan_tev_optimization(d,uint8_t(mask));
+      CHECK(source.a4ReusedSamples==plan.reusedSamples);
+      CHECK(source.a4RemovedColorChannels==plan.unusedColor);
+      CHECK(source.a4RemovedAlphaChannels==plan.unusedAlpha);
+      CHECK(source.a4RemovedStages==plan.unusedStages);
+      const unsigned expectedFetches=count_text(reference.fragment,"tex2D(")-
+          (mask&2u?[] (const PipelineDesc& p,const gxm::TevOptimizationPlan& l) {
+            unsigned n=0;
+            for(unsigned i=0;i<p.tev.stageCount;++i)
+              if(gfx::tev_stage_uses_texture(p.tev.stages[i])&&!l.samples[i])++n;
+            return n;
+          }(d,plan):0u)-plan.reusedSamples;
+      CHECK(count_text(source.fragment,"tex2D(")==expectedFetches);
+      // The optimizer is liveness only: each surviving TEV arithmetic
+      // expression is byte-for-byte unchanged, including clamp/bias/scale.
+      for(unsigned i=0;i<d.tev.stageCount;++i) {
+        const std::string color="material_c"+std::to_string(i),alpha="material_a"+std::to_string(i);
+        for(const auto& entry:std::array<std::pair<std::string,bool>,2>{{
+              {color,plan.color[i]},{alpha,plan.alpha[i]}}}) {
+          if(entry.second)CHECK(rhs(source.fragment,entry.first)==rhs(reference.fragment,entry.first));
+          else CHECK(source.fragment.find(entry.first+"=clamp(")==std::string::npos);
+        }
+      }
+      reused+=source.a4ReusedSamples;removed+=source.a4RemovedStages;
+    }
+  }
+  CHECK(reused>0&&removed>0);
+  PipelineDesc d{};d.layout=gpu_vertex_layout();d.tev.stages[0].colorOp=TevOp::CompRGB8Greater;
+  CHECK(gxm::build_material_cg(d,true,3).fragment==gxm::build_material_cg(d,false,0).fragment);
+  std::printf("A4 native source: 960 mask comparisons, %u repeated fetches and %u dead stages optimized\n",reused,removed);
+}
+
+static void a4_sampler_conversion_oracles() {
+  for(unsigned copyMode=0;copyMode<=13;++copyMode)
+    for(unsigned opaque=0;opaque<2;++opaque)
+      for(unsigned hardwareWrap=0;hardwareWrap<2;++hardwareWrap) {
+        PipelineDesc d{};
+        d.layout=gpu_vertex_layout(255,3);
+        d.tev.stageCount=2;
+        d.texgenCount=1;
+        d.tev.stages[0].texture=d.tev.stages[1].texture=0;
+        d.tev.stages[0].texCoord=d.tev.stages[1].texCoord=0;
+        for(auto& s:d.tev.stages) {
+          s.color.d=TevColorArg::TexColor;
+          s.alpha.d=TevAlphaArg::TexAlpha;
+        }
+        d.textureCopyModeBits=copyMode;
+        d.textureForceOpaqueMask=opaque?1:0;
+        d.nativeTextureWrapMask=hardwareWrap?1:0;
+        d.tev.alphaCompare={Compare::Greater,127,0,Compare::LessEqual,250};
+        const auto reference=gxm::build_material_cg(d,true,0);
+        const auto a4=gxm::build_material_cg(d,true,1);
+        CHECK(reference.ok()&&a4.ok());
+        CHECK(reference.vertex==a4.vertex);
+        CHECK(reference.discardAll==a4.discardAll);
+        CHECK(count_text(reference.fragment,"tex2D(")==2);
+        CHECK(count_text(a4.fragment,"tex2D(")==1);
+        CHECK(a4.a4ReusedSamples==1);
+        CHECK(count_text(a4.fragment,"a4_tex_sample0=raw_tex;")==1);
+        CHECK(count_text(a4.fragment,"float4 raw_tex=a4_tex_sample0;")==1);
+        CHECK(count_text(a4.fragment,"if(!(")==count_text(reference.fragment,"if(!("));
+        // Copy-mode transforms and forced opacity remain applied before the
+        // shared result is cached, so later swizzles see the original values.
+        const size_t assignment=a4.fragment.find("a4_tex_sample0=raw_tex;");
+        if(copyMode==2)CHECK(a4.fragment.find("raw_tex=raw_tex.aaaa;")<assignment);
+        if(opaque)CHECK(a4.fragment.find("raw_tex.a=1.0;")<assignment);
+      }
+  std::puts("A4 native sampling: 56 texture format/opacity/wrap combinations preserved");
+}
 static void manifest(const char* path) {
   struct Header{uint32_t magic,version,size,count;};struct Record{uint64_t key,hits;PipelineDesc desc;};
   std::ifstream f(path,std::ios::binary);Header h{};f.read(reinterpret_cast<char*>(&h),sizeof h);
@@ -137,4 +284,4 @@ static void manifest(const char* path) {
   std::printf("manifest pipelines=%u native=%u hits=%llu native_hits=%llu coverage=%.3f%% cg_bytes=%llu->%llu\n",h.count,supported,
       (unsigned long long)hits,(unsigned long long)nativeHits,hits?100.*nativeHits/hits:0.,(unsigned long long)oldBytes,(unsigned long long)newBytes);
 }
-int main(int argc,char** argv){equivalence();if(argc>1)manifest(argv[1]);std::printf("native material equivalence: %zu checks\n",checks);}
+int main(int argc,char** argv){equivalence();unconditional_alpha_oracles();a4_source_oracles();a4_sampler_conversion_oracles();if(argc>1)manifest(argv[1]);std::printf("native material equivalence: %zu checks\n",checks);}

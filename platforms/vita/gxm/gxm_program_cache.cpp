@@ -1,4 +1,5 @@
 #include "gxm_program_cache.hpp"
+#include "gfx/vita_native_assets.hpp"
 #include "../vita_log.hpp"
 #include <cstdlib>
 #include <cstdio>
@@ -19,7 +20,7 @@ std::string cache_file(const std::string& root, uint64_t hash, ProgramStage stag
 
 void ProgramBinaryCache::configure(const char* path) noexcept {
   root_.clear();
-  hits_ = misses_ = 0;
+  hits_ = misses_ = archiveHits_ = 0;
   if (!path || !*path) return;
   root_ = std::string(path) + "/gxm-cg-gxp-v1";
   const size_t colon = root_.find(':');
@@ -32,24 +33,25 @@ void ProgramBinaryCache::configure(const char* path) noexcept {
 bool ProgramBinaryCache::load(uint64_t sourceHash, ProgramStage stage,
                               std::vector<uint32_t>& words) noexcept {
   const auto path = cache_file(root_, sourceHash, stage);
-  if (path.empty()) return false;
-  FILE* file = std::fopen(path.c_str(), "rb");
-  if (!file) { ++misses_; return false; }
-  GxmProgramCacheHeader header{};
-  if (std::fread(&header, sizeof(header), 1, file) != 1 || !header.length ||
-      header.length > gfx::MaxProgramCacheBytes) {
-    std::fclose(file); ++misses_; return false;
+  std::vector<uint8_t> record;
+  FILE* file = path.empty()?nullptr:std::fopen(path.c_str(), "rb");
+  if(file) {
+    GxmProgramCacheHeader header{};
+    if(std::fread(&header,sizeof header,1,file)==1&&header.length&&header.length<=gfx::MaxProgramCacheBytes) {
+      record.resize(sizeof header+header.length);std::memcpy(record.data(),&header,sizeof header);
+      if(std::fread(record.data()+sizeof header,1,header.length,file)!=header.length||std::fgetc(file)!=EOF)record.clear();
+    }
+    std::fclose(file);
   }
-  std::vector<uint8_t> bytes(header.length);
-  const bool readOk = std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size() &&
-      std::fgetc(file) == EOF;
-  std::fclose(file);
-  if (!readOk || !valid_gxm_program_cache(header, bytes.data(), bytes.size(), sourceHash, stage)) {
-    ++misses_;
-    return false;
+  if(!decode_gxm_program_cache(record,sourceHash,stage,words)) {
+    const auto nativePath=cache_file("native/v1/shaders/gxm-cg-gxp-v1",sourceHash,stage);
+    if(!gfx::read_native_blob(nativePath.c_str(),record,sizeof(GxmProgramCacheHeader)+gfx::MaxProgramCacheBytes)||
+        !decode_gxm_program_cache(record,sourceHash,stage,words)){++misses_;return false;}
+    ++archiveHits_;
+    if(archiveHits_<=4||(archiveHits_&(archiveHits_-1))==0)
+      AURORA_VITA_LOG_INFO("[aurora-gxm] native_shader hits=%u source=%016llx stage=%u\n",
+          archiveHits_,static_cast<unsigned long long>(sourceHash),unsigned(stage));
   }
-  words.assign((bytes.size() + 3u) / 4u, 0);
-  std::memcpy(words.data(), bytes.data(), bytes.size());
   ++hits_;
   if (hits_ <= 4 || (hits_ & (hits_ - 1)) == 0)
     AURORA_VITA_LOG_DEBUG("[aurora-gxm] program_cache hits=%u misses=%u\n",hits_,misses_);

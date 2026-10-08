@@ -22,6 +22,11 @@ struct Config {
   bool waitVblank = true;
   bool d16Depth = false;
   bool fragmentPrepareCache = false;
+  // A3 experimental indexed-PN uniform delta. Default OFF on all consumers.
+  bool vertexUniformDelta = false;
+  // A4 native arithmetic TEV: bit0 identical TEX/TEXCOORD fetch sharing,
+  // bit1 remove dead RGB/alpha register channels. OFF is the original Cg.
+  uint8_t tevA4Mask = 0;
   bool residentGeometryInCdram = false;
   bool exactBc1 = false;
   const char* shaderCompilerPath = nullptr;
@@ -89,8 +94,10 @@ public:
   bool blit_to_default(gfx::Handle handle,const gfx::Scissor* source=nullptr);
   bool copy_display_region(const gfx::Scissor& source);
   void set_presentation_aspect(float aspect) noexcept;
-  bool draw(const gfx::DrawPacket& packet);
-  bool draw(const gfx::DrawSubmissionView& view);
+  // Only guest draw submissions participate in the diagnostic shader filter.
+  // Native clear/blit/display passes must never be suppressed.
+  bool draw(const gfx::DrawPacket& packet, bool gameDraw=false);
+  bool draw(const gfx::DrawSubmissionView& view, bool gameDraw=false);
   bool bind_pipeline(uint64_t key,const gfx::GpuDrawUniforms& uniforms,const gfx::Scissor& scissor={},
                      const gfx::FixedVertexUniforms* fixedVertex=nullptr,
                      const std::array<gfx::TextureBinding,gfx::MaxTextures>* textures=nullptr,

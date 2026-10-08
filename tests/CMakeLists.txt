@@ -25,6 +25,23 @@ if (NOT TARGET robin_hood)
 endif ()
 
 if (AURORA_ENABLE_GX)
+  add_executable(vita_shader_debug_registry_test vita_shader_debug_registry_test.cpp)
+  target_include_directories(vita_shader_debug_registry_test PRIVATE ../include ../platforms/vita)
+  add_test(NAME vita_shader_debug_registry COMMAND vita_shader_debug_registry_test)
+  add_executable(vita_draw_payload_hash_test vita_draw_payload_hash_test.cpp)
+  target_include_directories(vita_draw_payload_hash_test PRIVATE ../include ../platforms/vita)
+  add_test(NAME vita_draw_payload_hash COMMAND vita_draw_payload_hash_test)
+
+  add_executable(vita_vertex_uniform_delta_test vita_vertex_uniform_delta_test.cpp)
+  add_test(NAME vita_vertex_uniform_delta COMMAND vita_vertex_uniform_delta_test)
+  add_executable(vita_tev_opt_test vita_tev_opt_test.cpp)
+  target_include_directories(vita_tev_opt_test PRIVATE ../platforms/vita)
+  add_test(NAME vita_tev_opt COMMAND vita_tev_opt_test)
+
+  add_executable(vita_view_draw_capture_test vita_view_draw_capture_test.cpp)
+  target_include_directories(vita_view_draw_capture_test PRIVATE ../include ../platforms/vita)
+  add_test(NAME vita_view_draw_capture COMMAND vita_view_draw_capture_test)
+
   # GX FIFO round-trip tests
   # Compile GX sources directly to avoid pulling in the full renderer/WebGPU runtime
   add_executable(gx_fifo_tests

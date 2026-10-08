@@ -5,14 +5,16 @@
 #include <iterator>
 namespace fs=std::filesystem;
 int main(int argc,char** argv) {
-  if(argc!=3){std::cerr<<"usage: vita_compile_native_assets REQUEST_DIRECTORY OUTPUT_ROOT\n";return 2;}
+  if(argc<3||argc>4||(argc==4&&std::string(argv[3])!="--include-rgba")){
+    std::cerr<<"usage: vita_compile_native_assets REQUEST_DIRECTORY OUTPUT_ROOT [--include-rgba]\n";return 2;
+  }
   size_t compiled=0,rejected=0;
   for(const auto& file:fs::directory_iterator(argv[1])) {
     if(file.path().extension()!=".avrq"||!file.is_regular_file())continue;
     if(file.file_size()>16u*1024u*1024u){++rejected;continue;}
     std::ifstream input(file.path(),std::ios::binary);
     std::vector<uint8_t> request((std::istreambuf_iterator<char>(input)),{}),record;
-    if(!aurora::vita::gfx::compile_native_asset(request,record)){++rejected;continue;}
+    if(!aurora::vita::gfx::compile_native_asset(request,record,argc==4)){++rejected;continue;}
     const auto relative=aurora::vita::gfx::native_asset_path(request);
     const auto output=fs::path(argv[2])/relative;fs::create_directories(output.parent_path());
     if(fs::exists(output)) {

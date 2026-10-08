@@ -43,6 +43,8 @@ const char* telemetry_phase_name(TelemetryPhase phase) noexcept {
     case TelemetryPhase::StateVertex: return "state_vertex";
     case TelemetryPhase::StateMemo: return "state_memo";
     case TelemetryPhase::StateLayout: return "state_layout";
+    case TelemetryPhase::FixedUniformBuild: return "fixed_uniform_build";
+    case TelemetryPhase::FixedUniformPublish: return "fixed_uniform_publish";
     case TelemetryPhase::Count: break;
   }
   return "unknown";

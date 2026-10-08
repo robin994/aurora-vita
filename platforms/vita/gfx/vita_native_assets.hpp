@@ -14,7 +14,11 @@ std::vector<uint8_t> native_geometry_request(const uint8_t* raw,size_t bytes,uin
 std::string native_asset_path(const std::vector<uint8_t>& request);
 // Shared compiler/consumer contract. Source bytes are verified exactly in the
 // record; the content hash is a lookup only. Original GX data remains fallback.
-bool compile_native_asset(const std::vector<uint8_t>& request,std::vector<uint8_t>& record);
+bool compile_native_asset(const std::vector<uint8_t>& request,std::vector<uint8_t>& record,
+                          bool includeRgba = false);
+// Consumer-only access for checked native records with another versioned ABI
+// (for example AVGX shader binaries). Their owner validates the complete record.
+bool read_native_blob(const char* path,std::vector<uint8_t>& bytes,size_t limit) noexcept;
 bool load_native_texture(const TextureDesc& desc,gxm::CompactTextureData& out,bool allowBc1) noexcept;
 bool load_native_geometry(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
                           const VertexDecodeLayout& layout,PreparedDraw& out) noexcept;

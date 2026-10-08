@@ -91,6 +91,33 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_regression_test.cpp)
     target_link_libraries(aurora_vita_regression_test PRIVATE aurora::vita_backend)
     add_test(NAME vita_regression COMMAND aurora_vita_regression_test)
+    # Independent opt-in diagnostics contracts (also tested by the installed
+    # host preset, which bypasses the upstream tests/CMakeLists.txt).
+    add_executable(aurora_vita_view_draw_capture_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_view_draw_capture_test.cpp)
+    target_include_directories(aurora_vita_view_draw_capture_test PRIVATE
+        ${AURORA_VITA_SOURCE_DIR}/include ${AURORA_VITA_SOURCE_DIR}/platforms/vita)
+    add_test(NAME vita_view_draw_capture COMMAND aurora_vita_view_draw_capture_test)
+    add_executable(aurora_vita_draw_payload_hash_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_draw_payload_hash_test.cpp)
+    target_include_directories(aurora_vita_draw_payload_hash_test PRIVATE
+        ${AURORA_VITA_SOURCE_DIR}/include ${AURORA_VITA_SOURCE_DIR}/platforms/vita)
+    add_test(NAME vita_draw_payload_hash COMMAND aurora_vita_draw_payload_hash_test)
+    add_executable(aurora_vita_vertex_uniform_delta_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_vertex_uniform_delta_test.cpp)
+    add_test(NAME vita_vertex_uniform_delta COMMAND aurora_vita_vertex_uniform_delta_test)
+    add_executable(aurora_vita_tev_opt_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_tev_opt_test.cpp)
+    target_include_directories(aurora_vita_tev_opt_test PRIVATE
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita)
+    add_test(NAME vita_tev_opt COMMAND aurora_vita_tev_opt_test)
+    add_executable(aurora_vita_shader_debug_registry_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_shader_debug_registry_test.cpp)
+    target_include_directories(aurora_vita_shader_debug_registry_test PRIVATE
+        ${AURORA_VITA_SOURCE_DIR}/include ${AURORA_VITA_SOURCE_DIR}/platforms/vita)
+    find_package(Threads REQUIRED)
+    target_link_libraries(aurora_vita_shader_debug_registry_test PRIVATE Threads::Threads)
+    add_test(NAME vita_shader_debug_registry COMMAND aurora_vita_shader_debug_registry_test)
     # Compile the real Dawn-free GX bridge on the host, rather than relying on
     # a stub ShaderConfig whose layout could hide frontend regressions.
     if(AURORA_VITA_WITH_GX_FRONTEND)

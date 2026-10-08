@@ -7,6 +7,8 @@
 #include "../../platforms/vita/gfx/vita_memory_revision.hpp"
 #include "../../platforms/vita/vita_thread_utils.hpp"
 #include "display_list_shadow.hpp"
+#include "../../platforms/vita/gfx/vita_view_draw_capture.hpp"
+#include "../../platforms/vita/aurora_vita_backend.hpp"
 #endif
 #include "../internal.hpp"
 
@@ -84,7 +86,7 @@ constexpr size_t VitaWorkerStackBytes = 1024u * 1024u;
 constexpr uint32_t VitaJobSegmentCapacity = 128;
 
 enum class VitaJobType : uint8_t { Fifo, Callback, Stop };
-enum class VitaJobSegmentType : uint8_t { Inline, PinnedDisplayList };
+enum class VitaJobSegmentType : uint8_t { Inline, PinnedDisplayList, ViewMarker };
 
 struct VitaJobSegment {
   VitaJobSegmentType type = VitaJobSegmentType::Inline;
@@ -199,6 +201,12 @@ int vita_worker_main(SceSize, void*) {
       if (job.segmentCount != 0) {
         for (uint32_t i = 0; i < job.segmentCount; ++i) {
           const auto& segment = job.segments[i];
+          if (segment.type == VitaJobSegmentType::ViewMarker) {
+            // A marker reuses otherwise irrelevant segment fields so the
+            // default FIFO job/segment footprint is unchanged.
+            aurora::vita::view_draw_mark_consumer(segment.pinnedIdentity, segment.offset);
+            continue;
+          }
           if (segment.bytes == 0) continue;
           if (segment.type == VitaJobSegmentType::Inline) {
             if (segment.offset > job.bytes.size() || segment.bytes > job.bytes.size() - segment.offset) continue;
@@ -355,6 +363,28 @@ bool start_worker() {
 }
 
 bool worker_running() { return sVitaWorker.running.load(std::memory_order_acquire); }
+
+void write_view_marker(uint32_t view, uint64_t producerFrame) {
+  auto& trace=aurora::vita::gfx::view_draw_capture();
+  if(!trace.enabled()||in_display_list())return;
+  if(!worker_running()||on_worker_thread()) {
+    // Synchronous fallback: decode all earlier writes first, then advance the
+    // consumer-owned view. No scene finish or GPU synchronization is added.
+    if(!on_worker_thread())drain();
+    aurora::vita::view_draw_mark_consumer(producerFrame,view);
+    return;
+  }
+  if(sPendingSegmentCount>=VitaJobSegmentCapacity-2u)drain();
+  if(!seal_inline_segment()||sPendingSegmentCount==VitaJobSegmentCapacity) {
+    trace.suppressed_draw(); // records lost: parser must refuse the capture.
+    return;
+  }
+  auto& segment=sPendingSegments[sPendingSegmentCount++];
+  segment={};
+  segment.type=VitaJobSegmentType::ViewMarker;
+  segment.pinnedIdentity=producerFrame;
+  segment.offset=view;
+}
 
 void take_wait_stats(uint64_t& producerWaitUs, uint64_t& consumerWaitUs) {
   producerWaitUs = sProducerWaitUs.exchange(0, std::memory_order_relaxed);

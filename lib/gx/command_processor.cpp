@@ -38,6 +38,17 @@
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
 
+namespace {
+bool sXfEqualPositionWrites=false;
+XfEqualPositionStats sXfEqualPositionStats{};
+}
+
+void set_xf_equal_position_writes(bool enabled) noexcept {
+  sXfEqualPositionWrites=enabled;
+  sXfEqualPositionStats={};
+}
+XfEqualPositionStats xf_equal_position_stats() noexcept {return sXfEqualPositionStats;}
+
 using IndexBuffer = std::vector<u16>;
 
 static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount) {
@@ -343,6 +354,26 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     XF_REQUIRE(startOffset == 0 && len == 12, "XF: PosMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
     auto& mtx = g_gxState.pnMtx[mtxIdx].pos;
     f32* flat = reinterpret_cast<f32*>(&mtx);
+    if (sXfEqualPositionWrites) {
+      ++sXfEqualPositionStats.inspected;
+      bool identical=true;
+      for (u32 i=0;i<len;++i) {
+        const u32 bits=read_u32(data+i*4,bigEndian);
+        u32 previous=0;
+        std::memcpy(&previous,&flat[i],sizeof(previous));
+        if(previous==bits)continue;
+        identical=false;
+        // Bit-preserving copy, including signed zero and NaN payloads.
+        std::memcpy(&flat[i],&bits,sizeof(bits));
+      }
+      if(identical) {
+        ++sXfEqualPositionStats.unchanged;
+        return true; // Same state, no new vertex revision or snapshots.
+      }
+      ++sXfEqualPositionStats.changed;
+      g_gxState.mark_dirty(StateDomain::Vertex);
+      return true;
+    }
     for (u32 i = 0; i < len; i++) {
       flat[i] = read_f32(data + i * 4, bigEndian);
     }

@@ -67,6 +67,9 @@ void set_display_list_shadow_enabled(bool enabled);
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian);
 // Cumulative wall time spent in top-level (non-nested) command processing.
 uint64_t process_time_total_us();
+// Opt-in diagnostic marker; preserves the order of producer view transitions
+// and their draws in the existing FIFO batch without a GPU finish/flush.
+void write_view_marker(uint32_t view, uint64_t producerFrame);
 #endif
 
 // Out-of-line slow path: grows internal buffer then appends data

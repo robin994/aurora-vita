@@ -541,6 +541,15 @@ void native_extended_contract() {
   REQUIRE(gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),vh,gxm::ProgramStage::Vertex));
   REQUIRE(!gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),fh,gxm::ProgramStage::Vertex));
   REQUIRE(!gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),vh,gxm::ProgramStage::Fragment));
+  std::vector<uint8_t> record(sizeof cache+gxp.size());
+  std::memcpy(record.data(),&cache,sizeof cache);std::memcpy(record.data()+sizeof cache,gxp.data(),gxp.size());
+  std::vector<uint32_t> decoded;
+  REQUIRE(gxm::decode_gxm_program_cache(record,vh,gxm::ProgramStage::Vertex,decoded));
+  REQUIRE(decoded.size()*4==gxp.size()&&std::memcmp(decoded.data(),gxp.data(),gxp.size())==0);
+  const auto saved=decoded;
+  REQUIRE(!gxm::decode_gxm_program_cache(record,fh,gxm::ProgramStage::Vertex,decoded));REQUIRE(decoded==saved);
+  record.push_back(0);REQUIRE(!gxm::decode_gxm_program_cache(record,vh,gxm::ProgramStage::Vertex,decoded));
+  record.pop_back();record.back()^=1;REQUIRE(!gxm::decode_gxm_program_cache(record,vh,gxm::ProgramStage::Vertex,decoded));
   gxp[5]^=1;
   REQUIRE(!gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),vh,gxm::ProgramStage::Vertex));
 }

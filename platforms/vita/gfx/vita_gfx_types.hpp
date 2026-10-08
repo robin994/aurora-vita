@@ -659,6 +659,13 @@ struct FrameStats {
   uint32_t nativePipelineSetters=0,nativePipelineSettersSkipped=0;
   uint32_t nativeUniformUploadCalls=0;
   uint64_t nativeUniformUploadBytes=0;
+  // A3 indexed-PN experiments; CPU bytes copied from a valid prepared image
+  // are tracked separately from eliminated sceGxmSetUniformDataF uploads.
+  uint32_t nativeVertexDeltaCopies=0;
+  uint32_t nativeVertexDeltaSavedCalls=0;
+  uint32_t nativeVertexDeltaFallbacks=0;
+  uint64_t nativeVertexDeltaCopiedBytes=0;
+  uint64_t nativeVertexDeltaSavedBytes=0;
   uint32_t nativeVertexUniformReuses = 0;
   uint32_t nativeFragmentUniformReuses = 0;
   // Cumulative preparation-cache counters, retained across frame resets.
