@@ -1118,13 +1118,23 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     const bool spriteExpand=translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite;
     const bool reference=gfx::gxm_disabled(gfx::GxmDisableFixedBuild);
     const gfx::FixedVertexUniforms* candidate;
-    if(reference) {
-      auto& scratch=fixedVertexUniforms_.scratch();
-      gfx::fixed_vertex_uniforms_into(scratch,translatedGpuPipeline_,vertexState);
-      candidate=&scratch;
-    } else candidate=&fixedUniformBuilder_.build(translatedGpuPipeline_,vertexState);
-    auto& shared=fixedVertexUniforms_.publish_from(*candidate,
-        !gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot),spriteExpand);
+    {
+      gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::FixedUniformBuild);
+      if(reference) {
+        auto& scratch=fixedVertexUniforms_.scratch();
+        gfx::fixed_vertex_uniforms_into(scratch,translatedGpuPipeline_,vertexState);
+        candidate=&scratch;
+      } else candidate=&fixedUniformBuilder_.build(translatedGpuPipeline_,vertexState);
+    }
+    // The published snapshot must be immutable until all queued GX draws have
+    // finished; the recorder measures copy/compare, never reuses live buffers.
+    gfx::FixedVertexUniforms* sharedPtr=nullptr;
+    {
+      gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::FixedUniformPublish);
+      sharedPtr=&fixedVertexUniforms_.publish_from(*candidate,
+          !gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot),spriteExpand);
+    }
+    auto& shared=*sharedPtr;
     if(spriteExpand){
       shared.primitiveExpand={{
         std::max(expansion.viewportWidth,1.f),std::max(expansion.viewportHeight,1.f),

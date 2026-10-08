@@ -63,6 +63,14 @@ int main() {
   CHECK(native.mipCount==2&&native.pixels==mipReference.pixels);
   desc.format=TextureFormat::RGBA8888;desc.mipCount=1;data.resize(128*128*4);
   desc.data=data.data();desc.dataSize=data.size();CHECK(!compile_native_asset(native_texture_request(desc),disk));
+  request=native_texture_request(desc);expected=native_asset_path(request);
+  CHECK(compile_native_asset(request,disk,true));CHECK(load_native_texture(desc,native,false));
+  const auto rgbaReference=aurora::vita::gxm::prepare_texture_upload(desc);
+  CHECK(native.format==NativeTextureFormat::Rgba8&&native.pixels==rgbaReference.pixels);
+  CHECK(native.mipCount==rgbaReference.mipCount&&native.stride==rgbaReference.stride);
+  std::vector<uint8_t> blob;
+  CHECK(read_native_blob(expected.c_str(),blob,disk.size()));CHECK(blob==disk);
+  CHECK(!read_native_blob(expected.c_str(),blob,disk.size()-1));CHECK(blob.empty());
   configure_native_assets(nullptr,nullptr);
   std::puts("native asset exact source, payload checksum, bounds, immutable eligibility and layout invalidation passed");
 }

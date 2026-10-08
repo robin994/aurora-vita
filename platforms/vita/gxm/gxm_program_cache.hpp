@@ -40,6 +40,16 @@ inline bool valid_gxm_program_cache(const GxmProgramCacheHeader& header, const v
       gfx::program_cache_hash(payload, bytes) == header.binaryHash;
 }
 
+inline bool decode_gxm_program_cache(const std::vector<uint8_t>& record,uint64_t expectedSource,
+                                      ProgramStage stage,std::vector<uint32_t>& words) noexcept {
+  if(record.size()<sizeof(GxmProgramCacheHeader)||record.size()>sizeof(GxmProgramCacheHeader)+gfx::MaxProgramCacheBytes)return false;
+  GxmProgramCacheHeader header{};std::memcpy(&header,record.data(),sizeof header);
+  const auto* payload=record.data()+sizeof header;const size_t bytes=record.size()-sizeof header;
+  if(!valid_gxm_program_cache(header,payload,bytes,expectedSource,stage))return false;
+  std::vector<uint32_t> staged((bytes+3u)/4u,0);std::memcpy(staged.data(),payload,bytes);
+  words=std::move(staged);return true;
+}
+
 class ProgramBinaryCache {
 public:
   void configure(const char* path) noexcept;
@@ -49,9 +59,10 @@ public:
   size_t preload(std::vector<PreloadedProgram>& programs, size_t maxPrograms = 1024) noexcept;
   uint32_t hits() const noexcept { return hits_; }
   uint32_t misses() const noexcept { return misses_; }
+  uint32_t archive_hits() const noexcept { return archiveHits_; }
 private:
   std::string root_;
-  uint32_t hits_ = 0;
+  uint32_t hits_ = 0, archiveHits_ = 0;
   uint32_t misses_ = 0;
 };
 } // namespace aurora::vita::gxm

@@ -1,4 +1,5 @@
 #include "gxm_shader_gen.hpp"
+#include "gxm_tev_opt.hpp"
 #include "gfx/vita_fixed_vertex.hpp"
 #include <array>
 #include <sstream>
@@ -369,11 +370,21 @@ std::string material_reg_arg(const std::array<std::string,4>& values,
 }
 }
 
-ShaderSources build_material_cg(const gfx::PipelineDesc& d, bool native) {
+ShaderSources build_material_cg(const gfx::PipelineDesc& d, bool native, uint8_t mask) {
   ShaderSources out;
   out.error = validate_pipeline(d);
   if (!out.error.empty()) return out;
   out.nativeMaterial=native&&native_material_supported(d);
+  // Only direct native arithmetic materials admit these two transformations;
+  // indirect and compare TEV paths retain their reference compiler unchanged.
+  const uint8_t a4=out.nativeMaterial?uint8_t(mask&3u):0u;
+  const auto plan=plan_tev_optimization(d,a4);
+  if(a4) {
+    out.a4ReusedSamples=plan.reusedSamples;
+    out.a4RemovedColorChannels=plan.unusedColor;
+    out.a4RemovedAlphaChannels=plan.unusedAlpha;
+    out.a4RemovedStages=plan.unusedStages;
+  }
   out.textureMask = pipeline_sampled_texture_mask(d);
   out.texcoordMask = pipeline_texcoord_mask(d);
   const uint8_t fixedTexgenMask=d.fixedVertexOnGpu?pipeline_texgen_compute_mask(d):0;
@@ -576,6 +587,11 @@ ShaderSources build_material_cg(const gfx::PipelineDesc& d, bool native) {
   fs << ") : COLOR {\n";
   if (d.fragmentScissor)
     fs << "if(window_position.x<u_clip_rect.x||window_position.y<u_clip_rect.y||window_position.x>=u_clip_rect.z||window_position.y>=u_clip_rect.w) discard;\n";
+  // Only sources sampled more than once require a function-scope value: each
+  // TEV stage has its own block, but repeated TEX/TEXCOORD pairs are constant
+  // over one fragment. Copy mode/opacity conversions are applied exactly once.
+  if(a4&TevOptSharedSample)for(unsigned i=0;i<d.tev.stageCount;++i)
+    if(plan.storeSample[i])fs<<"float4 a4_tex_sample"<<i<<";\n";
   if(!out.nativeMaterial)
     fs << "float4 prev=u_tevreg[0],reg0=u_tevreg[1],reg1=u_tevreg[2],reg2=u_tevreg[3];\n"
           "float2 prev_ind_uv=float2(0.0);\n";
@@ -587,12 +603,21 @@ ShaderSources build_material_cg(const gfx::PipelineDesc& d, bool native) {
   }
   for (unsigned i = 0; i < d.tev.stageCount; ++i) {
     const auto& s = d.tev.stages[i];
-    if(out.nativeMaterial)
-      fs << "float3 material_c" << i << ";float material_a" << i << ";\n";
+    if(a4&TevOptDeadChannels) {
+      if(!plan.color[i]&&!plan.alpha[i])continue;
+    }
+    if(out.nativeMaterial) {
+      if(plan.color[i])fs << "float3 material_c" << i << ";";
+      if(plan.alpha[i])fs << "float material_a" << i << ";";
+      fs << "\n";
+    }
     fs << "{\nfloat ind_alpha=0.0;\nfloat2 tev_uv="<<coordinate(d,s.texCoord)<<";\n";
     if(!out.nativeMaterial) indirect(fs,d,s);
     fs << "float4 raw_tex=";
-    if (tev_stage_uses_texture(s) && s.texture < MaxTextures) {
+    if (plan.samples[i]) {
+      if(plan.sampleFrom[i]>=0) {
+        fs<<"a4_tex_sample"<<unsigned(plan.sampleFrom[i])<<";\n";
+      } else {
       const bool nativeWrap=(d.nativeTextureWrapMask&(1u<<s.texture))!=0;
       fs << "tex2D(u_tex" << unsigned(s.texture) << ",";
       if(!nativeWrap) fs << "gx_wrap_uv(";
@@ -615,6 +640,8 @@ ShaderSources build_material_cg(const gfx::PipelineDesc& d, bool native) {
       else if(copyMode==12u) fs << "raw_tex=float4(raw_tex.r,raw_tex.r,raw_tex.r,raw_tex.g);\n"; // RG8
       else if(copyMode==13u) fs << "raw_tex=float4(raw_tex.g,raw_tex.g,raw_tex.g,raw_tex.b);\n"; // GB8
       if(d.textureForceOpaqueMask&(1u<<s.texture)) fs << "raw_tex.a=1.0;\n";
+      if(plan.storeSample[i])fs<<"a4_tex_sample"<<i<<"=raw_tex;\n";
+      }
     } else fs << "float4(1.0);\n";
     fs << "float4 texc=" << swizzle("raw_tex", d.tev.swapTable[s.texSwap]) << ";\nfloat4 raw_ras=";
     if (!tev_stage_uses_raster(s) || s.rasterSource == RasterSource::Zero) fs << "float4(0.0)";
@@ -628,20 +655,28 @@ ShaderSources build_material_cg(const gfx::PipelineDesc& d, bool native) {
       std::array<std::string,4> c,a;
       for(unsigned j=0;j<4;++j) {
         const unsigned cv=unsigned(colors[j]),av=unsigned(alphas[j]);
-        if(cv<8) {
-          const bool isAlpha=(cv&1)!=0;
-          c[j]=material_reg_arg(isAlpha?materialAlpha:materialColor,isAlpha?an:cn,cv/2,isAlpha,j!=3);
-          if(isAlpha)c[j]=splat(c[j]);
-        } else c[j]=color_arg(colors[j],s,cn,an,j!=3);
-        a[j]=av<4?material_reg_arg(materialAlpha,an,av,true,j!=3):alpha_arg(alphas[j],s,an,j!=3);
+        if(plan.color[i]) {
+          if(cv<8) {
+            const bool isAlpha=(cv&1)!=0;
+            c[j]=material_reg_arg(isAlpha?materialAlpha:materialColor,isAlpha?an:cn,cv/2,isAlpha,j!=3);
+            if(isAlpha)c[j]=splat(c[j]);
+          } else c[j]=color_arg(colors[j],s,cn,an,j!=3);
+        }
+        if(plan.alpha[i])
+          a[j]=av<4?material_reg_arg(materialAlpha,an,av,true,j!=3):alpha_arg(alphas[j],s,an,j!=3);
       }
       const std::string cName="material_c"+std::to_string(i),aName="material_a"+std::to_string(i);
-      fs << cName << "=clamp(" << material_arithmetic(c,false,s.colorOp,s.colorBias,s.colorScale)
-         << (s.colorClamp?",0.0,1.0);\n":",-4.0,4.0);\n")
-         << aName << "=clamp(" << material_arithmetic(a,true,s.alphaOp,s.alphaBias,s.alphaScale)
-         << (s.alphaClamp?",0.0,1.0);\n":",-4.0,4.0);\n") << "}\n";
-      materialColor[unsigned(s.colorOut)]=cName;
-      materialAlpha[unsigned(s.alphaOut)]=aName;
+      if(plan.color[i]) {
+        fs << cName << "=clamp(" << material_arithmetic(c,false,s.colorOp,s.colorBias,s.colorScale)
+           << (s.colorClamp?",0.0,1.0);\n":",-4.0,4.0);\n");
+        materialColor[unsigned(s.colorOut)]=cName;
+      }
+      if(plan.alpha[i]) {
+        fs << aName << "=clamp(" << material_arithmetic(a,true,s.alphaOp,s.alphaBias,s.alphaScale)
+           << (s.alphaClamp?",0.0,1.0);\n":",-4.0,4.0);\n");
+        materialAlpha[unsigned(s.alphaOut)]=aName;
+      }
+      fs << "}\n";
       cn[unsigned(s.colorOut)]=s.colorClamp;an[unsigned(s.alphaOut)]=s.alphaClamp;
       continue;
     }

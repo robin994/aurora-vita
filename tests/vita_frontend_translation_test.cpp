@@ -11,7 +11,9 @@
 #include <thread>
 #include <cstdio>
 #include "../lib/gx/display_list_shadow.hpp"
+#include "gfx/vita_view_draw_capture.hpp"
 #include <cstring>
+#include <vector>
 
 extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes) noexcept;
 extern "C" void aurora_vita_prepare_memory_write(const void* address,size_t bytes) noexcept;
@@ -82,6 +84,137 @@ void fragment_updates() {
   gxbridge::translate_vertex_state(state,reference,pipeline,layout);
   gxbridge::translate_fragment_uniforms(split,pipeline);
   CHECK(!std::memcmp(&split,&reference,sizeof(reference)));
+}
+
+// A1a: exercise the *real* decoder with frozen, big-endian GX XF commands.
+// The expected 32-bit words are independently specified, rather than rebuilt
+// through the candidate or through translate_current_pipeline_and_layout().
+void encoded_xf_matrix_oracles() {
+  auto& g=aurora::gx::g_gxState;
+  g=aurora::gx::GXState{};
+  const auto emit=[](uint16_t address,const std::vector<uint32_t>& words) {
+    std::vector<uint8_t> fifo;
+    const auto write32=[&](uint32_t value){
+      fifo.push_back(static_cast<uint8_t>(value>>24));
+      fifo.push_back(static_cast<uint8_t>(value>>16));
+      fifo.push_back(static_cast<uint8_t>(value>>8));
+      fifo.push_back(static_cast<uint8_t>(value));
+    };
+    fifo.push_back(0x10); // LOAD_XF_REG, not a helper that skips the decoder.
+    write32((static_cast<uint32_t>(words.size()-1)<<16)|address);
+    for(uint32_t value:words)write32(value);
+    aurora::gx::fifo::process_sync(fifo.data(),static_cast<uint32_t>(fifo.size()),true);
+  };
+  const auto bits=[](float f){return std::bit_cast<uint32_t>(f);};
+  const auto readBits=[](const float& value){uint32_t u=0;std::memcpy(&u,&value,sizeof(u));return u;};
+
+  std::vector<uint32_t> pose(12);
+  for(unsigned i=0;i<12;++i)pose[i]=bits(static_cast<float>(i+1));
+  emit(0x0000,pose);
+  for(unsigned i=0;i<12;++i)CHECK(readBits(reinterpret_cast<const float*>(&g.pnMtx[0].pos)[i])==pose[i]);
+  const auto firstRevision=g.stateRevisions.vertex;
+  emit(0x0000,pose); // repeated bytes must never change the decoded matrix.
+  CHECK(g.stateRevisions.vertex>=firstRevision);
+  for(unsigned i=0;i<12;++i)CHECK(readBits(reinterpret_cast<const float*>(&g.pnMtx[0].pos)[i])==pose[i]);
+
+  // A change to one element of an indexed-PN palette must remain visible.
+  pose[11]=bits(-57.5f);
+  emit(0x0000,pose);
+  CHECK(readBits(g.pnMtx[0].pos.m2[3])==pose[11]);
+  // -0 and +0 compare numerically equal, but must *not* be merged bitwise.
+  pose[1]=0x80000000u;
+  emit(0x0000,pose);
+  CHECK(readBits(g.pnMtx[0].pos.m0[1])==0x80000000u);
+  // Two NaNs with distinct payloads must not be silently collapsed either.
+  pose[2]=0x7fc12345u;emit(0x0000,pose);
+  CHECK(readBits(g.pnMtx[0].pos.m0[2])==0x7fc12345u);
+  pose[2]=0x7fc54321u;emit(0x0000,pose);
+  CHECK(readBits(g.pnMtx[0].pos.m0[2])==0x7fc54321u);
+
+  // Normal XF uses 3x3 words packed into three rows of a 3x4 CPU matrix.
+  std::vector<uint32_t> normal(9);
+  for(unsigned i=0;i<9;++i)normal[i]=bits(static_cast<float>(31+i));
+  emit(0x0400,normal);
+  const float* nrm=reinterpret_cast<const float*>(&g.pnMtx[0].nrm);
+  for(unsigned i=0;i<9;++i)CHECK(readBits(nrm[(i/3)*4+i%3])==normal[i]);
+  CHECK(readBits(nrm[3])==0&&readBits(nrm[7])==0);
+
+  // Texture and post-texture palettes must keep their independent indices.
+  emit(0x0078,pose);
+  CHECK(readBits(reinterpret_cast<const float*>(&g.texMtxs[0])[11])==pose[11]);
+  emit(0x0500,pose);
+  CHECK(readBits(reinterpret_cast<const float*>(&g.ptTexMtxs[0])[1])==pose[1]);
+  CHECK(readBits(reinterpret_cast<const float*>(&g.texMtxs[0])[1])==pose[1]);
+
+  // Replacing GXState must not inherit a prior matrix identity or revision.
+  const auto identity=g.stateIdentity;
+  g=aurora::gx::GXState{};
+  CHECK(g.stateIdentity!=identity);
+  emit(0x0000,pose);
+  CHECK(readBits(g.pnMtx[0].pos.m0[2])==pose[2]);
+}
+
+
+// A2a acceptance oracle: independently replay identical *encoded* XF streams
+// with optimization OFF and ON, comparing 10 complete PN matrices after every
+// decoded command. Revision counts may differ; no value may differ.
+void xf_equal_position_writes_oracle() {
+  using aurora::gx::fifo::set_xf_equal_position_writes;
+  using aurora::gx::fifo::xf_equal_position_stats;
+  struct Result {
+    std::vector<std::array<uint32_t,120>> snapshots;
+    uint64_t finalVertexRevision=0;
+    aurora::gx::fifo::XfEqualPositionStats counters{};
+  };
+  const auto run=[](bool candidate) {
+    Result result;
+    auto& g=aurora::gx::g_gxState;
+    g=aurora::gx::GXState{};
+    set_xf_equal_position_writes(candidate);
+    const auto snapshot=[&] {
+      std::array<uint32_t,120> values{};
+      for(unsigned m=0;m<10;++m)
+        for(unsigned i=0;i<12;++i) {
+          const float* flat=reinterpret_cast<const float*>(&g.pnMtx[m].pos);
+          std::memcpy(&values[m*12+i],&flat[i],sizeof(uint32_t));
+        }
+      result.snapshots.push_back(values);
+    };
+    const auto emit=[&](unsigned matrix,uint32_t changedWord,unsigned changedIndex) {
+      std::array<uint8_t,53> raw{};
+      const auto put=[&](unsigned offset,uint32_t word) {
+        raw[offset]=static_cast<uint8_t>(word>>24);
+        raw[offset+1]=static_cast<uint8_t>(word>>16);
+        raw[offset+2]=static_cast<uint8_t>(word>>8);
+        raw[offset+3]=static_cast<uint8_t>(word);
+      };
+      raw[0]=0x10;put(1,(11u<<16)|(matrix*12));
+      for(unsigned i=0;i<12;++i)
+        put(5+i*4,i==changedIndex?changedWord:0x3f800000u+(matrix<<15)+(i<<11));
+      aurora::gx::fifo::process_sync(raw.data(),static_cast<uint32_t>(raw.size()),true);
+      snapshot();
+    };
+    for(unsigned m=0;m<10;++m)emit(m,0,99); // Fresh indexed-PN palette.
+    for(unsigned m=0;m<10;++m)emit(m,0,99); // Exactly identical writes.
+    emit(7,0x80000000u,2); // Signed zero changes bits.
+    emit(7,0x80000000u,2); // Same signed zero must be elided.
+    emit(7,0x7fc12345u,2); // Distinct NaN payloads must remain observable.
+    emit(7,0x7fc54321u,2);
+    result.counters=xf_equal_position_stats();
+    result.finalVertexRevision=g.stateRevisions.vertex;
+    return result;
+  };
+  const auto reference=run(false);
+  const auto candidate=run(true);
+  CHECK(candidate.snapshots.size()==reference.snapshots.size());
+  CHECK(candidate.snapshots==reference.snapshots); // All 24 canonical checkpoints.
+  CHECK(reference.finalVertexRevision>candidate.finalVertexRevision);
+  CHECK(candidate.counters.inspected==24);
+  CHECK(candidate.counters.unchanged==11);
+  CHECK(candidate.counters.changed==13);
+  // Verify that the optimization can be disabled again without cached residue.
+  set_xf_equal_position_writes(false);
+  CHECK(xf_equal_position_stats().inspected==0);
 }
 void state_transitions() {
   using aurora::gx::StateDomain;
@@ -465,6 +598,48 @@ void prepared_async_display_list_equivalence() {
   shutdown();
 }
 
+void async_view_markers_preserve_fifo_order() {
+  using aurora::vita::gfx::view_draw_capture;
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));CHECK(aurora::gx::fifo::start_worker());
+  CHECK(begin_frame());
+  auto& trace=view_draw_capture();
+  CHECK(trace.start(64));
+
+  struct Blocker { std::atomic<bool>* entered;std::atomic<bool>* release; };
+  std::atomic<bool> entered=false,release=false;
+  Blocker args{&entered,&release};
+  aurora::gx::fifo::run_async([](void* opaque){const auto block=*static_cast<Blocker*>(opaque);
+    block.entered->store(true,std::memory_order_release);
+    while(!block.release->load(std::memory_order_acquire))std::this_thread::yield();},&args,sizeof args);
+  const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+  while(!entered.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+  CHECK(entered.load(std::memory_order_acquire));
+
+  aurora::gx::fifo::write_u8(0); // Inline FIFO bytes before the first view.
+  aurora::gx::fifo::write_view_marker(3,740);
+  aurora::gx::fifo::write_u8(0);
+  aurora::gx::fifo::write_view_marker(11,740);
+  aurora::gx::fifo::write_u8(0);
+  aurora::gx::fifo::write_view_marker(255,740);
+  CHECK(trace.count()==0); // Producer's later view must not update the consumer.
+  release.store(true,std::memory_order_release);
+  end_frame(); // Hard lifetime fence: all FIFO segments were consumed.
+  trace.stop();
+  AuroraViewDrawRecord events[8]{};
+  const size_t n=trace.read(0,events,8);
+  CHECK(n==4&&trace.lost()==0);
+  if(n==4) {
+    CHECK(events[0].type==AURORA_VIEW_DRAW_MARKER&&events[0].view==3);
+    CHECK(events[1].type==AURORA_VIEW_DRAW_MARKER&&events[1].view==11);
+    CHECK(events[2].type==AURORA_VIEW_DRAW_MARKER&&events[2].view==255);
+    CHECK(events[3].type==AURORA_VIEW_DRAW_FRAME_COMPLETE&&events[3].consumer_frame==1);
+    for(unsigned i=0;i<4;++i)CHECK(events[i].sequence==i+1&&events[i].producer_frame==740);
+  }
+  shutdown();
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();
+
+}
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();async_view_markers_preserve_fifo_order();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

@@ -93,13 +93,19 @@ std::string native_asset_path(const std::vector<uint8_t>& req) {
   char path[96];std::snprintf(path,sizeof path,"native/v1/%s/%016llx.avnr",req[0]==1?"textures":"geometry",
       (unsigned long long)XXH64(req.data(),req.size(),0));return path;
 }
-bool compile_native_asset(const std::vector<uint8_t>& req,std::vector<uint8_t>& record) {
+bool read_native_blob(const char* path,std::vector<uint8_t>& bytes,size_t limit) noexcept {
+  bytes.clear();
+  if(!sReader||!path||!sReader(path,bytes,sContext))return false;
+  if(bytes.empty()||bytes.size()>limit){bytes.clear();return false;}
+  return true;
+}
+bool compile_native_asset(const std::vector<uint8_t>& req,std::vector<uint8_t>& record,bool includeRgba) {
   record.clear();if(req.empty()||req.size()>Limit)return false;
   std::vector<uint8_t> payload;const uint32_t type=req[0];
   if(type==1) {
     TextureDesc desc;if(!texture_input(req,desc))return false;
     auto out=gxm::prepare_texture_upload(desc,true,true);
-    if(!out.ok()||out.format==NativeTextureFormat::Rgba8)return false; // Keep compact native formats only.
+    if(!out.ok()||(!includeRgba&&out.format==NativeTextureFormat::Rgba8))return false;
     for(uint32_t v:{unsigned(out.format),out.stride,out.mipCount,unsigned(out.swizzled)})word(payload,v);
     span(payload,out.pixels.data(),out.pixels.size());
   } else if(type==2) {

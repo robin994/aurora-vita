@@ -28,6 +28,8 @@ enum class TelemetryPhase : uint8_t {
   StateVertex,     // matrices, lights, projection and uniform translation
   StateMemo,       // translation memo: snapshot hash, compare and copy (subset of StatePipeline)
   StateLayout,     // vertex decode layout build (subset of StatePipeline)
+  FixedUniformBuild, // A3: prepare the complete immutable fixed-vertex payload
+  FixedUniformPublish, // A3: exact compare, snapshot share/copy and revision
   Count,
 };
 

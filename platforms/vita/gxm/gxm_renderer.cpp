@@ -3,6 +3,7 @@
 #include "gxm_memory.hpp"
 #include "gxm_program_cache.hpp"
 #include "gxm_fragment_prepare_cache.hpp"
+#include "gxm_vertex_uniform_delta.hpp"
 #include "gxm_shader_gen.hpp"
 #include "gxm_texture_layout.hpp"
 #include "../vita_data_paths.hpp"
@@ -12,6 +13,10 @@
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_sampler_units.hpp"
 #include "gfx/vita_cpu_workers.hpp"
+#include "gfx/vita_shader_debug_registry.hpp"
+#include "gfx/vita_view_draw_capture.hpp"
+#include "gfx/vita_draw_payload_hash.hpp"
+#include "../aurora_vita_backend.hpp"
 #include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
 #include <vitashark.h>
@@ -237,11 +242,11 @@ struct NativeTextureUpload {
   bool swizzled=false;
   bool valid=false;
 };
-NativeTextureUpload prepare_native_texture(const TextureDesc& desc) {
+NativeTextureUpload prepare_native_texture(const TextureDesc& desc,bool exactBc1) {
   NativeTextureUpload out;
 #if AURORA_VITA_NATIVE_GX_TEXTURES
   if(!gxm_disabled(GxmDisableNativeTextureMips)&&(desc.mipCount>1||desc.format==TextureFormat::CMPR)) {
-    auto compact=prepare_compact_texture(desc,desc.immutableSource);
+    auto compact=prepare_compact_texture(desc,exactBc1);
     if(compact.ok()) {
       switch(compact.format) {
       case NativeTextureFormat::Intensity8:out.format=SCE_GXM_TEXTURE_FORMAT_U8_RRRR;break;
@@ -320,6 +325,7 @@ struct Renderer::Impl {
   };
   struct CompiledStage {
     std::vector<uint32_t> code;
+    uint64_t sourceHash = 0;
   };
   struct UniformParameter {
     const SceGxmProgramParameter* parameter=nullptr;
@@ -350,6 +356,8 @@ struct Renderer::Impl {
     uint8_t fixedTextureUniformMask = 0;
     uint8_t lightTop = 0;
     bool inFlight = false;
+    bool nativeMaterial = false;
+    gfx::ShaderDebugRegistry::Slot* debugFragment = nullptr;
     // Variants share the owner's vertex program and only own their fragment
     // program. A fragment-scissor pipeline owns a discard-free variant used
     // when the draw scissor covers the complete target (the common case), so
@@ -357,6 +365,7 @@ struct Renderer::Impl {
     bool ownsVertex = true;
     Pipeline* scissorFree = nullptr;
     std::shared_ptr<FragmentPrepareCache> fragmentPrepare;
+    std::shared_ptr<VertexUniformDeltaCache> vertexUniformDelta;
   };
   struct FragmentUniformState {
     GpuDrawUniforms uniforms{};
@@ -475,6 +484,7 @@ struct Renderer::Impl {
   }
   // GxmDiagDrawGpu: per-draw GPU cost of the first draws of a sampled frame.
   uint64_t diagDrawFrame = 0; uint32_t diagDrawIndex = 0; uint64_t diagFrameCounter = 0;
+  uint64_t viewTraceUniformBytes = 0;
   std::unordered_set<uint64_t> diagDumpedKeys;
   void diag_draw_gpu(const DrawSubmissionView& packet, const Pipeline& p) {
     if (diagDrawFrame != diagFrameCounter) { diagDrawFrame = diagFrameCounter; diagDrawIndex = 0; }
@@ -495,7 +505,7 @@ struct Renderer::Impl {
         p.fragmentCode ? unsigned(p.fragmentCode->code.size() * 4u) : 0u,
         static_cast<unsigned long long>(packet.pipelineKey));
     if (diagDumpedKeys.insert(packet.pipelineKey).second) {
-      const auto source = build_material_cg(p.desc,!gxm_disabled(GxmDisableNativeMaterial));
+      const auto source = build_material_cg(p.desc,!gxm_disabled(GxmDisableNativeMaterial),config.tevA4Mask);
       char name[96];
       std::snprintf(name, sizeof name, "diagnostics/cg_%016llx.txt", static_cast<unsigned long long>(packet.pipelineKey));
       auto cgPath = data_path(name);
@@ -657,11 +667,21 @@ struct Renderer::Impl {
   void create_scissor_free_variant(Pipeline& owner, const std::string& vertexSource) noexcept {
     PipelineDesc desc = owner.desc;
     desc.fragmentScissor = false;
-    const auto source = build_material_cg(desc,!gxm_disabled(GxmDisableNativeMaterial));
+    auto source = build_material_cg(desc,!gxm_disabled(GxmDisableNativeMaterial),config.tevA4Mask);
     if (!source.ok() || source.discardAll || source.vertex != vertexSource) return;
     const std::string savedError = error;
     const uint64_t savedBlocked = blockedStageCompiles;
     auto fragmentCode = compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
+    // A sealed cache may contain only reference GXP binaries. Missing optional
+    // A4 sources cannot make a previously supported scissor-free pass vanish.
+    if(!fragmentCode && source.nativeMaterial && config.tevA4Mask) {
+      auto reference=build_material_cg(desc,true,0);
+      if(reference.ok() && reference.vertex==vertexSource &&
+          reference.discardAll==source.discardAll) {
+        fragmentCode=compile_stage(reference.fragment,SHARK_FRAGMENT_SHADER,ProgramStage::Fragment);
+        if(fragmentCode)source=std::move(reference);
+      }
+    }
     // A sealed run may lack the variant binary; that is not a gameplay miss.
     blockedStageCompiles = savedBlocked;
     pipelineCompileBlocked = false;
@@ -672,6 +692,8 @@ struct Renderer::Impl {
     variant->ownsVertex = false;
     variant->scissorFree = nullptr;
     variant->inFlight = false;
+    variant->nativeMaterial = source.nativeMaterial;
+    variant->debugFragment = nullptr;
     variant->fragmentCode = std::move(fragmentCode);
     variant->fragmentId = nullptr;
     variant->fragment = nullptr;
@@ -698,6 +720,7 @@ struct Renderer::Impl {
       return it->second;
     }
     auto compiled = std::make_shared<CompiledStage>();
+    compiled->sourceHash = sourceHash;
     if (programCache.load(sourceHash, stage, compiled->code)) {
       if (check(sceGxmProgramCheck(reinterpret_cast<const SceGxmProgram*>(compiled->code.data())),
                 "validate cached GXP")) {
@@ -883,6 +906,7 @@ bool Renderer::initialize(const Config& config) {
         continue;
       auto compiled = std::make_shared<Impl::CompiledStage>();
       compiled->code = std::move(program.words);
+      compiled->sourceHash = program.sourceHash;
       d.stageCache.emplace(program.sourceHash, std::move(compiled));
     }
     if(config.startupProgress)config.startupProgress("program_cache",1,1,config.startupProgressUser);
@@ -917,7 +941,7 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   const uint64_t key = pipeline_key(nativeDesc);
   if (d.pipelines.find(key) != d.pipelines.end()) { ++d.stats.pipelineHits; return key; }
   if (d.pipelines.size() >= d.config.maxPipelines) { d.fail("native pipeline budget exhausted"); return 0; }
-  auto source = build_material_cg(nativeDesc,!gxm_disabled(GxmDisableNativeMaterial));
+  auto source = build_material_cg(nativeDesc,!gxm_disabled(GxmDisableNativeMaterial),d.config.tevA4Mask);
   if (!source.ok()) { d.fail(source.error.c_str()); return 0; }
   if (source.discardAll) {
     nativeDesc.depthTest = false;
@@ -943,6 +967,22 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   p.vertexCode = d.compile_stage(source.vertex, SHARK_VERTEX_SHADER, ProgramStage::Vertex);
   if (!p.vertexCode) return 0;
   p.fragmentCode = d.compile_stage(source.fragment, SHARK_FRAGMENT_SHADER, ProgramStage::Fragment);
+  if(!p.fragmentCode && source.nativeMaterial && d.config.tevA4Mask) {
+    // Safe A4 bisection: even with runtime shader compilation sealed, use the
+    // original GXP from the cache if an experimental source is missing/fails.
+    auto reference=build_material_cg(nativeDesc,true,0);
+    if(reference.ok() && reference.vertex==source.vertex &&
+        reference.discardAll==source.discardAll) {
+      d.error.clear();
+      p.fragmentCode=d.compile_stage(reference.fragment,SHARK_FRAGMENT_SHADER,ProgramStage::Fragment);
+      if(p.fragmentCode) {
+        source=std::move(reference);
+        d.pipelineCompileBlocked=false;
+        AURORA_VITA_LOG_INFO("[aurora-gxm] A4 fragment fallback to reference key=%016llx\n",
+            static_cast<unsigned long long>(key));
+      }
+    }
+  }
   if(!p.fragmentCode && source.nativeMaterial && d.runtimeShaderCompileEnabled) {
     AURORA_VITA_LOG_INFO("[aurora-gxm] native material compile fallback key=%016llx\n",
         static_cast<unsigned long long>(key));
@@ -951,10 +991,29 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
     p.fragmentCode=d.compile_stage(source.fragment,SHARK_FRAGMENT_SHADER,ProgramStage::Fragment);
   }
   if (!p.fragmentCode) return 0;
+  p.nativeMaterial = source.nativeMaterial;
   if(d.diagnosticsEnabled)
-    AURORA_VITA_LOG_INFO("[aurora-gxm] material key=%016llx native=%u stages=%u fragment_bytes=%u\n",
+    AURORA_VITA_LOG_INFO("[aurora-gxm] material key=%016llx native=%u stages=%u fragment_bytes=%u A4_fetch_reuse=%u A4_dead_rgb=%u A4_dead_alpha=%u A4_dead_stages=%u\n",
         static_cast<unsigned long long>(key),source.nativeMaterial?1u:0u,
-        unsigned(nativeDesc.tev.stageCount),unsigned(p.fragmentCode->code.size()*4u));
+        unsigned(nativeDesc.tev.stageCount),unsigned(p.fragmentCode->code.size()*4u),
+        unsigned(source.a4ReusedSamples),unsigned(source.a4RemovedColorChannels),
+        unsigned(source.a4RemovedAlphaChannels),unsigned(source.a4RemovedStages));
+  if(d.diagnosticsEnabled && d.config.tevA4Mask && source.nativeMaterial) {
+    // The actual *compiled* GXP hash may differ from the requested A4 source
+    // after an on-device fallback. Map it to its reference counterpart so the
+    // previous hardware trace's dominant fragment hashes remain searchable.
+    const auto reference=build_material_cg(nativeDesc,true,0);
+    if(reference.ok()) {
+      const uint64_t originalHash=gxm_program_source_hash(reference.fragment.c_str(),ProgramStage::Fragment);
+      AURORA_VITA_LOG_INFO("[aurora-gxm] A4 key=%016llx mask=%u reference_frag=%016llx actual_frag=%016llx reused_fetches=%u removed_rgb=%u removed_alpha=%u removed_stages=%u gxp_bytes=%u\n",
+          static_cast<unsigned long long>(key),unsigned(d.config.tevA4Mask),
+          static_cast<unsigned long long>(originalHash),
+          static_cast<unsigned long long>(p.fragmentCode->sourceHash),
+          unsigned(source.a4ReusedSamples),unsigned(source.a4RemovedColorChannels),
+          unsigned(source.a4RemovedAlphaChannels),unsigned(source.a4RemovedStages),
+          unsigned(p.fragmentCode->code.size()*4u));
+    }
+  }
   const auto* vp = reinterpret_cast<const SceGxmProgram*>(p.vertexCode->code.data());
   const auto* fp = reinterpret_cast<const SceGxmProgram*>(p.fragmentCode->code.data());
   const auto abort = [&]() { d.destroy_pipeline(p); return uint64_t{0}; };
@@ -1008,6 +1067,14 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
     std::snprintf(name,sizeof(name),"u_gx_post%u",i);
     p.gxPost[i]=sceGxmProgramFindParameterByName(vp,name);
     if(p.gxTexture[i]||p.gxPost[i])p.fixedTextureUniformMask|=static_cast<uint8_t>(1u<<i);
+  }
+  // A3 is deliberately limited to indexed-PN programs: they dominate the
+  // character view and repeatedly upload two 120-float palettes per draw.
+  // All other pipelines keep their existing proven upload path.
+  if(d.config.vertexUniformDelta&&nativeDesc.fixedVertexOnGpu&&nativeDesc.fixedVertexIndexedPn) {
+    const size_t bytes=sceGxmProgramGetDefaultUniformBufferSize(vp);
+    auto prepared=std::make_shared<VertexUniformDeltaCache>();
+    if(prepared->configure(bytes))p.vertexUniformDelta=std::move(prepared);
   }
   d.pipelines.emplace(key, std::move(pipeline));
   ++d.stats.pipelineMisses;
@@ -1064,7 +1131,7 @@ Handle Renderer::create_texture(const TextureDesc& desc,CompactTextureData* prep
     const auto it = d.textureCache.find(key);
     if (it != d.textureCache.end()) { ++d.stats.textureHits; return it->second; }
   }
-  auto native=prepared?NativeTextureUpload{}:prepare_native_texture(desc);
+  auto native=prepared?NativeTextureUpload{}:prepare_native_texture(desc,d.config.exactBc1);
   if(prepared&&prepared->ok()) {
     switch(prepared->format) {
     case NativeTextureFormat::Intensity8:native.format=SCE_GXM_TEXTURE_FORMAT_U8_RRRR;break;
@@ -1310,33 +1377,88 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   const auto uploadVertex=[&](const Impl::UniformParameter& param,unsigned count,const float* data) {
     if(!param) return true;
     count=std::min(count,param.capacity);
+    if(gfx::view_draw_capture().enabled())d.viewTraceUniformBytes+=size_t(count)*sizeof(float);
     if(d.diagnosticsEnabled) {
       ++d.stats.nativeUniformUploadCalls;d.stats.nativeUniformUploadBytes+=count*sizeof(float);
     }
     return d.check(sceGxmSetUniformDataF(vertex,param.parameter,0,count,data),"upload vertex uniform");
   };
-  if(!reuseVertex&&p.mvp && !uploadVertex(p.mvp,16,u.mvp.data())) return false;
-  if(!reuseVertex&&pipeline.fixedVertexOnGpu) {
+  // Keep a single, ordered parameter enumeration for both the proven complete
+  // upload path and A3. The latter may skip a setter ONLY after restoring a
+  // full CPU-owned GXP buffer image into a fresh reservation.
+  const auto enumerateVertex=[&](auto&& emit) {
+    if(!emit(p.mvp,16,u.mvp.data())) return false;
+    if(!pipeline.fixedVertexOnGpu) return true;
     if(!fixedVertex) return d.fail("missing fixed GX vertex uniforms");
     if(pipeline.fixedVertexIndexedPn) {
-      if(!uploadVertex(p.gxPositionPalette,120,fixedVertex->positionPalette[0].data()) ||
-         !uploadVertex(p.gxNormalPalette,120,fixedVertex->normalPalette[0].data())) return false;
-    } else if(!uploadVertex(p.gxPosition,12,fixedVertex->position.data()) ||
-              !uploadVertex(p.gxNormal,12,fixedVertex->normal.data())) return false;
+      if(!emit(p.gxPositionPalette,120,fixedVertex->positionPalette[0].data()) ||
+         !emit(p.gxNormalPalette,120,fixedVertex->normalPalette[0].data())) return false;
+    } else if(!emit(p.gxPosition,12,fixedVertex->position.data()) ||
+              !emit(p.gxNormal,12,fixedVertex->normal.data())) return false;
     if(pipeline.fixedVertexTexMtxMask) {
       if(!pipeline.fixedVertexIndexedPn&&
-         !uploadVertex(p.gxPositionPalette,120,fixedVertex->positionPalette[0].data())) return false;
-      if(!uploadVertex(p.gxTexturePalette,120,fixedVertex->texturePalette[0].data())) return false;
+         !emit(p.gxPositionPalette,120,fixedVertex->positionPalette[0].data())) return false;
+      if(!emit(p.gxTexturePalette,120,fixedVertex->texturePalette[0].data())) return false;
     }
     if((pipeline.fixedPointSprite||pipeline.fixedLineSprite)&&
-       !uploadVertex(p.gxPrimitiveExpand,4,fixedVertex->primitiveExpand.data())) return false;
-    if(!uploadVertex(p.gxMaterial,16,fixedVertex->material[0].data()) ||
-       !uploadVertex(p.gxAmbient,16,fixedVertex->ambient[0].data())) return false;
-    if(p.lightTop&&!uploadVertex(p.gxLight,p.lightTop*20u,fixedVertex->light[0].data())) return false;
+       !emit(p.gxPrimitiveExpand,4,fixedVertex->primitiveExpand.data())) return false;
+    if(!emit(p.gxMaterial,16,fixedVertex->material[0].data()) ||
+       !emit(p.gxAmbient,16,fixedVertex->ambient[0].data())) return false;
+    if(p.lightTop&&!emit(p.gxLight,p.lightTop*20u,fixedVertex->light[0].data())) return false;
     for(unsigned i=0;i<MaxTextures;++i)if(p.fixedTextureUniformMask&(1u<<i)) {
-      if(!uploadVertex(p.gxTexture[i],12,fixedVertex->texture[i].data()) ||
-         !uploadVertex(p.gxPost[i],12,fixedVertex->post[i].data())) return false;
+      if(!emit(p.gxTexture[i],12,fixedVertex->texture[i].data()) ||
+         !emit(p.gxPost[i],12,fixedVertex->post[i].data())) return false;
     }
+    return true;
+  };
+  if(!reuseVertex) {
+    if(pipeline.fixedVertexOnGpu&&!fixedVertex)
+      return d.fail("missing fixed GX vertex uniforms");
+    bool deltaUploaded=false;
+    if(p.vertexUniformDelta) {
+      constexpr size_t MaxSpans=VertexUniformDeltaCache::MaxSpans;
+      std::array<VertexUniformSpan,MaxSpans> sources{};
+      std::array<Impl::UniformParameter,MaxSpans> parameters{};
+      size_t spanCount=0;
+      const auto gather=[&](const Impl::UniformParameter& param,unsigned count,const float* data) {
+        if(!param) return true;
+        count=std::min(count,param.capacity);
+        if(!count||!data||spanCount==MaxSpans) return false;
+        parameters[spanCount]=param;
+        sources[spanCount++]={data,count};
+        return true;
+      };
+      if(enumerateVertex(gather)&&spanCount) {
+        auto& cache=*p.vertexUniformDelta;
+        // If every input group changed, cloning the previous default buffer
+        // would only add memory traffic before uploading the entire program.
+        bool anyReusableGroup=false;
+        if(cache.ready())for(size_t i=0;i<spanCount;++i)
+          if(cache.unchanged(i,sources[i])) {anyReusableGroup=true;break;}
+        const bool restored=anyReusableGroup&&cache.restore(vertex,sources.data(),spanCount);
+        if(restored) {
+          ++d.stats.nativeVertexDeltaCopies;
+          d.stats.nativeVertexDeltaCopiedBytes+=cache.bytes();
+        }
+        bool changed=!restored;
+        for(size_t i=0;i<spanCount;++i) {
+          const auto& source=sources[i];
+          if(restored&&cache.unchanged(i,source)) {
+            ++d.stats.nativeVertexDeltaSavedCalls;
+            d.stats.nativeVertexDeltaSavedBytes+=size_t(source.count)*sizeof(float);
+          } else {
+            changed=true;
+            if(!uploadVertex(parameters[i],source.count,source.data)) return false;
+          }
+        }
+        if(changed&&!cache.commit(vertex,sources.data(),spanCount)) {
+          cache.invalidate();
+          ++d.stats.nativeVertexDeltaFallbacks;
+        }
+        deltaUploaded=true;
+      } else ++d.stats.nativeVertexDeltaFallbacks;
+    }
+    if(!deltaUploaded&&!enumerateVertex(uploadVertex)) return false;
   }
   if(needsVertexUniforms) {
     if(reuseVertex) { if(d.diagnosticsEnabled)++d.stats.nativeVertexUniformReuses; }
@@ -1406,14 +1528,16 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
     if(!d.check(sceGxmReserveFragmentDefaultUniformBuffer(d.context,&fragment),"reserve fragment uniforms")) return false;
     std::optional<FragmentPrepareInputs> preparedInputs;
     bool prepared=false;
-    if(p.fragmentPrepare) {
+      if(p.fragmentPrepare) {
       auto& inputs=preparedInputs.emplace();
       inputs.uniforms=u;
       inputs.scissor=p.clip?scissor:Scissor{};
       inputs.textureFlags=textureFlags;
       inputs.textureTransform=textureTransform;
       inputs.usedTextureCount=static_cast<uint8_t>(usedTextureCount);
-      prepared=p.fragmentPrepare->copy_to(inputs,fragment);
+        prepared=p.fragmentPrepare->copy_to(inputs,fragment);
+        if(prepared&&gfx::view_draw_capture().enabled())
+          d.viewTraceUniformBytes+=p.fragmentPrepare->bytes();
       if(d.diagnosticsEnabled) {
         if(prepared)d.stats.nativeFragmentPrepareHits=++d.fragmentPrepareHits;
         else d.stats.nativeFragmentPrepareMisses=++d.fragmentPrepareMisses;
@@ -1423,6 +1547,7 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
       const auto upload=[&](const Impl::UniformParameter& param,unsigned count,const float* data) {
         if(!param || !count) return true;
         count=std::min(count,param.capacity);
+        if(gfx::view_draw_capture().enabled())d.viewTraceUniformBytes+=size_t(count)*sizeof(float);
         if(d.diagnosticsEnabled) {
           ++d.stats.nativeUniformUploadCalls;
           d.stats.nativeUniformUploadBytes+=count*sizeof(float);
@@ -1470,12 +1595,16 @@ bool Renderer::bind_pipeline(uint64_t key,const GpuDrawUniforms& u,const Scissor
   return true;
 }
 
-bool Renderer::draw(const DrawPacket& packet) {
-  return draw(DrawSubmissionView(packet));
+bool Renderer::draw(const DrawPacket& packet, bool gameDraw) {
+  return draw(DrawSubmissionView(packet),gameDraw);
 }
 
-bool Renderer::draw(const DrawSubmissionView& packet) {
+bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
   auto& d = *impl_;
+  auto& viewTrace = gfx::view_draw_capture();
+  const bool traceDraw = gameDraw && viewTrace.enabled();
+  const uint64_t viewTraceStarted = traceDraw ? sceKernelGetProcessTimeWide() : 0;
+  if(traceDraw)d.viewTraceUniformBytes=0;
   const auto pi = d.pipelines.find(packet.pipelineKey);
   const auto vi = d.buffers.find(packet.vertices.buffer), ii = d.buffers.find(packet.indices.buffer);
   if (pi == d.pipelines.end() || vi == d.buffers.end() || ii == d.buffers.end()) return d.fail("unknown pipeline or buffer handle");
@@ -1530,6 +1659,19 @@ bool Renderer::draw(const DrawSubmissionView& packet) {
       int64_t(packet.scissor.x)+packet.scissor.width<d.width()||
       int64_t(packet.scissor.y)+packet.scissor.height<d.height()))
     return d.fail("full-target pipeline requires a full-target scissor");
+  // Diagnostic-only suppression of an actual fragment program. Skip before
+  // binding uniforms/textures or submitting geometry, but never suppress native
+  // presentation/clear passes (gameDraw=false) or the pause-menu safety bypass.
+  auto& shaderDebug = gfx::shader_debug_registry();
+  if (gameDraw && shaderDebug.recording() && !shaderDebug.bypassed()) {
+    if (!active->debugFragment && active->fragmentCode)
+      active->debugFragment = shaderDebug.register_fragment(active->fragmentCode->sourceHash,
+          active->desc.tev.stageCount, active->nativeMaterial);
+    if (shaderDebug.skip_draw(active->debugFragment)) {
+      if(traceDraw)viewTrace.suppressed_draw();
+      return true;
+    }
+  }
   uint64_t profileTick = d.profileDraws ? diagnostic_now_us() : 0;
   d.resolvedPipelineHint=active;d.resolvedPipelineHintKey=activeKey;
   const bool pipelineBound=bind_pipeline(activeKey,packet.gpu_uniforms(),packet.scissor,packet.fixedVertexUniforms,&packet.texture_bindings(),
@@ -1573,6 +1715,54 @@ bool Renderer::draw(const DrawSubmissionView& packet) {
   const auto primitive = pipeline.primitive == Primitive::Triangles ? SCE_GXM_PRIMITIVE_TRIANGLES :
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
   if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;
+  if(traceDraw) {
+    AuroraViewDrawRecord row{};
+    row.consumer_frame = aurora::vita::frame_index()+1;
+    row.pipeline_requested=packet.pipelineKey;
+    row.pipeline_active=activeKey;
+    row.vertex_hash=p.vertexCode?p.vertexCode->sourceHash:0;
+    row.fragment_hash=p.fragmentCode?p.fragmentCode->sourceHash:0;
+    row.submit_cpu_us=sceKernelGetProcessTimeWide()-viewTraceStarted;
+    row.uniform_bytes=d.viewTraceUniformBytes;
+    row.target=static_cast<uint32_t>(d.boundTarget);
+    row.vertex_count=packet.vertexCount;
+    row.index_count=packet.indexCount;
+    row.tev_stages=p.desc.tev.stageCount;
+    row.texture_mask=p.textureMask;
+    row.texgen_mask=gfx::pipeline_texgen_compute_mask(p.desc);
+    row.program_native=static_cast<uint8_t>(p.nativeMaterial);
+    row.indexed_pn=static_cast<uint8_t>(p.desc.fixedVertexIndexedPn);
+    row.blend=static_cast<uint8_t>(p.desc.blendMode);
+    row.depth=static_cast<uint8_t>((p.desc.depthTest?1u:0u)|(p.desc.depthWrite?2u:0u));
+    const auto& alpha=p.desc.tev.alphaCompare;
+    row.alpha=static_cast<uint8_t>((static_cast<unsigned>(alpha.comp0)&15u)|
+                                   ((static_cast<unsigned>(alpha.comp1)&15u)<<4));
+    row.alpha_ref0=alpha.ref0;
+    row.alpha_ref1=alpha.ref1;
+    row.alpha_op=alpha.op;
+    row.scissor=static_cast<uint8_t>(p.desc.fragmentScissor);
+    if(viewTrace.payload_enabled()) {
+      uint64_t vertexHash=0, indexHash=0;
+      const bool valid=gfx::hash_indexed_draw_payload(
+          vi->second.memory.data(),vi->second.bytes,base,
+          packet.vertices.offset,packet.vertices.size,stride,indices,
+          packet.indexCount,vertexHash,indexHash);
+      if(valid) {
+        row.vertex_payload_hash=vertexHash;
+        row.index_payload_hash=indexHash;
+        row.uniform_payload_hash=gfx::hash_draw_uniform_payload(
+            packet.gpu_uniforms(),packet.fixedVertexUniforms);
+        row.draw_state_hash=gfx::hash_draw_state_payload(
+            packet.viewport,packet.scissor,packet.texture_bindings(),p.textureMask);
+        row.payload_hashes_present=1;
+      } else {
+        // The frame may still render, but missing payload bytes make this A1c
+        // capture unusable. The footer's dropped count rejects it offline.
+        viewTrace.suppressed_draw();
+      }
+    }
+    viewTrace.draw(row);
+  }
   if(d.profileDraws) d.stats.nativeDrawUs+=diagnostic_now_us()-profileTick;
   if(gxm_disabled(GxmDiagDrawGpu)) d.diag_draw_gpu(packet,p);
   pi->second->inFlight = true; active->inFlight = true;
@@ -1716,7 +1906,7 @@ bool Renderer::update_texture(Handle handle,const TextureDesc& desc,bool storage
 
   auto& texture=*it->second;
   if(texture.width!=desc.width || texture.height!=desc.height) return false;
-  auto native=prepare_native_texture(desc);
+  auto native=prepare_native_texture(desc,d.config.exactBc1);
   const uint8_t* pixels=nullptr;
   size_t pixelBytes=0;
   uint32_t stride=0;

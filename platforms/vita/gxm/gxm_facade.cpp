@@ -419,6 +419,8 @@ bool Renderer::initialize() noexcept {
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
   c.d16Depth=cfg_.nativeD16Depth;
   c.fragmentPrepareCache=cfg_.nativeFragmentPrepareCache;
+  c.vertexUniformDelta=cfg_.nativeVertexUniformDelta;
+  c.tevA4Mask=cfg_.nativeTevA4Mask;
   c.residentGeometryInCdram=cfg_.residentGeometryInCdram;c.exactBc1=cfg_.exactBc1;
   textures_.set_exact_bc1(cfg_.exactBc1);
   c.programCachePath=cfg_.programBinaryCachePath;
@@ -569,11 +571,11 @@ void Renderer::invalidate_buffer_bindings() noexcept {}
 void Renderer::invalidate_draw_state() noexcept {pipelines_.invalidate_bound();}
 void Renderer::draw(const DrawPacket& packet) noexcept {
   if(failed_)return;
-  if(!native_->draw(packet)) {failed_=true;return;}
+  if(!native_->draw(packet,true)) {failed_=true;return;}
 
 }
 void Renderer::draw_immediate(const DrawSubmissionView& view) noexcept {
-  if(!failed_ && !native_->draw(view))failed_=true;
+  if(!failed_ && !native_->draw(view,true))failed_=true;
 }
 const FrameStats& Renderer::stats() const noexcept {
   stats_=compose_native_frame_stats(stats_,native_->stats());
