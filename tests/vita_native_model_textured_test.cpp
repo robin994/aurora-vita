@@ -14,7 +14,7 @@ using namespace aurora::gx::fifo;
 #undef CHECK
 #define CHECK(x) do { if(!(x)){std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);std::exit(1);} } while(0)
 
-struct Snapshot {gfx::DrawPacket packet{};gfx::FixedVertexUniforms fixed{};bool gpu=false;};
+struct Snapshot {gfx::DrawPacket packet{};gfx::FixedVertexUniforms fixed{};uintptr_t fixedAddress=0;bool gpu=false;};
 Snapshot snapshot(bool requireGpu=true){
   Snapshot result;
   run_sync([](void* p){auto& out=*static_cast<Snapshot*>(p);
@@ -22,7 +22,8 @@ Snapshot snapshot(bool requireGpu=true){
     CHECK(packet);
     out.packet=*packet;out.packet.uniforms=packet->gpu_uniforms();
     out.packet.textures=packet->texture_bindings();out.packet.sharedState=nullptr;
-    if(packet->fixedVertexUniforms){out.fixed=*packet->fixedVertexUniforms;out.gpu=true;}
+    if(packet->fixedVertexUniforms){out.fixed=*packet->fixedVertexUniforms;
+      out.fixedAddress=reinterpret_cast<uintptr_t>(packet->fixedVertexUniforms);out.gpu=true;}
     out.packet.fixedVertexUniforms=nullptr;
   },&result);CHECK(!requireGpu||result.gpu);return result;
 }
@@ -105,6 +106,32 @@ int main(){
   CHECK(std::memcmp(&pose.fixed,&native.fixed,offsetof(gfx::FixedVertexUniforms,revision)));
   CHECK(pose.packet.scissor.x==11&&native.packet.scissor.x==7);
   write_stable_data(list.data(),list.size());same(pose,snapshot());end_frame();
+  // Exact duplicate publication already shares CPU snapshots in the legacy
+  // native branch. The opt-in builder must also honor the reference mask and
+  // keep all older queued values immutable across ordinary/native transitions.
+  CHECK(begin_frame());
+  CHECK(write_native_model_recipe(recipe));auto duplicateA=snapshot();
+  CHECK(write_native_model_recipe(recipe));auto duplicateB=snapshot();
+  same(duplicateA,duplicateB);CHECK(duplicateA.fixedAddress==duplicateB.fixedAddress);
+  run_sync([](void*){gfx::gxm_disable_mask()=gfx::GxmDisableFixedSnapshot;},nullptr);
+  CHECK(write_native_model_recipe(recipe));auto maskedA=snapshot();
+  CHECK(write_native_model_recipe(recipe));auto maskedB=snapshot();same(maskedA,maskedB);
+  const char* uniformBuild=std::getenv("STRIKERS_GXM_NATIVE_MODEL_UNIFORM_BUILD");
+  if(uniformBuild&&std::strcmp(uniformBuild,"1")==0)CHECK(maskedA.fixedAddress!=maskedB.fixedAddress);
+  run_sync([](void*){auto& g=aurora::gx::g_gxState;g.pnMtx[0].pos.m0[3]=-31;
+    g.mark_dirty(aurora::gx::StateDomain::Vertex);},nullptr);
+  CHECK(write_native_model_recipe(recipe));auto moved=snapshot();
+  CHECK(moved.fixedAddress!=maskedB.fixedAddress);CHECK(moved.fixed.position[3]==-31);
+  struct Held {uintptr_t address;gfx::FixedVertexUniforms value;} held{maskedB.fixedAddress,maskedB.fixed};
+  run_sync([](void* p){const auto& h=*static_cast<Held*>(p);
+    CHECK(!std::memcmp(reinterpret_cast<const void*>(h.address),&h.value,
+        offsetof(gfx::FixedVertexUniforms,revision)));},&held);
+  write_stable_data(list.data(),list.size());same(moved,snapshot());
+  run_sync([](void*){gfx::gxm_disable_mask()=gfx::GxmDisableFixedSnapshot|gfx::GxmDisableFixedBuild;},nullptr);
+  CHECK(write_native_model_recipe(recipe));auto fullBuild=snapshot();
+  CHECK(write_native_model_recipe(recipe));same(fullBuild,snapshot());
+  run_sync([](void*){gfx::gxm_disable_mask()=0;},nullptr);
+  CHECK(write_native_model_recipe(recipe));snapshot();end_frame();
   // A source revision must resolve a fresh texture handle, never the recipe's old binding.
   CHECK(begin_frame());run_sync([](void*){auto& g=aurora::gx::g_gxState;++g.loadedTextures[0].texDataVersion;
     g.loadedTextures[0].mode0=uint32_t(GX_MIRROR);g.mark_dirty(aurora::gx::StateDomain::Textures);
@@ -197,6 +224,23 @@ int main(){
     gfx::fixed_vertex_uniforms_into(expected,live,crowdFull);
     gfx::fixed_vertex_uniforms_into(actual,live,crowdNative);
     CHECK(!std::memcmp(&actual,&expected,offsetof(gfx::FixedVertexUniforms,revision)));
+    // Mixed native/ordinary builder history: changing palette/texgen/light
+    // activity must clear every field no longer used, including after reuse.
+    gfx::FixedVertexUniformBuilder incremental;
+    for(unsigned step=0;step<20;++step){
+      live.fixedVertexIndexedPn=(step%3)!=0;
+      live.fixedVertexTexMtxMask=(step%4)==0?1:0;
+      live.colorChannels[0].lightingEnabled=(step%2)==0;
+      live.colorChannels[0].lightMask=uint8_t(1u<<(step%2));
+      live.texgenCount=(step%5)==0?0:1;
+      g.pnMtx[0].pos.m0[3]=float(step+7);g.pnMtx[1].nrm.m1[1]=float(step+11);
+      g.texMtxs[8].m1[3]=float(step)*0.125f;g.lights[0].color[0]=float(step)*0.01f;
+      gfx::VertexTransformState fresh{};gfx::DrawUniforms fragment{};
+      gxbridge::translate_fixed_vertex_state(fresh,fragment,live,true);
+      gfx::fixed_vertex_uniforms_into(expected,live,fresh);
+      const auto& built=incremental.build(live,fresh);
+      CHECK(!std::memcmp(&built,&expected,offsetof(gfx::FixedVertexUniforms,revision)));
+    }
   },nullptr);
   recipe.reset();shutdown();CHECK(NativeModelRecipe::liveRecipes.load()==0);
   if(native_model_cache_diagnostics()){

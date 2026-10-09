@@ -171,6 +171,8 @@ private:
   std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
   gfx::FixedUniformPool fixedVertexUniforms_{};
   gfx::FixedVertexUniformBuilder fixedUniformBuilder_{};
+  gfx::FixedVertexUniforms& build_fixed_uniforms(const gfx::PipelineDesc& pipeline,
+      const gfx::VertexTransformState& state,bool distinct=false) noexcept;
   // Snapshot reuse across consecutive GPU-geometry draws (see submit()).
   gfx::FixedVertexUniforms* lastFixedUniforms_ = nullptr;
   uint64_t vertexStateVersion_ = 0;

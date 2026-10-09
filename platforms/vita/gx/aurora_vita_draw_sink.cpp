@@ -17,6 +17,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -26,6 +27,34 @@
 #endif
 
 namespace aurora::vita::gxbridge {
+
+namespace {
+bool native_model_uniform_build_enabled() noexcept {
+  static const bool enabled=[] {
+    const char* value=std::getenv("STRIKERS_GXM_NATIVE_MODEL_UNIFORM_BUILD");
+    return value&&std::strcmp(value,"1")==0;
+  }();
+  return enabled;
+}
+}
+
+gfx::FixedVertexUniforms& DrawSink::build_fixed_uniforms(const gfx::PipelineDesc& pipeline,
+    const gfx::VertexTransformState& state,bool distinct) noexcept {
+  const gfx::FixedVertexUniforms* candidate;
+  {
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::FixedUniformBuild);
+    if(gfx::gxm_disabled(gfx::GxmDisableFixedBuild)) {
+      auto& scratch=fixedVertexUniforms_.scratch();
+      gfx::fixed_vertex_uniforms_into(scratch,pipeline,state);
+      candidate=&scratch;
+    } else candidate=&fixedUniformBuilder_.build(pipeline,state);
+  }
+  // Publish a complete immutable value, never a pointer into builder scratch.
+  // Ordinary and native draws share the same exact comparison and mask policy.
+  gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::FixedUniformPublish);
+  return fixedVertexUniforms_.publish_from(*candidate,
+      !gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot),distinct);
+}
 
 gfx::MemoryBudgetSnapshot DrawSink::memory_budget() const noexcept {
   if (!renderer_ || !arena_) return {};
@@ -1015,25 +1044,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // snapshot whose inputs had changed). Snapshots live until the next flush.
   const auto buildFixedUniforms=[&]() noexcept -> gfx::FixedVertexUniforms& {
     const bool spriteExpand=translatedGpuPipeline_.fixedPointSprite||translatedGpuPipeline_.fixedLineSprite;
-    const bool reference=gfx::gxm_disabled(gfx::GxmDisableFixedBuild);
-    const gfx::FixedVertexUniforms* candidate;
-    {
-      gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::FixedUniformBuild);
-      if(reference) {
-        auto& scratch=fixedVertexUniforms_.scratch();
-        gfx::fixed_vertex_uniforms_into(scratch,translatedGpuPipeline_,vertexState);
-        candidate=&scratch;
-      } else candidate=&fixedUniformBuilder_.build(translatedGpuPipeline_,vertexState);
-    }
-    // The published snapshot must be immutable until all queued GX draws have
-    // finished; the recorder measures copy/compare, never reuses live buffers.
-    gfx::FixedVertexUniforms* sharedPtr=nullptr;
-    {
-      gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::FixedUniformPublish);
-      sharedPtr=&fixedVertexUniforms_.publish_from(*candidate,
-          !gfx::gxm_disabled(gfx::GxmDisableFixedSnapshot),spriteExpand);
-    }
-    auto& shared=*sharedPtr;
+    auto& shared=build_fixed_uniforms(translatedGpuPipeline_,vertexState,spriteExpand);
     if(spriteExpand){
       shared.primitiveExpand={{
         std::max(expansion.viewportWidth,1.f),std::max(expansion.viewportHeight,1.f),
@@ -1352,12 +1363,25 @@ bool DrawSink::submit_native_model_recipe(uint64_t identity,uint64_t pinnedIdent
   if(native.pipeline.nativeTextureWrapMask!=nativeWrapMask||
      native.pipeline.textureForceOpaqueMask!=opaqueMask||native.pipeline.textureCopyModeBits!=copyModes)return reject(ModelCacheEvent::ConsumerTextureModes);
   gfx::VertexTransformState vertex{};gfx::DrawUniforms uniforms{};
-  translate_fixed_vertex_state(vertex,uniforms,native.pipeline,true);
-  gfx::fixed_vertex_uniforms_into(fixedVertexUniforms_.scratch(),native.pipeline,vertex);
-  auto& fixed=fixedVertexUniforms_.publish();
+  {
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
+    translate_fixed_vertex_state(vertex,uniforms,native.pipeline,true);
+  }
+  gfx::FixedVertexUniforms* fixed=nullptr;
+  if(native_model_uniform_build_enabled()) {
+    fixed=&build_fixed_uniforms(native.pipeline,vertex);
+  } else {
+    // Retain the sealed recipe reference, including its publication policy.
+    {
+      gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::FixedUniformBuild);
+      gfx::fixed_vertex_uniforms_into(fixedVertexUniforms_.scratch(),native.pipeline,vertex);
+    }
+    gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::FixedUniformPublish);
+    fixed=&fixedVertexUniforms_.publish();
+  }
   auto packet=native.packet;
   packet.uniforms=uniforms;packet.textures=bindings;packet.viewport=translate_viewport();packet.scissor=translate_scissor();
-  packet.fixedVertexUniforms=&fixed;
+  packet.fixedVertexUniforms=fixed;
   // Native and legacy producers use independent identities. Zero selects the
   // renderer's exact comparison rather than aliasing a GX revision counter.
   packet.uniformRevision=packet.fragmentUniformRevision=packet.vertexUniformRevision=0;

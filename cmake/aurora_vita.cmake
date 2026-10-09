@@ -147,6 +147,9 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         add_test(NAME vita_native_model_textured_cache COMMAND aurora_vita_native_model_textured_test)
         set_tests_properties(vita_native_model_recipe_cache vita_native_model_textured_cache PROPERTIES
             ENVIRONMENT "STRIKERS_GXM_NATIVE_MODEL_CACHE=1;STRIKERS_GXM_NATIVE_MODEL_CENSUS=1")
+        add_test(NAME vita_native_model_textured_uniforms COMMAND aurora_vita_native_model_textured_test)
+        set_tests_properties(vita_native_model_textured_uniforms PROPERTIES
+            ENVIRONMENT "STRIKERS_GXM_NATIVE_MODEL_CACHE=1;STRIKERS_GXM_NATIVE_MODEL_CENSUS=1;STRIKERS_GXM_NATIVE_MODEL_UNIFORM_BUILD=1")
         add_executable(aurora_vita_native_model_cache_test
             ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_cache_test.cpp)
         target_link_libraries(aurora_vita_native_model_cache_test PRIVATE aurora::vita_backend)
