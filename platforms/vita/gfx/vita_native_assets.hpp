@@ -4,7 +4,13 @@
 #include <string>
 namespace aurora::vita::gfx {
 using NativeAssetReader=bool (*)(const char* path,std::vector<uint8_t>& bytes,void* context);
-struct NativeAssetStats {uint64_t textureHits=0,geometryHits=0,misses=0,rejected=0;};
+struct NativeAssetStats {uint64_t textureHits=0,geometryHits=0,misses=0,rejected=0;
+  uint64_t gpuGeometryHits=0,gpuGeometryAttempts=0;};
+struct NativeGpuGeometry {
+  std::vector<uint8_t> vertices{};
+  std::vector<uint16_t> indices{};
+  uint32_t vertexCount=0;
+};
 // Configure before starting the GX consumer, clear only after its shutdown.
 void configure_native_assets(NativeAssetReader reader,void* context) noexcept;
 NativeAssetStats native_asset_stats() noexcept;
@@ -16,6 +22,13 @@ std::string native_asset_path(const std::vector<uint8_t>& request);
 // record; the content hash is a lookup only. Original GX data remains fallback.
 bool compile_native_asset(const std::vector<uint8_t>& request,std::vector<uint8_t>& record,
                           bool includeRgba = false);
+// AVNR v2: one exact GX source identity containing selected, already packed
+// GXM vertex layouts and a shared native index buffer. Never stores GPU handles.
+bool compile_native_gpu_geometry(const std::vector<uint8_t>& request,std::vector<uint8_t>& record);
+std::string native_gpu_geometry_path(const std::vector<uint8_t>& request);
+bool load_native_gpu_geometry(const uint8_t* raw,size_t bytes,uint32_t count,
+                              SourcePrimitive primitive,const VertexDecodeLayout& source,
+                              const VertexLayout& gpu,NativeGpuGeometry& out) noexcept;
 // Consumer-only access for checked native records with another versioned ABI
 // (for example AVGX shader binaries). Their owner validates the complete record.
 bool read_native_blob(const char* path,std::vector<uint8_t>& bytes,size_t limit) noexcept;

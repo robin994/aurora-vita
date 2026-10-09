@@ -434,6 +434,8 @@ bool initialize(const BackendConfig& c) noexcept {
   aurora::gx::fifo::set_prepared_display_lists_enabled(c.prepared_display_lists);
   aurora::gx::fifo::set_bp_write_cache_enabled(c.bp_write_cache);
   aurora::gx::fifo::set_xf_equal_position_writes(c.gxm_xf_equal_pos_writes);
+  aurora::gx::fifo::set_xf_equal_matrix_writes(c.gxm_xf_equal_matrix_writes);
+  aurora::gx::fifo::set_tev_decoded_write_gate(c.gxm_tev_decoded_write_gate);
   aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow&&
       !gfx::gxm_disabled(gfx::GxmDisableDisplayListShadow));
 #endif
@@ -687,6 +689,8 @@ bool initialize(const BackendConfig& c) noexcept {
 #if defined(AURORA_VITA_RENDERER_GXM)
   dc.fixedUniformPoolBytes=c.gxm_fixed_uniform_pool?gfx::FixedUniformPool::MaxRetainedBytes:0;
   dc.staticGeometryBudgetPreflight=c.gxm_geometry_preflight;
+  dc.nativeGpuStatic=c.gxm_native_gpu_static;
+  dc.vertexReuseProbe=c.diagnostics_enabled&&c.gxm_vertex_reuse_probe;
 #endif
   dc.staticGeometryMinVertices=c.static_geometry_min_vertices;
   dc.staticGeometryStableOnly=c.static_geometry_stable_only;
@@ -931,7 +935,30 @@ PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* su
   out.xfPositionWritesInspected=xf.inspected;
   out.xfPositionWritesUnchanged=xf.unchanged;
   out.xfPositionWritesChanged=xf.changed;
+  const auto matrices=aurora::gx::fifo::xf_equal_matrix_stats();
+  out.xfTexWritesInspected=matrices.texInspected;
+  out.xfTexWritesUnchanged=matrices.texUnchanged;
+  out.xfTexWritesChanged=matrices.texChanged;
+  out.xfNormalWritesInspected=matrices.normalInspected;
+  out.xfNormalWritesUnchanged=matrices.normalUnchanged;
+  out.xfNormalWritesChanged=matrices.normalChanged;
+  out.xfPostWritesInspected=matrices.postInspected;
+  out.xfPostWritesUnchanged=matrices.postUnchanged;
+  out.xfPostWritesChanged=matrices.postChanged;
+  const auto tev=aurora::gx::fifo::tev_decoded_write_stats();
+  out.tevDecodedWritesInspected=tev.inspected;
+  out.tevDecodedWritesSkipped=tev.skipped;
+  out.tevDecodedWritesChanged=tev.changed;
   aurora::gx::fifo::prepared_display_list_stats(out.preparedListHits,out.preparedListMisses,out.preparedListRejected);
+  const auto a6=aurora::gx::fifo::native_replay_stats();
+  out.nativeReplayAttempts=a6.attempted;
+  out.nativeReplayHits=a6.replayed;
+  out.nativeReplayFallbacks=a6.fallback;
+  const auto models=aurora::gx::fifo::native_model_stats();
+  out.nativeModelAttempts=models.attempted;out.nativeModelDraws=models.dispatched;
+  out.nativeModelFallbacks=models.fallback;out.nativeModelCompiled=models.compiled;
+  out.nativeModelCensus=aurora::gx::fifo::native_model_census_snapshot();
+  out.nativeModelCache=aurora::gx::fifo::native_model_cache_snapshot();
 #endif
   out.producerWaitUs=g_lastProducerWaitUs;out.consumerWaitUs=g_lastConsumerWaitUs;
   out.poolBusyFallbacks=gfx::cpu_pool_busy_fallbacks();
@@ -1014,6 +1041,7 @@ PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* su
   out.shaderDiskCacheMisses=g_renderer->program_cache_misses();
   if(g_drawSink) {
     out.geometryPreflightEnabled=g_config.gxm_geometry_preflight;
+    out.vertexReuse=g_drawSink->vertex_reuse_stats();
     out.geometryPreflightRejects=g_drawSink->geometry_preflight_rejects();
     const auto pool=g_drawSink->fixed_uniform_pool_stats();
     out.fixedUniformPoolEnabled=pool.enabled;

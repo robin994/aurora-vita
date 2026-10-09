@@ -12,6 +12,8 @@
 
 namespace aurora::vita::gfx {
 
+class VertexReuseProbe;
+
 enum class SourcePrimitive : uint8_t { Quads, Triangles, TriangleStrip, TriangleFan, Lines, LineStrip, Points };
 
 enum class PrepareDrawError : uint8_t { None, InvalidInput, VertexDecodeFailed, VertexTransformFailed, TooManyVertices, UnsupportedLineExpansion, StreamingOverflow, PipelineFailed };
@@ -96,7 +98,8 @@ bool prepare_streamed_draw_into(StreamedDraw& out,StreamingArena& arena,
                                 SourcePrimitive source,const uint16_t* rawIndices,uint32_t rawIndexCount,
                                 const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
                                 const VertexTransformState& state,DrawUniforms* uniforms=nullptr,
-                                Telemetry* telemetry=nullptr,const DrawRecipe* recipe=nullptr) noexcept;
+                                Telemetry* telemetry=nullptr,const DrawRecipe* recipe=nullptr,
+                                VertexReuseProbe* reuseProbe=nullptr) noexcept;
 
 // Resolves the effective post-conversion pipeline once. Callers submitting a
 // consecutive run with unchanged GX state may reuse the returned key.

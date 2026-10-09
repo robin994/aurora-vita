@@ -1,4 +1,5 @@
 #include "gfx/vita_native_assets.hpp"
+#include "gfx/vita_fixed_vertex.hpp"
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -56,6 +57,96 @@ int main() {
   CHECK(draw.indices==referenceDraw.indices&&draw.vertices.size()==referenceDraw.vertices.size());
   CHECK(std::memcmp(draw.vertices.data(),referenceDraw.vertices.data(),draw.vertices.size()*sizeof(CanonicalVertex))==0);
   CHECK(draw.vertices.size()==3&&draw.indices.size()==48);
+  // AVNR v2 is a separate, optional native-GXM record. Its attribute bytes
+  // must equal the reference CPU pack for the exact live shader layout.
+  std::vector<uint8_t> oldV1=disk,recordV2;
+  CHECK(compile_native_gpu_geometry(request,recordV2));
+  expected=native_gpu_geometry_path(request);
+  CHECK(expected.find("native/v2/geometry/")==0);
+  disk=recordV2;
+  PipelineDesc gpuPipeline{};gpuPipeline.fixedVertexOnGpu=true;
+  const auto gpuLayout=fixed_vertex_gpu_layout(gpuPipeline);
+  NativeGpuGeometry direct;
+  CHECK(load_native_gpu_geometry(beIndices.data(),beIndices.size(),48,SourcePrimitive::Triangles,layout,gpuLayout,direct));
+  CHECK(direct.vertexCount==referenceDraw.vertices.size());
+  CHECK(direct.indices==referenceDraw.indices);
+  const size_t gpuStride=gpuLayout.attributes[0].stride;
+  std::vector<uint8_t> manuallyPacked(referenceDraw.vertices.size()*gpuStride,0);
+  for(size_t i=0;i<referenceDraw.vertices.size();++i)
+    pack_gpu_vertex_bytes(manuallyPacked.data()+i*gpuStride,referenceDraw.vertices[i],gpuLayout);
+  CHECK(direct.vertices==manuallyPacked);
+  CHECK(native_asset_stats().gpuGeometryHits==1);
+  // A different live attribute layout must never reinterpret old packed bytes.
+  gpuPipeline.fixedVertexIndexedPn=true;
+  const auto different=fixed_vertex_gpu_layout(gpuPipeline);
+  CHECK(!load_native_gpu_geometry(beIndices.data(),beIndices.size(),48,SourcePrimitive::Triangles,layout,different,direct));
+  CHECK(direct.vertices.empty()&&direct.indices.empty());
+  CHECK(native_asset_stats().gpuGeometryHits==1);
+  // Exact source/layout identity is part of the AVNR v2 record, not just the
+  // file name. A malicious reader returning a valid file under another key is
+  // rejected before any GPU handle can be created.
+  beIndices[0]^=1;
+  CHECK(!load_native_gpu_geometry(beIndices.data(),beIndices.size(),48,SourcePrimitive::Triangles,layout,gpuLayout,direct));
+  beIndices[0]^=1;
+  disk.back()^=1;
+  CHECK(!load_native_gpu_geometry(beIndices.data(),beIndices.size(),48,SourcePrimitive::Triangles,layout,gpuLayout,direct));
+  disk.back()^=1;
+  CHECK(load_native_gpu_geometry(beIndices.data(),beIndices.size(),48,SourcePrimitive::Triangles,layout,gpuLayout,direct));
+  CHECK(direct.vertices==manuallyPacked);
+  // Legacy assets are still readable after trying the independent v2 record.
+  disk=oldV1;expected=native_asset_path(request);
+  CHECK(load_native_geometry(beIndices.data(),beIndices.size(),48,SourcePrimitive::Triangles,layout,draw));
+  // Realistic mixed-attribute GPU layout (indexed PN, color, Tex0 and normal):
+  // verify byte-for-byte parity even for unaligned source streams and GX
+  // matrix selectors, rather than only the position-only cache profile.
+  std::vector<uint8_t> attributes(3u*37u,0);
+  for(unsigned i=0;i<3;++i) {
+    auto* dst=attributes.data()+37u*i;
+    dst[0]=uint8_t(i*3u);
+    const float xyz[3]{float(i),float(i+1),-float(i)};
+    const float nrm[3]{0.f,0.f,1.f};
+    const float tex[2]{float(i)*0.25f,float(i)*0.125f};
+    std::memcpy(dst+1,xyz,sizeof xyz);
+    std::memcpy(dst+13,nrm,sizeof nrm);
+    std::memcpy(dst+25,tex,sizeof tex);
+    dst[33]=uint8_t(100+i);dst[34]=uint8_t(200-i);dst[35]=0xa5;dst[36]=255;
+  }
+  VertexDecodeLayout mixed{};mixed.count=5;mixed.streamStride=37;mixed.streamLittleEndian=true;
+  auto& pn=mixed.attributes[0];pn.semantic=VertexSemantic::PnMatrixIndex;
+  pn.source=VertexSource::Direct;pn.component=VertexComponent::U8;pn.components=1;pn.streamOffset=0;
+  auto& pos=mixed.attributes[1];pos.semantic=VertexSemantic::Position;
+  pos.source=VertexSource::Direct;pos.component=VertexComponent::F32;pos.components=3;pos.streamOffset=1;
+  auto& norm=mixed.attributes[2];norm.semantic=VertexSemantic::Normal;
+  norm.source=VertexSource::Direct;norm.component=VertexComponent::F32;norm.components=3;norm.streamOffset=13;
+  auto& tex0=mixed.attributes[3];tex0.semantic=VertexSemantic::Tex0;
+  tex0.source=VertexSource::Direct;tex0.component=VertexComponent::F32;tex0.components=2;tex0.streamOffset=25;
+  auto& color=mixed.attributes[4];color.semantic=VertexSemantic::Color0;
+  color.source=VertexSource::Direct;color.component=VertexComponent::RGBA8;color.components=4;color.streamOffset=33;
+  compile_vertex_decode_layout(mixed);
+  auto mixedReq=native_geometry_request(attributes.data(),attributes.size(),3,SourcePrimitive::Triangles,mixed);
+  CHECK(compile_native_gpu_geometry(mixedReq,disk));expected=native_gpu_geometry_path(mixedReq);
+  VertexLayout mixedGpu{};mixedGpu.count=5;
+  mixedGpu.attributes[0]={0,4,VertexScalar::F32,false,48,0};
+  mixedGpu.attributes[1]={1,4,VertexScalar::U8,true,48,16};
+  mixedGpu.attributes[2]={3,3,VertexScalar::F32,false,48,20};
+  mixedGpu.attributes[3]={11,3,VertexScalar::F32,false,48,32};
+  mixedGpu.attributes[4]={14,1,VertexScalar::U8,false,48,44};
+  CHECK(load_native_gpu_geometry(attributes.data(),attributes.size(),3,SourcePrimitive::Triangles,mixed,mixedGpu,direct));
+  CHECK(direct.vertexCount==3&&direct.indices==std::vector<uint16_t>({0,1,2}));
+  PreparedDraw mixedReference;PipelineDesc staticPipeline{};staticPipeline.fixedVertexOnGpu=true;
+  auto fullRecipe=build_draw_recipe(staticPipeline);fullRecipe.decodeSemantics=AllVertexSemantics;
+  CHECK(prepare_draw_into(mixedReference,attributes.data(),attributes.size(),3,SourcePrimitive::Triangles,
+                          mixed,staticPipeline,{},nullptr,{},nullptr,true,&fullRecipe));
+  manuallyPacked.assign(3*48,0);
+  for(unsigned i=0;i<3;++i)
+    pack_gpu_vertex_bytes(manuallyPacked.data()+i*48,mixedReference.vertices[i],mixedGpu);
+  CHECK(direct.vertices==manuallyPacked);
+  // Malformed or truncated AVNR v2 records must not publish an incomplete draw.
+  for(size_t n:{size_t(0),size_t(2),size_t(27),disk.size()-1}) {
+    const auto saved=disk;disk.resize(n);
+    CHECK(!load_native_gpu_geometry(attributes.data(),attributes.size(),3,SourcePrimitive::Triangles,mixed,mixedGpu,direct));
+    CHECK(direct.vertices.empty());disk=saved;
+  }
   data.resize(16384+4096);desc.data=data.data();desc.dataSize=data.size();desc.mipCount=2;
   request=native_texture_request(desc);expected=native_asset_path(request);CHECK(compile_native_asset(request,disk));
   CHECK(load_native_texture(desc,native,false));

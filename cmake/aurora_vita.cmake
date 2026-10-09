@@ -71,6 +71,10 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_geometry_recipe_test.cpp)
     target_link_libraries(aurora_vita_geometry_recipe_test PRIVATE aurora::vita_backend)
     add_test(NAME vita_geometry_recipe COMMAND aurora_vita_geometry_recipe_test)
+    add_executable(aurora_vita_vertex_reuse_probe_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_vertex_reuse_probe_test.cpp)
+    target_link_libraries(aurora_vita_vertex_reuse_probe_test PRIVATE aurora::vita_backend)
+    add_test(NAME vita_vertex_reuse_probe COMMAND aurora_vita_vertex_reuse_probe_test)
     # Explicit benchmark only, excluded from CTest and device FPS claims.
     add_executable(aurora_vita_fixed_builder_bench
         ${AURORA_VITA_SOURCE_DIR}/tools/vita_fixed_builder_bench.cpp)
@@ -131,6 +135,26 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
             ${AURORA_VITA_SOURCE_DIR}/tests/vita_frontend_translation_test.cpp)
         target_link_libraries(aurora_vita_frontend_translation_test PRIVATE aurora::vita_backend)
         add_test(NAME vita_frontend_translation COMMAND aurora_vita_frontend_translation_test)
+        add_executable(aurora_vita_native_model_recipe_test
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_recipe_test.cpp)
+        target_link_libraries(aurora_vita_native_model_recipe_test PRIVATE aurora::vita_backend)
+        add_test(NAME vita_native_model_recipe COMMAND aurora_vita_native_model_recipe_test)
+        add_executable(aurora_vita_native_model_textured_test
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_textured_test.cpp)
+        target_link_libraries(aurora_vita_native_model_textured_test PRIVATE aurora::vita_backend)
+        add_test(NAME vita_native_model_textured COMMAND aurora_vita_native_model_textured_test)
+        add_test(NAME vita_native_model_recipe_cache COMMAND aurora_vita_native_model_recipe_test)
+        add_test(NAME vita_native_model_textured_cache COMMAND aurora_vita_native_model_textured_test)
+        set_tests_properties(vita_native_model_recipe_cache vita_native_model_textured_cache PROPERTIES
+            ENVIRONMENT "STRIKERS_GXM_NATIVE_MODEL_CACHE=1;STRIKERS_GXM_NATIVE_MODEL_CENSUS=1")
+        add_executable(aurora_vita_native_model_cache_test
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_cache_test.cpp)
+        target_link_libraries(aurora_vita_native_model_cache_test PRIVATE aurora::vita_backend)
+        add_test(NAME vita_native_model_cache COMMAND aurora_vita_native_model_cache_test)
+        add_executable(aurora_vita_native_model_census_test
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_census_test.cpp)
+        target_link_libraries(aurora_vita_native_model_census_test PRIVATE aurora::vita_backend)
+        add_test(NAME vita_native_model_census COMMAND aurora_vita_native_model_census_test)
     endif()
     add_executable(aurora_vita_command_stream_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_command_stream_test.cpp)

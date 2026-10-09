@@ -8,12 +8,17 @@
 #include "../gfx/vita_static_geometry.hpp"
 #include "../gfx/vita_fixed_uniform_pool.hpp"
 #include "../gfx/vita_fixed_vertex.hpp"
+#include "../gfx/vita_vertex_reuse_probe.hpp"
 #include "../integration/vita_feature_coverage.hpp"
 #include "../integration/vita_frame_trace.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include "../../../lib/gx/native_model_cache.hpp"
 #include "../gfx/vita_hash_map.hpp"
+#if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+#include "../../../lib/gx/pipeline.hpp"
+#endif
 
 namespace aurora::vita::gxbridge {
 
@@ -53,6 +58,8 @@ struct DrawSinkConfig {
   bool strictUnsupported = false;
   size_t staticGeometryBudget = 0; // Zero keeps the established CPU vertex path.
   bool staticGeometryBudgetPreflight = false;
+  bool nativeGpuStatic = false;
+  bool vertexReuseProbe = false;
   // Zero uses the original deque; retained CPU snapshots are capped at 1 MiB.
   size_t fixedUniformPoolBytes = 0;
   uint32_t staticGeometryMinVertices = 48;
@@ -92,7 +99,7 @@ public:
   void shutdown() noexcept;
   void begin_frame(uint64_t frame) noexcept;
   void flush() noexcept;
-  void reset_commands() noexcept { stream_.reset(); fixedVertexUniforms_.reset(); lastFixedUniforms_ = nullptr; reset_pipeline_run_cache(); }
+  void reset_commands() noexcept { clear_native_replay();stream_.reset(); fixedVertexUniforms_.reset(); lastFixedUniforms_ = nullptr; reset_pipeline_run_cache(); }
   void invalidate_texture_resolve_cache() noexcept {
 #if defined(AURORA_VITA_UPSTREAM)
     resolvedTextureBindingsValid_ = false;
@@ -115,7 +122,16 @@ public:
   gfx::CommandStream& stream() noexcept { return stream_; }
   const gfx::CommandStream& stream() const noexcept { return stream_; }
   uint64_t submitted_draws() const noexcept { return submittedDraws_; }
+#if defined(AURORA_VITA_UPSTREAM)
+  // A6: execute a proven immutable AVNR v2 draw again without GX BP/CP/XF
+  // translation. Owner-thread only; returns false for exact-slot GX fallback.
+  bool replay_last_native_draw(const uint8_t* pinnedDisplayList,uint64_t immutableIdentity) noexcept;
+  bool submit_native_model_recipe(uint64_t identity,uint64_t pinnedIdentity) noexcept;
+#endif
   gfx::FixedUniformPool::Stats fixed_uniform_pool_stats() const noexcept { return fixedVertexUniforms_.stats(); }
+  gfx::VertexReuseProbe::Stats vertex_reuse_stats() const noexcept {
+    return vertexReuseProbe_?vertexReuseProbe_->stats():gfx::VertexReuseProbe::Stats{};
+  }
   uint64_t geometry_preflight_rejects() const noexcept {
     return staticGeometry_?staticGeometry_->budget_preflight_rejects():0;
   }
@@ -126,6 +142,21 @@ public:
   void set_runtime_feature_flags(uint32_t flags) noexcept;
 
 private:
+#if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  struct NativeModelPrepared {
+    aurora::gx::PipelineConfig guard{};
+    gfx::PipelineDesc pipeline{};
+    gfx::DrawPacket packet{};
+    const gfx::StaticGeometryCache::Entry* geometry=nullptr;
+    uint64_t geometryKey=0,pinnedIdentity=0;
+    uint32_t features=0,disableMask=0;
+    uint8_t primitive=0,fmt=0,textureMask=0;
+  };
+  gfx::FlatHashMap<uint64_t,NativeModelPrepared> nativeModels_{};
+  aurora::gx::fifo::NativeModelCache<NativeModelPrepared> nativeModelCache_{};
+#endif
+  std::array<gfx::TextureBinding,gfx::MaxTextures> resolve_textures(
+      uint8_t textureMask,bool broadDirty,uint8_t& nativeWrapMask,SubmitResult& result) noexcept;
   gfx::Handle white_texture() noexcept;
   void reset_pipeline_run_cache() noexcept {
 #if defined(AURORA_VITA_UPSTREAM)
@@ -136,6 +167,7 @@ private:
   std::unique_ptr<gfx::StreamingArena> arena_{};
   gfx::CommandStream stream_{};
   gfx::PreparedDraw preparedScratch_{};
+  std::unique_ptr<gfx::VertexReuseProbe> vertexReuseProbe_{};
   std::unique_ptr<gfx::StaticGeometryCache> staticGeometry_{};
   gfx::FixedUniformPool fixedVertexUniforms_{};
   gfx::FixedVertexUniformBuilder fixedUniformBuilder_{};
@@ -188,6 +220,20 @@ private:
   bool queuedPipelineValid_ = false;
 #endif
   uint64_t submittedDraws_ = 0;
+  // Invalidated on every new draw/frame/flush. The identity and cache key are
+  // checked before dereferencing the entry; no GPU handle is retained across
+  // frames, buffer retirement, views or renderer resets.
+  uint64_t lastNativeReplayKey_=0,lastNativeReplayIdentity_=0;
+  const uint8_t* lastNativeReplaySource_=nullptr;
+  uint32_t lastNativeReplayBytes_=0;
+  const gfx::StaticGeometryCache::Entry* lastNativeReplayEntry_=nullptr;
+  integration::DrawTraceRecord lastNativeReplayTrace_{};
+  void clear_native_replay() noexcept {
+    if(!lastNativeReplayEntry_)return;
+    lastNativeReplayKey_=lastNativeReplayIdentity_=0;
+    lastNativeReplaySource_=nullptr;lastNativeReplayBytes_=0;lastNativeReplayEntry_=nullptr;
+    lastNativeReplayTrace_={};
+  }
   gfx::Telemetry* telemetry_ = nullptr;
   integration::FeatureCoverage* coverage_ = nullptr;
   integration::FrameTrace* trace_ = nullptr;

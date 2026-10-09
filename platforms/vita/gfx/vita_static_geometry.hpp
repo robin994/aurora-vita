@@ -45,11 +45,17 @@ public:
     uint64_t lastUseFrame=0;
     size_t accountedBytes=0;
     bool volatileSource=false;
+    // A6 may replay an already-submitted AVNR v2 draw in the *same frame*.
+    // This is a cache lookup identity, never a serialized GPU handle.
+    uint64_t replayKey=0;
+    bool nativeGpuPacked=false;
   };
   static constexpr uint64_t RetireFrames=4;
 
-  explicit StaticGeometryCache(Renderer& renderer,size_t budget,bool budgetPreflight=false)
-      : renderer_(renderer),budget_(budget),budgetPreflight_(budgetPreflight) {}
+  explicit StaticGeometryCache(Renderer& renderer,size_t budget,bool budgetPreflight=false,
+                               bool nativeGpuStatic=false)
+      : renderer_(renderer),budget_(budget),budgetPreflight_(budgetPreflight),
+        nativeGpuStatic_(nativeGpuStatic) {}
   ~StaticGeometryCache() { clear(); }
   StaticGeometryCache(const StaticGeometryCache&)=delete;
   StaticGeometryCache& operator=(const StaticGeometryCache&)=delete;
@@ -64,6 +70,43 @@ public:
   uint64_t lookup_fallbacks() const noexcept { return lookupFallbacks_; }
   uint64_t evictions() const noexcept { return evictions_; }
   uint64_t budget_preflight_rejects() const noexcept { return budgetPreflightRejects_; }
+
+  // Only owner-thread, same-frame AVNR v2 resources are replayable. The
+  // display-list transport separately pins/compares its original bytes.
+  bool validate_native_replay(uint64_t key,const Entry* identity) noexcept {
+    if(!key||!identity)return false;
+    const auto it=entries_.find(key);
+    if(it==entries_.end()||it->second.get()!=identity)return false;
+    auto& e=*it->second;
+    if(!e.nativeGpuPacked||e.volatileSource||!e.stableSource||e.lastUseFrame!=frame_)return false;
+    return validate_native_model(key,identity);
+  }
+
+  // Cross-frame recipes own no buffers. Resolve and validate the resident
+  // entry before touching its pointer, and charge its use to this frame.
+  bool validate_native_model(uint64_t key,const Entry* identity) noexcept {
+    if(!key||!identity)return false;
+    const auto it=entries_.find(key);
+    if(it==entries_.end()||it->second.get()!=identity)return false;
+    auto& e=*it->second;
+    if(e.volatileSource||!e.stableSource)return false;
+    const uint64_t epoch=memory_write_epoch();
+    if(epoch!=e.validationEpoch){
+      std::array<MemoryRevisionCheck,MaxVertexAttributes+1> checks{};
+      size_t count=0;
+      checks[count++]={e.stableSource,e.stableSourceBytes,e.stableSourceRevision};
+      for(const auto& s:e.snapshots){
+        if(s.revisionTracked){
+          if(count>=checks.size())return false;
+          checks[count++]={s.source,s.size,s.revision};
+        } else if(!byte_spans_equal(s.source,s.bytes.data(),s.bytes.size()))return false;
+      }
+      if(!memory_ranges_match(checks.data(),count))return false;
+      e.validationEpoch=epoch;
+    }
+    e.lastUseFrame=frame_;
+    return true;
+  }
 
   // Called once per frame before any lookup. Retired buffers are destroyed in
   // one synchronized batch: do not rely on per-buffer inFlight bookkeeping for
@@ -185,6 +228,7 @@ public:
       }
     }
     auto entry=std::make_unique<Entry>();
+    entry->replayKey=key;
     entry->sourceLayout=layout;entry->gpuLayout=gpuLayout;
     entry->stableSource=stableSource;entry->stableSourceBytes=stableSource?bytes:0;
     const uint64_t validationEpochBefore=stableSource?memory_write_epoch():0;
@@ -206,7 +250,16 @@ public:
       committedBefore=this->bytes();
       if(committedBefore>budget_||storedBytes>budget_-committedBefore)return lookup_fallback();
     }
-    if(pipeline.fixedPointSprite||pipeline.fixedLineSprite) {
+    NativeGpuGeometry direct{};
+    const bool directPacked=nativeGpuStatic_&&stableSource&&!sourceIndexCount&&
+        !pipeline.fixedPointSprite&&!pipeline.fixedLineSprite&&
+        load_native_gpu_geometry(raw,bytes,count,primitive,layout,gpuLayout,direct);
+    entry->nativeGpuPacked=directPacked;
+    if(directPacked) {
+      // AVNR v2 stores final GXM attribute bytes + ordered indices. No
+      // CanonicalVertex staging, vertex decode or per-layout GPU repack.
+      // Matrix, lighting, material and draw packet generation remain live.
+    } else if(pipeline.fixedPointSprite||pipeline.fixedLineSprite) {
       scratch_.error=PrepareDrawError::None;
       scratch_.vertices.clear();scratch_.indices.clear();scratch_.scratch.clear();
       scratch_.scratch.resize(count);
@@ -260,10 +313,10 @@ public:
         scratch_.indices.assign(sourceIndices,sourceIndices+sourceIndexCount);
       }
     }
-    if(scratch_.vertices.empty()||scratch_.indices.empty())return lookup_fallback();
+    if(!directPacked&&(scratch_.vertices.empty()||scratch_.indices.empty()))return lookup_fallback();
     const size_t stride=gpuLayout.attributes[0].stride;
-    const size_t vertexBytes=scratch_.vertices.size()*stride;
-    const size_t indexBytes=scratch_.indices.size()*sizeof(uint16_t);
+    const size_t vertexBytes=directPacked?direct.vertices.size():scratch_.vertices.size()*stride;
+    const size_t indexBytes=directPacked?direct.indices.size()*sizeof(uint16_t):scratch_.indices.size()*sizeof(uint16_t);
     size_t committed=this->bytes();
     if(committed>budget_||storedBytes>budget_-committed||
        vertexBytes+indexBytes>budget_-committed-storedBytes) {
@@ -273,17 +326,21 @@ public:
       if(committed>budget_||storedBytes>budget_-committed||
          vertexBytes+indexBytes>budget_-committed-storedBytes)return lookup_fallback();
     }
-    packed_.resize(vertexBytes);
-    PackContext pack{packed_.data(),scratch_.vertices.data(),&gpuLayout,stride};
-    if(!cpu_parallel_for_vertex(scratch_.vertices.size(),pack_range,&pack))return lookup_fallback();
-    const Handle vb=renderer_.create_vertex_buffer(packed_.data(),vertexBytes,false);
+    const uint8_t* vertexData=directPacked?direct.vertices.data():nullptr;
+    if(!directPacked) {
+      packed_.resize(vertexBytes);
+      PackContext pack{packed_.data(),scratch_.vertices.data(),&gpuLayout,stride};
+      if(!cpu_parallel_for_vertex(scratch_.vertices.size(),pack_range,&pack))return lookup_fallback();
+      vertexData=packed_.data();
+    }
+    const Handle vb=renderer_.create_vertex_buffer(vertexData,vertexBytes,false);
     if(!vb)return lookup_fallback();
-    const Handle ib=renderer_.create_index_buffer(scratch_.indices.data(),indexBytes,false);
+    const Handle ib=renderer_.create_index_buffer(directPacked?direct.indices.data():scratch_.indices.data(),indexBytes,false);
     if(!ib) {renderer_.buffers().destroy(vb);return lookup_fallback();}
     entry->vertices={vb,0,static_cast<uint32_t>(vertexBytes)};
     entry->indices={ib,0,static_cast<uint32_t>(indexBytes)};
-    entry->vertexCount=static_cast<uint32_t>(scratch_.vertices.size());
-    entry->indexCount=static_cast<uint32_t>(scratch_.indices.size());
+    entry->vertexCount=directPacked?direct.vertexCount:static_cast<uint32_t>(scratch_.vertices.size());
+    entry->indexCount=directPacked?static_cast<uint32_t>(direct.indices.size()):static_cast<uint32_t>(scratch_.indices.size());
     if(!stableSource)entry->raw.assign(raw,raw+bytes);
     bytes_+=storedBytes+vertexBytes+indexBytes;
     entry->accountedBytes=storedBytes+vertexBytes+indexBytes;
@@ -444,6 +501,7 @@ private:
   Renderer& renderer_;
   size_t budget_=0,bytes_=0,retiredBytes_=0;
   bool budgetPreflight_=false;
+  bool nativeGpuStatic_=false;
   uint64_t budgetPreflightRejects_=0;
   uint64_t hits_=0,misses_=0,lookupFallbacks_=0;
   FlatHashMap<uint64_t,std::unique_ptr<Entry>> entries_{};

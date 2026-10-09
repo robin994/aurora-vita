@@ -5,6 +5,9 @@
 #include "../gfx/vita_hash.hpp"
 
 #if defined(AURORA_VITA_UPSTREAM)
+#if defined(MKW_TARGET_VITA)
+#include "../../../lib/gx/fifo.hpp"
+#endif
 #if defined(AURORA_VITA_UPSTREAM_STUB)
 #include "../../../tests/upstream_gx_stub.hpp"
 #else
@@ -76,8 +79,13 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   initialized_ = true;
   if(config.staticGeometryBudget && renderer.supports_fixed_vertex())
     staticGeometry_=std::make_unique<gfx::StaticGeometryCache>(renderer,config.staticGeometryBudget,
-                                                             config.staticGeometryBudgetPreflight);
+                                                             config.staticGeometryBudgetPreflight,
+                                                             config.nativeGpuStatic);
   staticGeometryRuntimeEnabled_=staticGeometry_!=nullptr;
+  if(config.vertexReuseProbe){
+    vertexReuseProbe_.reset(new(std::nothrow) gfx::VertexReuseProbe);
+    if(vertexReuseProbe_&&!vertexReuseProbe_->initialize())vertexReuseProbe_.reset();
+  }
   return true;
 }
 
@@ -124,9 +132,15 @@ void DrawSink::set_runtime_feature_flags(uint32_t flags) noexcept {
 }
 
 void DrawSink::shutdown() noexcept {
+#if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  nativeModels_.clear();
+  nativeModelCache_.release();
+#endif
+  clear_native_replay();
   if (!initialized_ && !arena_) return;
   stream_.reset();
   preparedScratch_=gfx::PreparedDraw{};
+  vertexReuseProbe_.reset();
   fixedVertexUniforms_.clear();staticGeometry_.reset();fixedPipelineKeys_.clear();
   translatedVertexStateValid_=false;immediateGpuUniforms_.invalidate();
   translatedVertexStateLightweight_=false;
@@ -160,9 +174,11 @@ void DrawSink::shutdown() noexcept {
 
 void DrawSink::begin_frame(uint64_t frame) noexcept {
   if (!initialized_ || !arena_) return;
+  clear_native_replay();
   stream_.reset();
   frameDrawIndex_ = 0;
   fixedVertexUniforms_.reset();lastFixedUniforms_=nullptr;
+  if(vertexReuseProbe_)vertexReuseProbe_->begin_frame(frame);
   reset_pipeline_run_cache();
 #if defined(AURORA_VITA_UPSTREAM)
   resolvedTextureBindingsValid_=false;
@@ -173,6 +189,7 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
 }
 
 void DrawSink::flush() noexcept {
+  clear_native_replay();
   if (!initialized_ || !renderer_ || stream_.size() == 0) return;
   bool uploaded=false;
   { gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::BufferUpload); uploaded=arena_&&arena_->flush(); }
@@ -358,6 +375,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
 }
 
 bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
+  clear_native_replay();
   if (!initialized_ || !renderer_ || !dest) return false;
   resolvedTextureBindingsValid_=false;
   gfx::ScopedTelemetryPhase timer(telemetry_, gfx::TelemetryPhase::EfbCopy);
@@ -489,6 +507,7 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
 }
 
 void DrawSink::evict_copy_tex(const void* dest) noexcept {
+  clear_native_replay();
   if (!dest || !renderer_) return;
   const auto it=copyTextures_.find(reinterpret_cast<uintptr_t>(dest));
   if(it==copyTextures_.end())return;
@@ -498,6 +517,7 @@ void DrawSink::evict_copy_tex(const void* dest) noexcept {
 }
 
 void DrawSink::clear_copy_textures() noexcept {
+  clear_native_replay();
   if(renderer_)for(auto& [_,e]:copyTextures_)if(e.handle)renderer_->efb().destroy(e.handle);
   copyTextures_.clear();
   resolvedTextureBindingsValid_=false;
@@ -507,6 +527,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
                               size_t rawBytes, uint32_t vertexCount,
                               const uint16_t* rawIndices, uint32_t indexCount,
                               const uint8_t* stableSource) noexcept {
+  clear_native_replay();
   gfx::ScopedTelemetryPhase drawTimer(telemetry_,gfx::TelemetryPhase::DrawFrontend);
   SubmitResult result{};
   if (!initialized_ || !renderer_ || !arena_ || !rawVertices || vertexCount == 0) {
@@ -623,93 +644,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     }
   }
 #endif
-  std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
-  const uint8_t textureMask = translatedTextureMask_;
-  const auto white = white_texture();
-  uint8_t nativeWrapMask = 0;
-  const bool reuseResolvedTextures=resolvedTextureBindingsValid_&&
-                                   resolvedTextureStateIdentity_==aurora::gx::g_gxState.stateIdentity&&
-                                   !broadDirty&&resolvedTextureRevision_==revisions.textures&&resolvedTextureMask_==textureMask&&
-                                   resolvedVolatileTextureMask_==0;
-  if(reuseResolvedTextures){
-    bindings=resolvedTextureBindings_;
-    nativeWrapMask=resolvedNativeWrapMask_;
-    result.fallbackTextureMask=resolvedFallbackTextureMask_;
-    result.warnings|=resolvedTextureWarnings_;
-    if(telemetry_)for(unsigned slot=0;slot<gfx::MaxTextures;++slot)if(textureMask&(1u<<slot))telemetry_->texture(true,false,0);
-  }else{ gfx::ScopedTelemetryPhase textureTimer(telemetry_, gfx::TelemetryPhase::TextureResolve);
-  if (telemetry_) telemetry_->count_texture_resolve();
-  uint8_t volatileTextureMask=0;
-  for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
-    if ((textureMask & (1u << slot)) == 0) continue;
-    const auto translated = translate_texture(slot);
-    if (coverage_ && translated.valid) {
-      const uint64_t texKey = (static_cast<uint64_t>(translated.texture.format) << 32) | translated.texture.width;
-      coverage_->observe(integration::FeatureClass::TextureFormat, texKey, "sampled GX texture format");
-    }
-    if (translated.dynamicCopy) {
-      // Match translate_texture(): the native frontend populates loadedTextures,
-      // not Dawn's resolved TextureBind table. Reading that table loses the
-      // guest destination identity and turns a valid EFB copy into white fallback.
-      const auto ptr = reinterpret_cast<uintptr_t>(aurora::gx::g_gxState.loadedTextures[slot].data);
-      const auto ci = copyTextures_.find(ptr);
-      if (ci != copyTextures_.end() && ci->second.handle) {
-        bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb,
-                                             ci->second.logicalFlipX,ci->second.logicalFlipY,ci->second.forceOpaque,
-                                             ci->second.sampleFormat};
-        continue;
-      }
-    }
-    if (translated.valid) {
-      if(!translated.texture.cacheable)volatileTextureMask|=static_cast<uint8_t>(1u<<slot);
-      // Only telemetry consumes these deltas; skip the struct copies otherwise.
-      gfx::CacheCounters statsBeforeTexture{};
-      if (telemetry_) statsBeforeTexture = renderer_->cache_counters();
-      const auto handle = renderer_->create_texture(translated.texture);
-      if (telemetry_) {
-        const auto statsAfterTexture = renderer_->cache_counters();
-        const uint32_t hits = statsAfterTexture.textureHits - statsBeforeTexture.textureHits;
-        const uint32_t misses = statsAfterTexture.textureMisses - statsBeforeTexture.textureMisses;
-        const uint32_t uploads = statsAfterTexture.textureUploads - statsBeforeTexture.textureUploads;
-        for (uint32_t i = 0; i < hits; ++i) telemetry_->texture(true, false, 0);
-        for (uint32_t i = 0; i < misses; ++i) telemetry_->texture(false, uploads != 0, uploads ? translated.texture.dataSize : 0);
-      }
-      if (handle) {
-        bindings[slot] = gfx::TextureBinding{handle, translated.sampler, gfx::TextureSource::Cache};
-        continue;
-      }
-    }
-    bindings[slot].texture = white;
-    bindings[slot].source = gfx::TextureSource::Cache;
-    if (translated.valid || translated.dynamicCopy) bindings[slot].sampler = translated.sampler;
-    result.fallbackTextureMask |= static_cast<uint8_t>(1u << slot);
-    if (translated.dynamicCopy) result.warnings |= SubmitWarning::DynamicCopyFallback;
-    else result.warnings |= SubmitWarning::MissingTextureFallback;
-  }
-  for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot)
-    if ((textureMask & (1u << slot)) &&
-        !gfx::gxm_disabled(gfx::GxmDisableNativeWrap) &&
-        renderer_->texture_supports_hardware_wrap(bindings[slot].texture, bindings[slot].sampler))
-      nativeWrapMask |= static_cast<uint8_t>(1u << slot);
-  resolvedTextureBindings_=bindings;
-  if(++resolvedTextureBindingVersion_==0)++resolvedTextureBindingVersion_;
-  resolvedNativeWrapMask_=nativeWrapMask;
-  resolvedTextureMask_=textureMask;
-  resolvedVolatileTextureMask_=volatileTextureMask;
-  resolvedFallbackTextureMask_=result.fallbackTextureMask;
-  resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
-    (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
-  resolvedTextureBindingsValid_=true;
-  resolvedTextureRevision_=revisions.textures;
-  resolvedTextureStateIdentity_=aurora::gx::g_gxState.stateIdentity;
-  }
-  if (result.fallbackTextureMask != 0) {
-    uint32_t fallbackCount = 0;
-    for (uint8_t bits = result.fallbackTextureMask; bits; bits >>= 1) fallbackCount += bits & 1u;
-    if (telemetry_) telemetry_->fallback_texture(fallbackCount);
-    if (coverage_) coverage_->fallback(result.fallbackTextureMask, "texture fallback mask");
-    if (strictUnsupported_) strictFailed_ = true;
-  }
+  const uint8_t textureMask=translatedTextureMask_;
+  uint8_t nativeWrapMask=0;
+  auto bindings=resolve_textures(textureMask,broadDirty,nativeWrapMask,result);
 
   // Resolved before the pipeline: the samplers decide whether the generated
   // shader may leave wrapping to the texture unit (swizzled texture, or clamp
@@ -998,7 +935,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   gfx::StreamedDraw streamed{};
   if(useStreamed) {
     (void)gfx::prepare_streamed_draw_into(streamed,*arena_,rawVertices,rawBytes,vertexCount,
-        source,rawIndices,indexCount,layout,streamedPipeline,vertexState,&uniforms,telemetry_,&drawRecipe);
+        source,rawIndices,indexCount,layout,streamedPipeline,vertexState,&uniforms,telemetry_,&drawRecipe,
+        vertexReuseProbe_.get());
   } else if(!gpuGeometry) {
     (void)gfx::prepare_draw_into(prepared,rawVertices,rawBytes,vertexCount,source,layout,
                                 pipeline,vertexState,&uniforms,expansion,telemetry_,exactTriangleDedup,&cpuRecipe_);
@@ -1202,6 +1140,67 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     for (uint32_t i = 0; i < missDelta; ++i) telemetry_->pipeline(false);
   }
   ++submittedDraws_;
+#if defined(MKW_TARGET_VITA) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  if(const auto id=aurora::gx::fifo::active_native_model_identity();id&&gpuGeometry&&stableSource&&
+      aurora::gx::fifo::active_native_model_single_draw(primitive,fmt,layout.streamStride,stableSource)&&
+      !translatedGpuPipeline_.tev.indirectStageCount&&
+      !translatedGpuPipeline_.fixedPointSprite&&!translatedGpuPipeline_.fixedLineSprite){
+    // CPU recipes are bounded independently of the unchanged geometry budget.
+    using namespace aurora::gx::fifo;
+    NativeModelPrepared* destination=nullptr;
+    if(native_model_cache_enabled()){
+      nativeModelCache_.initialize();
+      destination=nativeModelCache_.find(id);
+      if(!destination){bool replaced=false;destination=&nativeModelCache_.allocate(id,replaced);
+        native_model_cache_event(ModelCacheEvent::ConsumerInsert);
+        if(replaced)native_model_cache_event(ModelCacheEvent::ConsumerReplace);}
+      native_model_cache_peak(ModelCachePeak::ConsumerSlots,nativeModelCache_.size());
+      native_model_cache_peak(ModelCachePeak::ConsumerMetadataBytes,nativeModelCache_.storage_bytes());
+    }else{
+      if(nativeModels_.find(id)==nativeModels_.end()){
+        if(nativeModels_.size()>=64){nativeModels_.clear();native_model_cache_event(ModelCacheEvent::ConsumerClear);}
+        native_model_cache_event(ModelCacheEvent::ConsumerInsert);
+      }
+      destination=&nativeModels_[id];
+      native_model_cache_peak(ModelCachePeak::ConsumerSlots,nativeModels_.size());
+      // Payload lower bound; robin_hood allocator/bucket overhead is excluded.
+      native_model_cache_peak(ModelCachePeak::ConsumerMetadataBytes,nativeModels_.size()*sizeof(NativeModelPrepared));
+    }
+    auto& native=*destination;
+    native={};native.pipeline=translatedGpuPipeline_;
+    current_native_model_guard(primitive,fmt,native.guard);
+    const auto& packet=*stream_.tail_draw();
+    native.packet=packet;native.packet.uniforms=packet.gpu_uniforms();
+    native.packet.textures=packet.texture_bindings();
+    native.packet.sharedState=nullptr;native.packet.fixedVertexUniforms=nullptr;
+    native.geometry=gpuGeometry;native.geometryKey=gpuGeometry->replayKey;
+    native.pinnedIdentity=aurora::gx::fifo::active_pinned_identity();
+    native.primitive=primitive;native.fmt=fmt;native.features=runtime_feature_flags();
+    native.disableMask=gfx::gxm_disable_mask();native.textureMask=translatedTextureMask_;
+  }
+#endif
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  // Capture *only* final AVNR v2 GPU-resident geometry from a pinned,
+  // immutable one-draw DL. Other draws never seed A6 replay eligibility.
+  if(aurora::gx::fifo::native_draw_replay_tracking_enabled()&&
+     gpuGeometry&&gpuGeometry->nativeGpuPacked&&stableSource&&
+     aurora::gx::fifo::active_pinned_identity()){
+    lastNativeReplayEntry_=gpuGeometry;
+    lastNativeReplayKey_=gpuGeometry->replayKey;
+    lastNativeReplaySource_=stableSource;
+    lastNativeReplayIdentity_=aurora::gx::fifo::active_pinned_identity();
+    lastNativeReplayBytes_=aurora::gx::fifo::active_pinned_bytes();
+    lastNativeReplayTrace_.pipelineKey=translatedPipelineKey;
+    lastNativeReplayTrace_.vertexHash=trace_?integration::trace_hash_bytes(rawVertices,rawBytes):0;
+    lastNativeReplayTrace_.rawBytes=static_cast<uint32_t>(rawBytes);
+    lastNativeReplayTrace_.vertexCount=vertexCount;
+    lastNativeReplayTrace_.indexCount=gpuGeometry->indexCount;
+    lastNativeReplayTrace_.primitive=primitive;
+    lastNativeReplayTrace_.vertexFormat=fmt;
+    lastNativeReplayTrace_.fallbackTextureMask=result.fallbackTextureMask;
+    lastNativeReplayTrace_.warningMask=static_cast<uint8_t>(result.warnings);
+  }
+#endif
   if (telemetry_) {
     if(gpuGeometry)telemetry_->add_draw(gpuGeometry->vertexCount,gpuGeometry->indexCount,gpuGeometry->indexCount/3);
     else if(useStreamed)telemetry_->add_draw(streamed.vertexCount,streamed.indexCount,
@@ -1211,6 +1210,214 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   result.ok = true;
   result.drawError = gfx::PrepareDrawError::None;
   return result;
+}
+
+std::array<gfx::TextureBinding,gfx::MaxTextures> DrawSink::resolve_textures(
+    uint8_t textureMask,bool broadDirty,uint8_t& nativeWrapMask,SubmitResult& result) noexcept {
+  std::array<gfx::TextureBinding, gfx::MaxTextures> bindings{};
+  const auto white = white_texture();
+  nativeWrapMask = 0;
+  const bool reuseResolvedTextures=resolvedTextureBindingsValid_&&
+                                   resolvedTextureStateIdentity_==aurora::gx::g_gxState.stateIdentity&&
+                                   !broadDirty&&resolvedTextureRevision_==aurora::gx::g_gxState.stateRevisions.textures&&resolvedTextureMask_==textureMask&&
+                                   resolvedVolatileTextureMask_==0;
+  if(reuseResolvedTextures){
+    bindings=resolvedTextureBindings_;
+    nativeWrapMask=resolvedNativeWrapMask_;
+    result.fallbackTextureMask=resolvedFallbackTextureMask_;
+    result.warnings|=resolvedTextureWarnings_;
+    if(telemetry_)for(unsigned slot=0;slot<gfx::MaxTextures;++slot)if(textureMask&(1u<<slot))telemetry_->texture(true,false,0);
+  }else{ gfx::ScopedTelemetryPhase textureTimer(telemetry_, gfx::TelemetryPhase::TextureResolve);
+  if (telemetry_) telemetry_->count_texture_resolve();
+  uint8_t volatileTextureMask=0;
+  for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot) {
+    if ((textureMask & (1u << slot)) == 0) continue;
+    const auto translated = translate_texture(slot);
+    if (coverage_ && translated.valid) {
+      const uint64_t texKey = (static_cast<uint64_t>(translated.texture.format) << 32) | translated.texture.width;
+      coverage_->observe(integration::FeatureClass::TextureFormat, texKey, "sampled GX texture format");
+    }
+    if (translated.dynamicCopy) {
+      // Match translate_texture(): the native frontend populates loadedTextures,
+      // not Dawn's resolved TextureBind table. Reading that table loses the
+      // guest destination identity and turns a valid EFB copy into white fallback.
+      const auto ptr = reinterpret_cast<uintptr_t>(aurora::gx::g_gxState.loadedTextures[slot].data);
+      const auto ci = copyTextures_.find(ptr);
+      if (ci != copyTextures_.end() && ci->second.handle) {
+        bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb,
+                                             ci->second.logicalFlipX,ci->second.logicalFlipY,ci->second.forceOpaque,
+                                             ci->second.sampleFormat};
+        continue;
+      }
+    }
+    if (translated.valid) {
+      if(!translated.texture.cacheable)volatileTextureMask|=static_cast<uint8_t>(1u<<slot);
+      // Only telemetry consumes these deltas; skip the struct copies otherwise.
+      gfx::CacheCounters statsBeforeTexture{};
+      if (telemetry_) statsBeforeTexture = renderer_->cache_counters();
+      const auto handle = renderer_->create_texture(translated.texture);
+      if (telemetry_) {
+        const auto statsAfterTexture = renderer_->cache_counters();
+        const uint32_t hits = statsAfterTexture.textureHits - statsBeforeTexture.textureHits;
+        const uint32_t misses = statsAfterTexture.textureMisses - statsBeforeTexture.textureMisses;
+        const uint32_t uploads = statsAfterTexture.textureUploads - statsBeforeTexture.textureUploads;
+        for (uint32_t i = 0; i < hits; ++i) telemetry_->texture(true, false, 0);
+        for (uint32_t i = 0; i < misses; ++i) telemetry_->texture(false, uploads != 0, uploads ? translated.texture.dataSize : 0);
+      }
+      if (handle) {
+        bindings[slot] = gfx::TextureBinding{handle, translated.sampler, gfx::TextureSource::Cache};
+        continue;
+      }
+    }
+    bindings[slot].texture = white;
+    bindings[slot].source = gfx::TextureSource::Cache;
+    if (translated.valid || translated.dynamicCopy) bindings[slot].sampler = translated.sampler;
+    result.fallbackTextureMask |= static_cast<uint8_t>(1u << slot);
+    if (translated.dynamicCopy) result.warnings |= SubmitWarning::DynamicCopyFallback;
+    else result.warnings |= SubmitWarning::MissingTextureFallback;
+  }
+  for (unsigned slot = 0; slot < gfx::MaxTextures; ++slot)
+    if ((textureMask & (1u << slot)) &&
+        !gfx::gxm_disabled(gfx::GxmDisableNativeWrap) &&
+        renderer_->texture_supports_hardware_wrap(bindings[slot].texture, bindings[slot].sampler))
+      nativeWrapMask |= static_cast<uint8_t>(1u << slot);
+  resolvedTextureBindings_=bindings;
+  if(++resolvedTextureBindingVersion_==0)++resolvedTextureBindingVersion_;
+  resolvedNativeWrapMask_=nativeWrapMask;
+  resolvedTextureMask_=textureMask;
+  resolvedVolatileTextureMask_=volatileTextureMask;
+  resolvedFallbackTextureMask_=result.fallbackTextureMask;
+  resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&
+    (static_cast<uint8_t>(SubmitWarning::MissingTextureFallback)|static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback)));
+  resolvedTextureBindingsValid_=true;
+  resolvedTextureRevision_=aurora::gx::g_gxState.stateRevisions.textures;
+  resolvedTextureStateIdentity_=aurora::gx::g_gxState.stateIdentity;
+  }
+  if (result.fallbackTextureMask != 0) {
+    uint32_t fallbackCount = 0;
+    for (uint8_t bits = result.fallbackTextureMask; bits; bits >>= 1) fallbackCount += bits & 1u;
+    if (telemetry_) telemetry_->fallback_texture(fallbackCount);
+    if (coverage_) coverage_->fallback(result.fallbackTextureMask, "texture fallback mask");
+    if (strictUnsupported_) strictFailed_ = true;
+  }
+
+  return bindings;
+}
+
+bool DrawSink::submit_native_model_recipe(uint64_t identity,uint64_t pinnedIdentity) noexcept {
+#if defined(MKW_TARGET_VITA) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  using namespace aurora::gx::fifo;
+  native_model_cache_event(ModelCacheEvent::ConsumerAttempt);
+  const auto reject=[](ModelCacheEvent event){native_model_cache_event(event);return false;};
+  if(!initialized_||!renderer_||renderer_->failed()||!staticGeometry_||
+     !staticGeometryRuntimeEnabled_||diagnosticDrawLimit_)return reject(ModelCacheEvent::ConsumerDisabled);
+  NativeModelPrepared* prepared=nullptr;
+  if(native_model_cache_enabled())prepared=nativeModelCache_.find(identity);
+  else {const auto it=nativeModels_.find(identity);if(it!=nativeModels_.end())prepared=&it->second;}
+  if(!prepared)return reject(ModelCacheEvent::ConsumerMissing);
+  const auto& native=*prepared;
+  if(native.pinnedIdentity!=pinnedIdentity)return reject(ModelCacheEvent::ConsumerPin);
+  if(native.features!=runtime_feature_flags()||native.disableMask!=gfx::gxm_disable_mask())return reject(ModelCacheEvent::ConsumerRuntime);
+  if(!renderer_->pipelines().find(native.packet.pipelineKey))return reject(ModelCacheEvent::ConsumerPipeline);
+  aurora::gx::PipelineConfig current{};
+  current_native_model_guard(native.primitive,native.fmt,current);
+  // Byte equality is conservative (padding differences cause fallback). No
+  // shader/raster identity is accepted from a hash or a producer pointer alone.
+  if(std::memcmp(&current,&native.guard,sizeof(current)))return reject(ModelCacheEvent::ConsumerGuard);
+  // The fragment guard intentionally excludes XF light masks. They are baked
+  // into the fixed vertex program, so equal TEV/raster state does not establish
+  // that this cached program can consume the current instance's lighting.
+  for(unsigned ch=0;ch<native.pipeline.colorChannels.size();++ch)
+    if(native.pipeline.colorChannels[ch].lightMask!=static_cast<uint8_t>(
+        aurora::gx::g_gxState.colorChannelState[ch].lightMask.to_ulong()))
+      return reject(ModelCacheEvent::ConsumerVertexProgram);
+  if(!staticGeometry_->validate_native_model(native.geometryKey,native.geometry))return reject(ModelCacheEvent::ConsumerGeometry);
+  const auto& geometry=*native.geometry;
+  const auto layout=translate_current_vertex_layout(native.fmt);
+  if(std::memcmp(&layout,&geometry.sourceLayout,sizeof(layout)))return reject(ModelCacheEvent::ConsumerLayout);
+  if(geometry.vertices.buffer!=native.packet.vertices.buffer||geometry.indices.buffer!=native.packet.indices.buffer)return reject(ModelCacheEvent::ConsumerBuffers);
+  gfx::ScopedTelemetryPhase drawTimer(telemetry_,gfx::TelemetryPhase::DrawFrontend);
+  // Resolve from current GX/TLUT/EFB state, never retain a cached GPU texture
+  // handle across draws. The same resolver is used by the reference path.
+  SubmitResult textures{};uint8_t nativeWrapMask=0;
+  const auto bindings=resolve_textures(native.textureMask,true,nativeWrapMask,textures);
+  if(textures.fallbackTextureMask)return reject(ModelCacheEvent::ConsumerTextures);
+  uint8_t opaqueMask=0;uint32_t copyModes=0;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  for(unsigned slot=0;slot<gfx::MaxTextures;++slot)if(native.textureMask&(1u<<slot)){
+    if(bindings[slot].forceOpaque)opaqueMask|=1u<<slot;
+    copyModes|=uint32_t(gfx::efb_copy_sample_mode(bindings[slot].sampleFormat))<<(4u*slot);
+  }
+#endif
+  if(native.pipeline.nativeTextureWrapMask!=nativeWrapMask||
+     native.pipeline.textureForceOpaqueMask!=opaqueMask||native.pipeline.textureCopyModeBits!=copyModes)return reject(ModelCacheEvent::ConsumerTextureModes);
+  gfx::VertexTransformState vertex{};gfx::DrawUniforms uniforms{};
+  translate_fixed_vertex_state(vertex,uniforms,native.pipeline,true);
+  gfx::fixed_vertex_uniforms_into(fixedVertexUniforms_.scratch(),native.pipeline,vertex);
+  auto& fixed=fixedVertexUniforms_.publish();
+  auto packet=native.packet;
+  packet.uniforms=uniforms;packet.textures=bindings;packet.viewport=translate_viewport();packet.scissor=translate_scissor();
+  packet.fixedVertexUniforms=&fixed;
+  // Native and legacy producers use independent identities. Zero selects the
+  // renderer's exact comparison rather than aliasing a GX revision counter.
+  packet.uniformRevision=packet.fragmentUniformRevision=packet.vertexUniformRevision=0;
+  packet.textureBindingRevision=0;
+  renderer_->pipelines().pin(packet.pipelineKey);
+  stream_.draw(packet);
+  aurora::gx::g_gxState.lastVtxFmt=static_cast<GXVtxFmt>(native.fmt);
+  aurora::gx::g_gxState.lastVtxSize=layout.streamStride;
+  aurora::gx::g_gxState.stateDirty=false;
+  ++submittedDraws_;++frameDrawIndex_;
+  if(telemetry_){telemetry_->add_draw(packet.vertexCount,packet.indexCount,packet.indexCount/3);
+    telemetry_->gpu_geometry(true,packet.vertexCount);}
+  if(coverage_){
+    coverage_->observe(integration::FeatureClass::Primitive,native.primitive,"native model primitive");
+    coverage_->observe(integration::FeatureClass::VertexFormat,native.fmt,"native model vertex format");
+  }
+  if(trace_)trace_->record(packet.pipelineKey,0,0,packet.vertexCount,packet.indexCount,native.primitive,native.fmt,0,0);
+  clear_native_replay();
+  native_model_cache_event(ModelCacheEvent::ConsumerHit);
+  return true;
+#else
+  (void)identity;(void)pinnedIdentity;return false;
+#endif
+}
+
+bool DrawSink::replay_last_native_draw(const uint8_t* pinnedDisplayList,
+                                      uint64_t immutableIdentity) noexcept {
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  if(!aurora::gx::fifo::native_draw_replay_tracking_enabled()||
+     !initialized_||!renderer_||renderer_->failed()||!staticGeometry_||
+     !staticGeometryRuntimeEnabled_||diagnosticDrawLimit_!=0||
+     !pinnedDisplayList||!immutableIdentity||!lastNativeReplayKey_||
+     immutableIdentity!=lastNativeReplayIdentity_||
+     lastNativeReplaySource_!=pinnedDisplayList+3||
+     lastNativeReplayBytes_!=aurora::gx::fifo::active_pinned_bytes()||
+     !staticGeometry_->validate_native_replay(lastNativeReplayKey_,lastNativeReplayEntry_))return false;
+  const auto* previous=stream_.tail_draw();
+  if(!previous||previous->vertices.buffer!=lastNativeReplayEntry_->vertices.buffer||
+     previous->indices.buffer!=lastNativeReplayEntry_->indices.buffer||
+     !previous->fixedVertexUniforms)return false;
+  // Deep-materialize shared uniform/binding snapshots into this command;
+  // the fixed shader uniforms stay valid in the same frame's pinned pool.
+  stream_.draw(*previous);
+  ++submittedDraws_;
+  ++frameDrawIndex_;
+  if(coverage_){
+    coverage_->observe(integration::FeatureClass::Primitive,lastNativeReplayTrace_.primitive,"GX primitive");
+    coverage_->observe(integration::FeatureClass::VertexFormat,lastNativeReplayTrace_.vertexFormat,"GX vertex format");
+  }
+  if(trace_){
+    const auto& t=lastNativeReplayTrace_;
+    trace_->record(t.pipelineKey,t.vertexHash,t.rawBytes,t.vertexCount,t.indexCount,
+                   t.primitive,t.vertexFormat,t.fallbackTextureMask,t.warningMask);
+  }
+  if(telemetry_)telemetry_->add_draw(previous->vertexCount,previous->indexCount,
+                                    previous->indexCount/3u);
+  return true;
+#else
+  (void)pinnedDisplayList;(void)immutableIdentity;return false;
+#endif
 }
 #endif
 

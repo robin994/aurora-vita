@@ -1,5 +1,6 @@
 #include "../platforms/vita/gfx/vita_fixed_vertex.hpp"
 #include "../platforms/vita/gfx/vita_static_geometry.hpp"
+#include "../platforms/vita/gfx/vita_native_assets.hpp"
 #include "../platforms/vita/gfx/vita_shader_gen.hpp"
 #include "../platforms/vita/gfx/vita_pipeline_key.hpp"
 #include "../platforms/vita/gfx/vita_program_binary_cache.hpp"
@@ -188,6 +189,55 @@ TEST(VitaFixedVertex, StableCacheInvalidatesAfterTrackedSourceWrite) {
   EXPECT_EQ(cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
                       f.layout,f.pipeline,f.state,nullptr,f.raw.data()),nullptr);
   EXPECT_EQ(cache.hits(),1u);
+}
+
+TEST(VitaFixedVertex, NativeReplayRequiresLiveAVNRv2EntryAndMatchingFrame) {
+  IndexedFixture f;
+  const auto request=native_geometry_request(f.raw.data(),f.raw.size(),f.raw.size(),
+                                             SourcePrimitive::Triangles,f.layout);
+  struct MockReader {
+    std::string path;
+    std::vector<uint8_t> record;
+    static bool read(const char* path,std::vector<uint8_t>& out,void* context) {
+      const auto& mock=*static_cast<MockReader*>(context);
+      if(path!=mock.path)return false;
+      out=mock.record;
+      return true;
+    }
+  } reader{native_gpu_geometry_path(request),{}};
+  ASSERT_TRUE(compile_native_gpu_geometry(request,reader.record));
+  struct ReaderScope {
+    explicit ReaderScope(MockReader& mock) {configure_native_assets(MockReader::read,&mock);}
+    ~ReaderScope() {configure_native_assets(nullptr,nullptr);}
+  } scope(reader);
+  Renderer renderer;ASSERT_TRUE(renderer.initialize());
+  StaticGeometryCache cache(renderer,1024u*1024u,false,true);
+  cache.begin_frame(42);
+  note_memory_write(f.raw.data(),f.raw.size());
+  note_memory_write(f.positions.data(),sizeof f.positions);
+  auto* entry=cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                        f.layout,f.pipeline,f.state,nullptr,f.raw.data());
+  ASSERT_NE(entry,nullptr);
+  ASSERT_TRUE(entry->nativeGpuPacked);
+  EXPECT_TRUE(cache.validate_native_replay(entry->replayKey,entry));
+  EXPECT_FALSE(cache.validate_native_replay(entry->replayKey^1u,entry));
+  StaticGeometryCache::Entry unrelated{};
+  EXPECT_FALSE(cache.validate_native_replay(entry->replayKey,&unrelated));
+  EXPECT_FALSE(cache.validate_native_replay(0,entry));
+  cache.begin_frame(43);
+  EXPECT_FALSE(cache.validate_native_replay(entry->replayKey,entry));
+  // Re-admit into this frame, then invalidate a tracked array. A6 must
+  // reject the replay even though the old GXM buffer still exists in VRAM.
+  auto* refreshed=cache.get(f.raw.data(),f.raw.size(),f.raw.size(),SourcePrimitive::Triangles,
+                            f.layout,f.pipeline,f.state,nullptr,f.raw.data());
+  ASSERT_EQ(refreshed,entry);
+  EXPECT_TRUE(cache.validate_native_replay(entry->replayKey,entry));
+  f.positions[0]+=2.f;
+  note_memory_write(f.positions.data(),sizeof f.positions);
+  EXPECT_FALSE(cache.validate_native_replay(entry->replayKey,entry));
+  const uint64_t key=entry->replayKey;
+  cache.clear();
+  EXPECT_FALSE(cache.validate_native_replay(key,entry));
 }
 
 TEST(VitaFixedVertex, ShadowDetectsUntrackedIndicesBeforeReusingStaticGeometry) {

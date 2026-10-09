@@ -37,5 +37,26 @@ int main() {
   const size_t warmAllocations=allocations-before;
   std::printf("command stream: packet_bytes=%zu draws=%u frames=%u warm_allocations=%zu\n",
               sizeof(DrawPacket),draws,frames,warmAllocations);
+  // A6 same-frame native replay deep-copies the previous packet's resolved
+  // draw-state snapshot without retaining a pointer to a mutable producer.
+  stream.reset();
+  FixedVertexUniforms fixed{};
+  fixed.position[0]=7.f;
+  auto& source=stream.emplace_geometry_draw();
+  source.pipelineKey=0x123456;
+  source.vertices={17,0,48};source.indices={18,0,6};
+  source.vertexCount=3;source.indexCount=3;source.fixedVertexUniforms=&fixed;
+  uniforms.mvp[0]=42.f;textures[0].texture=44;
+  stream.share_draw_state(source,uniforms,textures,143,47);
+  stream.draw(*stream.tail_draw());
+  if(stream.size()!=2||stream.tail_draw()==&source)return 5;
+  const auto& copied=*stream.tail_draw();
+  if(copied.pipelineKey!=source.pipelineKey||copied.vertices.buffer!=17||
+     copied.indices.buffer!=18||copied.fixedVertexUniforms!=&fixed||
+     copied.gpu_uniforms().mvp[0]!=42.f||copied.texture_bindings()[0].texture!=44||
+     copied.uniformRevision!=143||copied.textureBindingRevision!=47||
+     copied.sharedState)return 6;
+  uniforms.mvp[0]=11.f;textures[0].texture=100;
+  if(copied.gpu_uniforms().mvp[0]!=42.f||copied.texture_bindings()[0].texture!=44)return 7;
   return warmAllocations?1:0;
 }

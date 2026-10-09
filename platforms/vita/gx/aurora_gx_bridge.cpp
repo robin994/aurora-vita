@@ -198,6 +198,10 @@ gfx::PipelineDesc translate_current_pipeline(uint8_t primitive, uint8_t fmt) noe
   return translate_pipeline(build_current_pipeline_config(static_cast<GXPrimitive>(primitive), static_cast<GXVtxFmt>(fmt)));
 }
 
+void current_native_model_guard(uint8_t primitive,uint8_t fmt,aurora::gx::PipelineConfig& out) noexcept {
+  out=build_current_pipeline_config(static_cast<GXPrimitive>(primitive),static_cast<GXVtxFmt>(fmt));
+}
+
 bool translate_current_pipeline_and_layout(uint8_t primitive, uint8_t fmt, gfx::PipelineDesc& pipeline,
                                            gfx::VertexDecodeLayout& layout, uint64_t& key,
                                            gfx::Telemetry* telemetry,bool rebuildLayout) noexcept {

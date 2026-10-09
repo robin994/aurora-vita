@@ -8,6 +8,9 @@
 #include "integration/vita_frame_trace.hpp"
 #include "gfx/vita_memory_budget.hpp"
 #include "gfx/vita_native_assets.hpp"
+#include "gfx/vita_vertex_reuse_probe.hpp"
+#include "../../lib/gx/native_model_census.hpp"
+#include "../../lib/gx/native_model_cache.hpp"
 namespace aurora::vita::gfx { class Renderer; }
 namespace aurora::vita::gxbridge { class DrawSink; }
 namespace aurora::vita {
@@ -77,8 +80,17 @@ struct PerformanceSnapshot {
   uint64_t xfPositionWritesInspected=0;
   uint64_t xfPositionWritesUnchanged=0;
   uint64_t xfPositionWritesChanged=0;
+  uint64_t xfTexWritesInspected=0,xfTexWritesUnchanged=0,xfTexWritesChanged=0;
+  uint64_t xfNormalWritesInspected=0,xfNormalWritesUnchanged=0,xfNormalWritesChanged=0;
+  uint64_t xfPostWritesInspected=0,xfPostWritesUnchanged=0,xfPostWritesChanged=0;
+  uint64_t tevDecodedWritesInspected=0,tevDecodedWritesSkipped=0,tevDecodedWritesChanged=0;
   uint64_t producerWaitUs=0,consumerWaitUs=0;
   uint64_t preparedListHits=0,preparedListMisses=0,preparedListRejected=0;
+  uint64_t nativeReplayAttempts=0,nativeReplayHits=0,nativeReplayFallbacks=0;
+  uint64_t nativeModelAttempts=0,nativeModelDraws=0,nativeModelFallbacks=0,nativeModelCompiled=0;
+  aurora::gx::fifo::ModelCensusSnapshot nativeModelCensus{};
+  aurora::gx::fifo::ModelCacheSnapshot nativeModelCache{};
+  gfx::VertexReuseProbe::Stats vertexReuse{};
   uint64_t poolBusyFallbacks=0;
   gfx::FrameTelemetry frontend{};
   gfx::NativeAssetStats nativeAssets{};
@@ -213,6 +225,11 @@ struct BackendConfig {
   bool bp_write_cache=false;
   // A2a: bit-exact redundant XF position-matrix write suppression. Opt-in.
   bool gxm_xf_equal_pos_writes=false;
+  // A5 exact idempotence on XF texture/normal/post-texture matrices.
+  bool gxm_xf_equal_matrix_writes=false;
+  // A5 TEV: inactive or semantically equal decoded stage writes must not
+  // invalidate live pipeline/vertex/fragment revisions.
+  bool gxm_tev_decoded_write_gate=false;
   // Prepared fragment bytes only; each draw still reserves a fresh GXM buffer.
   bool gxm_fragment_prepare_cache=false;
   // A3 experimental: copy a CPU-owned GXP vertex buffer image and upload only
@@ -226,6 +243,11 @@ struct BackendConfig {
   // Skip speculative geometry decode when even its minimum size cannot fit
   // and eviction is blocked by pending GPU retirement (or disabled).
   bool gxm_geometry_preflight=false;
+  // Native GXM geometry records contain final packed vertex/index bytes.
+  // Off by default; exact layout and source identity must match at admission.
+  bool gxm_native_gpu_static=false;
+  // Diagnostic census of decoded object-space data; never changes a draw.
+  bool gxm_vertex_reuse_probe=false;
   // gxm-optimization bisection switches, see gfx::GxmDisableBits.
   uint32_t gxm_disable_mask=0;
 #if defined(AURORA_VITA_RENDERER_GXM)

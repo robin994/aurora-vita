@@ -1,4 +1,5 @@
 #include "vita_draw_adapter.hpp"
+#include "vita_vertex_reuse_probe.hpp"
 #include "vita_cpu_workers.hpp"
 #include "vita_fixed_vertex.hpp"
 #include "vita_draw_batch.hpp"
@@ -188,6 +189,7 @@ struct StreamedVertexContext {
   uint8_t* destination=nullptr;
   size_t gpuStride=0;
   bool transformPosition=true;
+  VertexReuseProbe::VertexHashes* probeHashes=nullptr;
   std::array<uint8_t,MaxExecutionLanes> error{};
 };
 
@@ -199,6 +201,7 @@ bool decode_transform_pack_range(void* opaque,size_t begin,size_t end,uint32_t l
     if(!decode_vertex_into(ctx.raw,ctx.rawBytes,static_cast<uint32_t>(i),*ctx.layout,v,ctx.decodeSemantics)){
       ctx.error[lane]=1;return false;
     }
+    if(ctx.probeHashes)ctx.probeHashes[i]=VertexReuseProbe::fingerprint(v);
     if(!transform_vertex_for_pipeline(v,*ctx.pipeline,*ctx.state,ctx.requirements,ctx.transformPosition)){
       ctx.error[lane]=2;return false;
     }
@@ -215,6 +218,7 @@ bool decode_pack_range(void* opaque,size_t begin,size_t end,uint32_t lane) noexc
     if(!decode_vertex_into(ctx.raw,ctx.rawBytes,static_cast<uint32_t>(i),*ctx.layout,v,ctx.decodeSemantics)){
       ctx.error[lane]=1;return false;
     }
+    if(ctx.probeHashes)ctx.probeHashes[i]=VertexReuseProbe::fingerprint(v);
     pack_gpu_vertex(ctx.destination+i*ctx.gpuStride,v,ctx.gpuLayout);
   }
   return true;
@@ -357,7 +361,8 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
 bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint8_t*raw,size_t bytes,uint32_t count,
                                 SourcePrimitive source,const uint16_t*rawIndices,uint32_t rawIndexCount,
                                 const VertexDecodeLayout&layout,const PipelineDesc&pipeline,
-                                const VertexTransformState&state,DrawUniforms*uniforms,Telemetry*telemetry,const DrawRecipe* recipe) noexcept {
+                                const VertexTransformState&state,DrawUniforms*uniforms,Telemetry*telemetry,const DrawRecipe* recipe,
+                                VertexReuseProbe* reuseProbe) noexcept {
   out=StreamedDraw{};
   if(!raw||!count){out.error=PrepareDrawError::InvalidInput;return false;}
   if(source==SourcePrimitive::Points||source==SourcePrimitive::Lines||source==SourcePrimitive::LineStrip){
@@ -391,6 +396,7 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
   StreamedVertexContext fused{raw,bytes,&layout,&pipeline,&state,requirements,
                               decodeSemantics,gpuLayout,
                               static_cast<uint8_t*>(vertexDst),gpuStride,true};
+  if(reuseProbe)fused.probeHashes=reuseProbe->prepare(count);
   { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::VertexDecode);
     auto worker=pipeline.fixedVertexOnGpu?decode_pack_range:decode_transform_pack_range;
     if(!cpu_parallel_for_vertex(count,worker,&fused)){
@@ -399,6 +405,8 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
       return false;
     }
   }
+
+  if(fused.probeHashes)reuseProbe->observe(count,decodeSemantics);
 
   if(footprint.indexCount){
     void* indexDst=nullptr;

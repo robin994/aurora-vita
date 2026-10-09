@@ -17,6 +17,23 @@ struct XfEqualPositionStats {
 void set_xf_equal_position_writes(bool enabled) noexcept;
 XfEqualPositionStats xf_equal_position_stats() noexcept;
 
+// A5: exact encoded XF texture, normal and post-texture matrix write elision.
+// The published matrix, including NaN payloads and signed zero, must retain
+// precisely the same bits as the reference decoder. Disabled by default.
+struct XfEqualMatrixStats {
+  uint64_t texInspected=0,texUnchanged=0,texChanged=0;
+  uint64_t normalInspected=0,normalUnchanged=0,normalChanged=0;
+  uint64_t postInspected=0,postUnchanged=0,postChanged=0;
+};
+void set_xf_equal_matrix_writes(bool enabled) noexcept;
+XfEqualMatrixStats xf_equal_matrix_stats() noexcept;
+
+// A5: prevent unused/equivalent TEV writes from dirtying the entire live GX
+// state; active stages with changed decoded fields take the original path.
+struct TevDecodedWriteStats {uint64_t inspected=0,skipped=0,changed=0;};
+void set_tev_decoded_write_gate(bool enabled) noexcept;
+TevDecodedWriteStats tev_decoded_write_stats() noexcept;
+
 // Reset the CP write-deduplication state whenever the GX shadow state is reinitialized.
 void reset_cp_register_cache();
 

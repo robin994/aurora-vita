@@ -3,7 +3,9 @@
 #include "../internal.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstring>
+#include "native_model_recipe.hpp"
 
 namespace aurora::gx::fifo {
 
@@ -26,6 +28,10 @@ extern uint32_t sDlSize;
 extern uint32_t sDlWritePos;
 extern std::array<StableSourceSpan, StableSourceSpanCapacity> sStableSourceSpans;
 extern uint32_t sStableSourceSpanCount;
+// Producer-side A6 guard: advancing on any emitted GX byte rejects a native
+// replay if another subsystem touched the GX FIFO between packet callbacks.
+extern std::atomic<bool> sNativeReplayTracking;
+extern uint64_t sProducerWriteEpoch;
 } // namespace detail
 
 void init();
@@ -67,6 +73,16 @@ void set_display_list_shadow_enabled(bool enabled);
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian);
 // Cumulative wall time spent in top-level (non-nested) command processing.
 uint64_t process_time_total_us();
+void set_native_draw_replay_tracking(bool enabled) noexcept;
+bool native_draw_replay_tracking_enabled() noexcept;
+uint64_t producer_write_epoch() noexcept;
+uint64_t active_pinned_identity() noexcept;
+uint32_t active_pinned_bytes() noexcept;
+// Ordered, pinned immutable DL transport. On consumer replay rejection the
+// original GX display list runs in the *same* FIFO slot, never drops a draw.
+bool write_native_draw_replay(const void* displayList,uint32_t bytes) noexcept;
+struct NativeReplayStats {uint64_t attempted=0,replayed=0,fallback=0;};
+NativeReplayStats native_replay_stats() noexcept;
 // Opt-in diagnostic marker; preserves the order of producer view transitions
 // and their draws in the existing FIFO batch without a GPU finish/flush.
 void write_view_marker(uint32_t view, uint64_t producerFrame);
@@ -76,8 +92,14 @@ void write_view_marker(uint32_t view, uint64_t producerFrame);
 void write_data_grow(const void* data, uint32_t length);
 
 inline void write_data(const void* data, const uint32_t length) {
+#if defined(MKW_TARGET_VITA)
+  if (!detail::sInDisplayList && detail::sNativeModelRecording &&
+      detail::record_native_model_bytes(data,length)) return;
+#endif
   if (!detail::sInDisplayList)
     LIKELY {
+      if(detail::sNativeReplayTracking.load(std::memory_order_relaxed) && length)
+        ++detail::sProducerWriteEpoch;
       if (detail::sBufferSize + length <= detail::sBufferCapacity)
         LIKELY {
           std::memcpy(detail::sBufferData + detail::sBufferSize, data, length);
@@ -99,8 +121,14 @@ void write_stable_data(const void* data, uint32_t length);
 void write_stable_data_from(const void* bytes, const void* stableSource, uint32_t length);
 
 inline void write_u8(const uint8_t val) {
+#if defined(MKW_TARGET_VITA)
+  if (!detail::sInDisplayList && detail::sNativeModelRecording &&
+      detail::record_native_model_bytes(&val,1)) return;
+#endif
   if (!detail::sInDisplayList)
     LIKELY {
+      if(detail::sNativeReplayTracking.load(std::memory_order_relaxed))
+        ++detail::sProducerWriteEpoch;
       if (detail::sBufferSize < detail::sBufferCapacity)
         LIKELY {
           detail::sBufferData[detail::sBufferSize++] = val;

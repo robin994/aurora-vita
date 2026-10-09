@@ -10,6 +10,12 @@
 
 namespace aurora::gx::fifo {
 
+// CDRAM shadows optimize uncached reads. Native recipes also need immutable
+// transport when their source resides in cached user RAM.
+inline constexpr bool display_list_shadow_source_allowed(uintptr_t address, bool immutableRecipe) noexcept {
+  return address != 0 && (immutableRecipe || (address >= 0x60000000u && address < 0x70000000u));
+}
+
 // Diagnostic safety guard for the revision-only CDRAM shadow. Exact validation
 // reads the guest bytes on every hit, so this is not a performance fast path.
 // The caller owns the source until get() returns and copies the returned bytes
@@ -28,7 +34,8 @@ public:
     return pinned && !pinned->empty() ? pinned->data() : nullptr;
   }
 
-  PinnedBytes pin(const void* data, uint32_t length, uint64_t* identity = nullptr) {
+  PinnedBytes pin(const void* data, uint32_t length, uint64_t* identity = nullptr,
+                  bool requireExactValidation = false) {
     if(identity)*identity=0;
     if (!data || !length || length > budget_) return nullptr;
     const uintptr_t address = reinterpret_cast<uintptr_t>(data);
@@ -37,7 +44,7 @@ public:
     if (it != shadows_.end()) {
       auto& shadow = it->second;
       if (shadow.bytes && shadow.bytes->size() == length && shadow.revision == revision) {
-        if (!exactValidation_ ||
+        if (!(exactValidation_ || requireExactValidation) ||
             aurora::vita::gfx::byte_spans_equal(data, shadow.bytes->data(), length)) {
           if(identity)*identity=shadow.identity;
           return shadow.bytes;

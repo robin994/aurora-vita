@@ -216,6 +216,127 @@ void xf_equal_position_writes_oracle() {
   set_xf_equal_position_writes(false);
   CHECK(xf_equal_position_stats().inspected==0);
 }
+
+// A5: send real big-endian XF writes through the command processor, including
+// 3x3 normal packing, 2x4 texture matrices, distinct NaN payloads and -0.
+// Check every destination word after every command, not only the final pose.
+void xf_equal_matrix_writes_oracle() {
+  using aurora::gx::fifo::set_xf_equal_matrix_writes;
+  using aurora::gx::fifo::xf_equal_matrix_stats;
+  struct Result {
+    std::vector<std::array<uint32_t,12*4>> snapshots;
+    uint64_t vertexRevision=0;
+    aurora::gx::fifo::XfEqualMatrixStats counters{};
+  };
+  const auto replay=[](bool enable) {
+    auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+    set_xf_equal_matrix_writes(enable);
+    Result out{};
+    auto write=[&](unsigned address,const std::vector<uint32_t>& payload) {
+      std::vector<uint8_t> fifo;
+      const auto word=[&](uint32_t value){
+        fifo.push_back(uint8_t(value>>24));fifo.push_back(uint8_t(value>>16));
+        fifo.push_back(uint8_t(value>>8));fifo.push_back(uint8_t(value));
+      };
+      fifo.push_back(0x10);
+      word((uint32_t(payload.size()-1)<<16)|address);
+      for(auto value:payload)word(value);
+      aurora::gx::fifo::process_sync(fifo.data(),uint32_t(fifo.size()),true);
+      std::array<uint32_t,12*4> snapshot{};
+      const auto capture=[&](unsigned offset,const auto& matrix){
+        const float* floats=reinterpret_cast<const float*>(&matrix);
+        for(unsigned i=0;i<12;++i)std::memcpy(&snapshot[offset+i],floats+i,4);
+      };
+      capture(0,g.texMtxs[0]);capture(12,g.texMtxs[1]);
+      capture(24,g.pnMtx[0].nrm);capture(36,g.ptTexMtxs[0]);
+      out.snapshots.push_back(snapshot);
+    };
+    std::vector<uint32_t> tex(12),normal(9);
+    for(unsigned i=0;i<12;++i)tex[i]=std::bit_cast<uint32_t>(float(i+1));
+    for(unsigned i=0;i<9;++i)normal[i]=std::bit_cast<uint32_t>(float(i+33));
+    write(0x78,tex);write(0x78,tex); // exact matrix reuse
+    tex[1]=0x80000000u;write(0x78,tex);write(0x78,tex); // -0 != +0
+    tex[1]=0x7fc12345u;write(0x78,tex); // NaN payload preserved
+    tex[1]=0x7fc54321u;write(0x78,tex);
+    write(0x84,std::vector<uint32_t>(tex.begin(),tex.begin()+8));
+    write(0x84,std::vector<uint32_t>(tex.begin(),tex.begin()+8)); // 2x4
+    write(0x400,normal);write(0x400,normal); // packed normal
+    normal[4]=0x80000000u;write(0x400,normal);write(0x400,normal);
+    normal[4]=0x7fc01234u;write(0x400,normal);
+    normal[4]=0x7fc56789u;write(0x400,normal);
+    write(0x500,tex);write(0x500,tex);
+    tex[10]=0x80000000u;write(0x500,tex);write(0x500,tex);
+    out.vertexRevision=g.stateRevisions.vertex;
+    out.counters=xf_equal_matrix_stats();
+    return out;
+  };
+  const auto reference=replay(false),candidate=replay(true);
+  CHECK(candidate.snapshots==reference.snapshots);
+  CHECK(reference.vertexRevision>candidate.vertexRevision);
+  CHECK(candidate.counters.texInspected==8 && candidate.counters.texUnchanged==3);
+  CHECK(candidate.counters.normalInspected==6 && candidate.counters.normalUnchanged==2);
+  CHECK(candidate.counters.postInspected==4 && candidate.counters.postUnchanged==2);
+  CHECK(candidate.counters.texChanged==5 && candidate.counters.normalChanged==4 &&
+        candidate.counters.postChanged==2);
+  set_xf_equal_matrix_writes(false);
+  CHECK(xf_equal_matrix_stats().texInspected==0);
+}
+
+// A5: true GX BP streams changing inactive and subsequently active TEV stages.
+// Only dirtiness revisions may differ; decoded material and order must not.
+void tev_decoded_write_gate_oracle() {
+  using aurora::gx::fifo::set_tev_decoded_write_gate;
+  using aurora::gx::fifo::tev_decoded_write_stats;
+  struct Result {
+    std::vector<std::array<uint8_t,sizeof(aurora::gx::g_gxState.tevStages)>> snapshots;
+    std::vector<uint8_t> stageCounts;
+    std::vector<uint64_t> nativePipelineKeys;
+    uint64_t vertexRevision=0;
+    aurora::gx::fifo::TevDecodedWriteStats counters{};
+  };
+  const auto replay=[](bool enabled){
+    auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+    g.numTevStages=1;
+    set_tev_decoded_write_gate(enabled);
+    Result out{};
+    const auto emit=[&](uint32_t bp){
+      std::array<uint8_t,5> fifo={0x61,uint8_t(bp>>24),uint8_t(bp>>16),uint8_t(bp>>8),uint8_t(bp)};
+      aurora::gx::fifo::process_sync(fifo.data(),uint32_t(fifo.size()),true);
+      std::array<uint8_t,sizeof(g.tevStages)> stage{};
+      std::memcpy(stage.data(),g.tevStages.data(),sizeof(g.tevStages));
+      out.snapshots.push_back(stage);
+      out.stageCounts.push_back(g.numTevStages);
+      // The Cg/GXM pipeline must remain identical across reference and
+      // candidate, including inactive-to-active TEV transitions.
+      gfx::PipelineDesc translated{};gfx::VertexDecodeLayout decode{};
+      uint64_t key=0;
+      gxbridge::translate_current_pipeline_and_layout(GX_TRIANGLES,0,translated,decode,key);
+      out.nativePipelineKeys.push_back(key);
+    };
+    emit(0xc6000123u); // stage 3 RGB, initially inactive
+    emit(0xc7000901u); // stage 3 alpha, initially inactive
+    emit(0xc0000234u); // stage 0 RGB, active
+    emit(0xc1001005u); // stage 0 alpha, active
+    emit(0x28000637u); // TEV order for stages 0,1
+    emit(0xc6000456u); // inactive, distinct hardware payload
+    emit(0x00000c00u); // genMode activates 4 stages (0xC00 / 0x400+1)
+    emit(0xc6000111u); // now active stage 3 RGB: MUST invalidate
+    emit(0xc7000907u); // now active stage 3 alpha: MUST invalidate
+    out.vertexRevision=g.stateRevisions.vertex;
+    out.counters=tev_decoded_write_stats();
+    return out;
+  };
+  const auto reference=replay(false),candidate=replay(true);
+  CHECK(reference.stageCounts==candidate.stageCounts);
+  CHECK(reference.snapshots==candidate.snapshots);
+  CHECK(reference.nativePipelineKeys==candidate.nativePipelineKeys);
+  CHECK(reference.vertexRevision>candidate.vertexRevision);
+  CHECK(candidate.counters.inspected>=7);
+  CHECK(candidate.counters.skipped>=2);
+  CHECK(candidate.counters.changed>=2);
+  set_tev_decoded_write_gate(false);
+  CHECK(tev_decoded_write_stats().inspected==0);
+}
 void state_transitions() {
   using aurora::gx::StateDomain;
   auto& g=aurora::gx::g_gxState;
@@ -598,6 +719,48 @@ void prepared_async_display_list_equivalence() {
   shutdown();
 }
 
+void native_replay_exact_slot_gx_fallback_and_producer_epoch() {
+  using namespace aurora::gx::fifo;
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));CHECK(start_worker());CHECK(begin_frame());
+  std::array<uint8_t,64> list{};list[0]=0x90;list[2]=3;
+  aurora_vita_notify_memory_write(list.data(),list.size());
+  CHECK(!write_native_draw_replay(list.data(),uint32_t(list.size())));
+  CHECK(!native_draw_replay_tracking_enabled());
+  set_native_draw_replay_tracking(true);
+  CHECK(native_draw_replay_tracking_enabled());
+  auto start=producer_write_epoch();
+  write_u8(0);CHECK(producer_write_epoch()==start+1);
+  write_data(list.data(),1);CHECK(producer_write_epoch()==start+2);
+  // Precompiled GXCallDisplayList uses a pinned FIFO segment instead of
+  // write_data(). It must also invalidate the producer's native replay stamp.
+  std::array<uint8_t,64> noop{};
+  write_stable_data(noop.data(),uint32_t(noop.size()));
+  CHECK(producer_write_epoch()==start+3);
+  run_async([](void*){},nullptr,0);
+  CHECK(producer_write_epoch()==start+4);
+  const uint8_t nop=0;
+  process_sync(&nop,1,true);
+  CHECK(producer_write_epoch()==start+5);
+  CHECK(write_native_draw_replay(list.data(),uint32_t(list.size())));
+  CHECK(producer_write_epoch()==start+5);
+  // Compound GX command: it is never replayed as a single GXM draw.
+  // A complete BP command after the draw must be decoded, not discarded.
+  list[59]=0x61;
+  aurora_vita_notify_memory_write(list.data(),list.size());
+  CHECK(write_native_draw_replay(list.data(),uint32_t(list.size())));
+  write_u8(0);CHECK(producer_write_epoch()==start+6);
+  end_frame();
+  const auto stats=native_replay_stats();
+  CHECK(stats.attempted==2&&stats.replayed==0&&stats.fallback==2);
+  set_native_draw_replay_tracking(false);
+  CHECK(!native_draw_replay_tracking_enabled());
+  start=producer_write_epoch();write_u8(0);
+  CHECK(producer_write_epoch()==start);clear_buffer();
+  shutdown();
+}
+
 void async_view_markers_preserve_fifo_order() {
   using aurora::vita::gfx::view_draw_capture;
   BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
@@ -641,5 +804,5 @@ void async_view_markers_preserve_fifo_order() {
 }
 
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();async_view_markers_preserve_fifo_order();
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();xf_equal_matrix_writes_oracle();tev_decoded_write_gate_oracle();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();native_replay_exact_slot_gx_fallback_and_producer_epoch();async_view_markers_preserve_fifo_order();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

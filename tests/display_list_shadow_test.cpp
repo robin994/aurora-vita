@@ -7,6 +7,18 @@ namespace {
 using aurora::gx::fifo::DisplayListShadowCache;
 using namespace aurora::vita::gfx;
 
+TEST(DisplayListShadow, NativeRecipeAllowsCachedRamWithoutChangingOrdinaryPolicy) {
+  using aurora::gx::fifo::display_list_shadow_source_allowed;
+  EXPECT_FALSE(display_list_shadow_source_allowed(0x8f800000u,false));
+  EXPECT_TRUE(display_list_shadow_source_allowed(0x8f800000u,true));
+  EXPECT_FALSE(display_list_shadow_source_allowed(0,false));
+  EXPECT_FALSE(display_list_shadow_source_allowed(0,true));
+  EXPECT_FALSE(display_list_shadow_source_allowed(0x5fffffffu,false));
+  EXPECT_TRUE(display_list_shadow_source_allowed(0x60000000u,false));
+  EXPECT_TRUE(display_list_shadow_source_allowed(0x6fffffffu,false));
+  EXPECT_FALSE(display_list_shadow_source_allowed(0x70000000u,false));
+}
+
 TEST(DisplayListShadow, UnchangedListReusesShadowWithoutPublishingWrites) {
   std::array<uint8_t, 32> list{{0x90, 0, 1, 0, 2}};
   note_memory_write(list.data(), list.size());
@@ -132,6 +144,25 @@ TEST(DisplayListShadow, RevisionOnlyModeReusesUnchangedRevision) {
   ASSERT_NE(pinned, nullptr);
   EXPECT_EQ(cache.pin(list.data(), list.size()).get(), pinned.get());
   EXPECT_EQ(cache.untracked_writes(), 0u);
+}
+
+TEST(DisplayListShadow, NativePinValidatesUnnotifiedChangesAndKeepsQueuedBytesImmutable) {
+  std::array<uint8_t,32> list{{0x90,0,1,0xff,0,2}};
+  note_memory_write(list.data(),list.size());
+  DisplayListShadowCache cache(1024,false);
+  uint64_t oldIdentity=0,newIdentity=0;
+  const auto queued=cache.pin(list.data(),list.size(),&oldIdentity,true);
+  ASSERT_NE(queued,nullptr);
+  const auto revision=memory_range_revision(list.data(),list.size());
+  list[3]=6;
+  EXPECT_EQ(memory_range_revision(list.data(),list.size()),revision);
+  const auto current=cache.pin(list.data(),list.size(),&newIdentity,true);
+  ASSERT_NE(current,nullptr);
+  EXPECT_EQ((*queued)[3],0xff);
+  EXPECT_TRUE(byte_spans_equal(current->data(),list.data(),list.size()));
+  EXPECT_NE(newIdentity,oldIdentity);
+  EXPECT_GT(memory_range_revision(list.data(),list.size()),revision);
+  EXPECT_EQ(cache.bytes(),list.size());
 }
 
 TEST(DisplayListShadow, BatchedRevisionChecksObserveTrackedWrites) {

@@ -41,6 +41,10 @@ static Module Log("aurora::gx::fifo");
 namespace {
 bool sXfEqualPositionWrites=false;
 XfEqualPositionStats sXfEqualPositionStats{};
+bool sXfEqualMatrixWrites=false;
+XfEqualMatrixStats sXfEqualMatrixStats{};
+bool sTevDecodedWriteGate=false;
+TevDecodedWriteStats sTevDecodedWriteStats{};
 }
 
 void set_xf_equal_position_writes(bool enabled) noexcept {
@@ -48,6 +52,16 @@ void set_xf_equal_position_writes(bool enabled) noexcept {
   sXfEqualPositionStats={};
 }
 XfEqualPositionStats xf_equal_position_stats() noexcept {return sXfEqualPositionStats;}
+void set_xf_equal_matrix_writes(bool enabled) noexcept {
+  sXfEqualMatrixWrites=enabled;
+  sXfEqualMatrixStats={};
+}
+XfEqualMatrixStats xf_equal_matrix_stats() noexcept {return sXfEqualMatrixStats;}
+void set_tev_decoded_write_gate(bool enabled) noexcept {
+  sTevDecodedWriteGate=enabled;
+  sTevDecodedWriteStats={};
+}
+TevDecodedWriteStats tev_decoded_write_stats() noexcept {return sTevDecodedWriteStats;}
 
 using IndexBuffer = std::vector<u16>;
 
@@ -323,6 +337,35 @@ struct DecodedSnapshot {
     else g_gxState.mark_dirty();                                                                                \
   } while (0)
 
+// Only the TEV call sites use this opt-in gate: their decoded snapshot is a
+// full semantic equality oracle for that stage. Writes to *inactive* stages
+// become visible through the later genMode pipeline generation change.
+static inline void mark_tev_pipeline_if_changed(bool activeChanged) noexcept {
+  if(!sTevDecodedWriteGate) {mark_pipeline_state_dirty_if(activeChanged);return;}
+  ++sTevDecodedWriteStats.inspected;
+  if(activeChanged) {
+    ++sTevDecodedWriteStats.changed;
+    mark_pipeline_state_dirty();
+  }else ++sTevDecodedWriteStats.skipped;
+}
+
+// Reference layout for normal matrices is 3x4 with a packed 3x3 XF payload.
+// The untouched fourth components of each row MUST survive verbatim.
+static bool copy_exact_matrix_words(float* destination,const u8* source,u32 len,
+                                    bool bigEndian,bool packedNormal) noexcept {
+  bool changed=false;
+  for(u32 i=0;i<len;++i) {
+    const u32 offset=packedNormal?(i/3u)*4u+(i%3u):i;
+    const u32 bits=read_u32(source+i*4u,bigEndian);
+    u32 previous=0;
+    std::memcpy(&previous,destination+offset,sizeof previous);
+    if(previous==bits)continue;
+    std::memcpy(destination+offset,&bits,sizeof bits);
+    changed=true;
+  }
+  return changed;
+}
+
 // Indexed-array bindings change for almost every mesh. On Vita they only
 // affect the vertex decode layout; elsewhere they stay part of the pipeline.
 static inline void mark_array_state_dirty() noexcept {
@@ -391,6 +434,16 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     // Determine if 2x4 or 3x4 from count
     auto& mtx = g_gxState.texMtxs[mtxIdx];
     f32* flat = reinterpret_cast<f32*>(&mtx);
+    if(sXfEqualMatrixWrites) {
+      ++sXfEqualMatrixStats.texInspected;
+      if(!copy_exact_matrix_words(flat,data,len,bigEndian,false)) {
+        ++sXfEqualMatrixStats.texUnchanged;
+        return true;
+      }
+      ++sXfEqualMatrixStats.texChanged;
+      g_gxState.mark_dirty(StateDomain::Vertex);
+      return true;
+    }
     for (u32 i = 0; i < len; i++) {
       flat[i] = read_f32(data + i * 4, bigEndian);
     }
@@ -406,6 +459,16 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     XF_REQUIRE(startOffset == 0 && len == 9, "XF: NrmMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
     auto& mtx = g_gxState.pnMtx[mtxIdx].nrm;
     f32* flat = reinterpret_cast<f32*>(&mtx);
+    if(sXfEqualMatrixWrites) {
+      ++sXfEqualMatrixStats.normalInspected;
+      if(!copy_exact_matrix_words(flat,data,len,bigEndian,true)) {
+        ++sXfEqualMatrixStats.normalUnchanged;
+        return true;
+      }
+      ++sXfEqualMatrixStats.normalChanged;
+      g_gxState.mark_dirty(StateDomain::Vertex);
+      return true;
+    }
     for (u32 i = 0; i < len; i++) {
       u32 xfIdx = i;
       u32 row = xfIdx / 3;
@@ -425,6 +488,16 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     XF_REQUIRE(startOffset == 0 && len == 12, "XF: PTTexMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
     auto& mtx = g_gxState.ptTexMtxs[mtxIdx];
     f32* flat = reinterpret_cast<f32*>(&mtx);
+    if(sXfEqualMatrixWrites) {
+      ++sXfEqualMatrixStats.postInspected;
+      if(!copy_exact_matrix_words(flat+startOffset,data,len,bigEndian,false)) {
+        ++sXfEqualMatrixStats.postUnchanged;
+        return true;
+      }
+      ++sXfEqualMatrixStats.postChanged;
+      g_gxState.mark_dirty(StateDomain::Vertex);
+      return true;
+    }
     for (u32 i = 0; i < len; i++) {
       flat[startOffset + i] = read_f32(data + i * 4, bigEndian);
     }
@@ -824,7 +897,7 @@ static void handle_bp(u32 value, bool bigEndian) {
       }
       // Stages past numTevStages are not translated; a genMode change that
       // activates them bumps the generation itself.
-      mark_pipeline_state_dirty_if(stage < g_gxState.numTevStages && snap.changed());
+      mark_tev_pipeline_if_changed(stage < g_gxState.numTevStages && snap.changed());
     }
     return;
   }
@@ -853,7 +926,7 @@ static void handle_bp(u32 value, bool bigEndian) {
         s.alphaOp.bias = static_cast<GXTevBias>(bp_get(value, 2, 16));
         s.alphaOp.scale = static_cast<GXTevScale>(bp_get(value, 2, 20));
       }
-      mark_pipeline_state_dirty_if(stage < g_gxState.numTevStages && snap.changed());
+      mark_tev_pipeline_if_changed(stage < g_gxState.numTevStages && snap.changed());
     }
     return;
   }
@@ -1044,7 +1117,7 @@ static void handle_bp(u32 value, bool bigEndian) {
       u32 chanHw = bp_get(value, 3, 19);
       s.channelId = (chanHw < 8) ? r2c[chanHw] : GX_COLOR_NULL;
     }
-    mark_pipeline_state_dirty_if((stage0 < g_gxState.numTevStages && snap0.changed()) ||
+    mark_tev_pipeline_if_changed((stage0 < g_gxState.numTevStages && snap0.changed()) ||
                                  (stage1 < g_gxState.numTevStages && snap1.changed()));
     break;
   }

@@ -1,7 +1,10 @@
 #include "fifo.hpp"
+#include "native_model_census.hpp"
 #include "fifo.hpp"
 #include "command_processor.hpp"
 #include "bp_write_cache.hpp"
+#include "prepared_display_list.hpp"
+#include "gx.hpp"
 #if defined(MKW_TARGET_VITA)
 #include "../../platforms/vita/gfx/vita_telemetry.hpp"
 #include "../../platforms/vita/gfx/vita_memory_revision.hpp"
@@ -9,6 +12,7 @@
 #include "display_list_shadow.hpp"
 #include "../../platforms/vita/gfx/vita_view_draw_capture.hpp"
 #include "../../platforms/vita/aurora_vita_backend.hpp"
+#include "../../platforms/vita/gx/aurora_vita_draw_sink.hpp"
 #endif
 #include "../internal.hpp"
 
@@ -64,11 +68,16 @@ uint32_t sDlSize = 0;
 uint32_t sDlWritePos = 0;
 std::array<StableSourceSpan, StableSourceSpanCapacity> sStableSourceSpans{};
 uint32_t sStableSourceSpanCount = 0;
+std::atomic<bool> sNativeReplayTracking{false};
+bool sNativeModelRecording=false;
+uint64_t sProducerWriteEpoch=0;
 #if defined(MKW_TARGET_VITA)
 const uint8_t* sActiveProcessData = nullptr;
 uint32_t sActiveProcessSize = 0;
 const StableSourceSpan* sActiveStableSourceSpans = nullptr;
 uint32_t sActiveStableSourceSpanCount = 0;
+uint64_t sActivePinnedIdentity=0;
+uint32_t sActivePinnedBytes=0;
 #endif
 } // namespace detail
 
@@ -86,7 +95,7 @@ constexpr size_t VitaWorkerStackBytes = 1024u * 1024u;
 constexpr uint32_t VitaJobSegmentCapacity = 128;
 
 enum class VitaJobType : uint8_t { Fifo, Callback, Stop };
-enum class VitaJobSegmentType : uint8_t { Inline, PinnedDisplayList, ViewMarker };
+enum class VitaJobSegmentType : uint8_t { Inline, PinnedDisplayList, ViewMarker, NativeDrawReplay, NativeModel };
 
 struct VitaJobSegment {
   VitaJobSegmentType type = VitaJobSegmentType::Inline;
@@ -95,6 +104,9 @@ struct VitaJobSegment {
   const uint8_t* stableSource = nullptr;
   uint64_t pinnedIdentity=0;
   DisplayListShadowCache::PinnedBytes pinned{};
+  NativeModelRecipeRef model{};
+  std::array<float,12> position{};
+  bool modelFullState=false,modelPatchPosition=false;
 };
 
 struct VitaJob {
@@ -134,13 +146,25 @@ uint32_t sPendingPinnedBytes = 0;
 // Game-thread time blocked on the worker: waiting for a free queue slot and
 // waiting for a serial/draw-done token. Read and cleared by take_wait_stats().
 std::atomic<uint64_t> sProducerWaitUs{0}, sConsumerWaitUs{0};
+std::atomic<uint64_t> sNativeReplayAttempts{0},sNativeReplayHits{0},sNativeReplayFallbacks{0};
+std::atomic<uint64_t> sNativeModelAttempts{0},sNativeModelHits{0},sNativeModelFallbacks{0},sNativeModelCompiled{0};
+ModelAdmissionCensus sNativeModelCensus;
+std::atomic<bool> sNativeModelCensusObserved{false};
+uint64_t sActiveNativeModelIdentity=0,sNextNativeModelIdentity=0;
+const uint8_t* sActiveNativeModelSource=nullptr;
+const uint8_t* sActiveNativeModelData=nullptr;
+std::shared_ptr<NativeModelRecipe> sNativeModelCapture;
+bool sNativeModelSawDraw=false;
+void abort_native_model_recording() noexcept;
 
 bool on_worker_thread() noexcept {
   return sVitaWorker.thread >= 0 && sceKernelGetThreadId() == sVitaWorker.thread;
 }
 
 void reset_pending_segments() noexcept {
-  for (uint32_t i = 0; i < sPendingSegmentCount; ++i) sPendingSegments[i].pinned.reset();
+  for (uint32_t i = 0; i < sPendingSegmentCount; ++i) {
+    sPendingSegments[i].pinned.reset();sPendingSegments[i].model.reset();
+  }
   sPendingSegmentCount = 0;
   sPendingInlineOffset = 0;
   sPendingPinnedBytes = 0;
@@ -224,8 +248,53 @@ int vita_worker_main(SceSize, void*) {
             detail::sActiveProcessSize = segment.bytes;
             detail::sActiveStableSourceSpans = &stable;
             detail::sActiveStableSourceSpanCount = segment.stableSource ? 1u : 0u;
-            if(!job.bigEndian || !submit_prepared_display_list(segment.pinned,segment.bytes,segment.stableSource,segment.pinnedIdentity))
+            detail::sActivePinnedIdentity=segment.pinnedIdentity;
+            detail::sActivePinnedBytes=segment.bytes;
+            bool replayed=false;
+            if(segment.type==VitaJobSegmentType::NativeModel&&segment.model){
+              const auto& model=*segment.model;
+              sNativeModelAttempts.fetch_add(1,std::memory_order_relaxed);
+              // Replay the compiled material's state effects before the draw,
+              // including CP array bindings. Keep the GX mirror coherent for
+              // unrelated GX callers and for exact-slot reference fallback.
+              const auto offset=segment.modelFullState?0u:model.materialBytes;
+              if(offset<model.before.size())process(model.before.data()+offset,uint32_t(model.before.size()-offset),true);
+              if(segment.modelPatchPosition){
+              std::array<uint8_t,53> xf{};xf[0]=0x10;xf[2]=0x0b;
+              for(unsigned n=0;n<12;++n){uint32_t bits;std::memcpy(&bits,&segment.position[n],4);
+                for(unsigned b=0;b<4;++b)xf[5+n*4+b]=uint8_t(bits>>(24-b*8));}
+              process(xf.data(),uint32_t(xf.size()),true);
+              }
+              sActiveNativeModelIdentity=model.identity;
+              sActiveNativeModelSource=segment.stableSource;sActiveNativeModelData=segment.pinned->data();
+              replayed=aurora::vita::draw_sink().submit_native_model_recipe(model.identity,segment.pinnedIdentity);
+              if(replayed)sNativeModelHits.fetch_add(1,std::memory_order_relaxed);
+              else sNativeModelFallbacks.fetch_add(1,std::memory_order_relaxed);
+            }
+            if(segment.type==VitaJobSegmentType::NativeDrawReplay){
+              sNativeReplayAttempts.fetch_add(1,std::memory_order_relaxed);
+              // A6 must not turn a compound/side-effecting GX DL into one
+              // replayed draw. In that case run its original bytes in order.
+              const auto recipe=prepare_display_list(segment.pinned->data(),segment.bytes,
+                                                      g_gxState.lastVtxSize);
+              replayed=job.bigEndian&&segment.stableSource&&recipe.valid&&
+                  (recipe.command&0xF8u)==0x90u&&
+                  (recipe.command&7u)==uint8_t(g_gxState.lastVtxFmt)&&
+                  aurora::vita::draw_sink().replay_last_native_draw(segment.stableSource,segment.pinnedIdentity);
+              if(replayed)sNativeReplayHits.fetch_add(1,std::memory_order_relaxed);
+              else sNativeReplayFallbacks.fetch_add(1,std::memory_order_relaxed);
+            }
+            if(!replayed && (!job.bigEndian || !submit_prepared_display_list(
+                      segment.pinned,segment.bytes,segment.stableSource,segment.pinnedIdentity)))
               process(segment.pinned->data(), segment.bytes, job.bigEndian);
+            if(segment.type==VitaJobSegmentType::NativeModel&&segment.model){
+              sActiveNativeModelIdentity=0;
+              sActiveNativeModelSource=sActiveNativeModelData=nullptr;
+              const auto& after=segment.model->after;
+              if(!after.empty())process(after.data(),uint32_t(after.size()),true);
+            }
+            detail::sActivePinnedIdentity=0;
+            detail::sActivePinnedBytes=0;
           }
         }
       } else {
@@ -246,7 +315,9 @@ int vita_worker_main(SceSize, void*) {
     job.task = nullptr;
     job.context = nullptr;
     job.stableSourceSpanCount = 0;
-    for (uint32_t i = 0; i < job.segmentCount; ++i) job.segments[i].pinned.reset();
+    for (uint32_t i = 0; i < job.segmentCount; ++i) {
+      job.segments[i].pinned.reset();job.segments[i].model.reset();
+    }
     job.segmentCount = 0;
     signal_completion(serial);
     sceKernelSignalSema(sVitaWorker.space, 1);
@@ -290,6 +361,7 @@ uint64_t enqueue_job(VitaJobType type, VitaWorkerTask task, void* context,
   for (uint32_t i = 0; i < job.segmentCount; ++i) job.segments[i] = segments[i];
   job.serial = sVitaWorker.submitted.fetch_add(1, std::memory_order_acq_rel) + 1;
   const uint64_t serial = job.serial;
+  native_model_cache_peak(ModelCachePeak::QueueBatches,serial-sVitaWorker.completed.load(std::memory_order_acquire));
   std::atomic_thread_fence(std::memory_order_release);
   ++sVitaWorker.producer;
   sceKernelSignalSema(sVitaWorker.ready, 1);
@@ -410,10 +482,15 @@ void drain_sync() {
 }
 
 void run_sync(VitaWorkerTask task, void* context) {
+  if(!on_worker_thread()&&detail::sNativeModelRecording)abort_native_model_recording();
   if (on_worker_thread()) {
     if (task) task(context);
     return;
   }
+  // The callback can mutate DrawSink/GX state without writing FIFO bytes.
+  // Never admit a producer-side replay across that ordered side effect.
+  if (task && detail::sNativeReplayTracking.load(std::memory_order_relaxed))
+    ++detail::sProducerWriteEpoch;
   if (!worker_running()) {
     drain_sync();
     if (task) task(context);
@@ -424,10 +501,13 @@ void run_sync(VitaWorkerTask task, void* context) {
 }
 
 uint64_t run_async(VitaWorkerTask task, const void* context, size_t contextBytes) {
+  if(!on_worker_thread()&&detail::sNativeModelRecording)abort_native_model_recording();
   if (on_worker_thread()) {
     if (task) task(const_cast<void*>(context));
     return 0;
   }
+  if (task && detail::sNativeReplayTracking.load(std::memory_order_relaxed))
+    ++detail::sProducerWriteEpoch;
   if (!worker_running() || contextBytes > 128) {
     drain_sync();
     if (task) task(const_cast<void*>(context));
@@ -453,11 +533,14 @@ void wait_marker(uint64_t serial) {
 }
 
 void process_sync(const uint8_t* data, uint32_t size, bool bigEndian) {
+  if(!on_worker_thread()&&detail::sNativeModelRecording)abort_native_model_recording();
   if (data == nullptr || size == 0) return;
   if (on_worker_thread()) {
     process(data, size, bigEndian);
     return;
   }
+  if (detail::sNativeReplayTracking.load(std::memory_order_relaxed))
+    ++detail::sProducerWriteEpoch;
   invalidate_bp_write_cache();
   if (!worker_running()) {
     drain_sync();
@@ -469,6 +552,7 @@ void process_sync(const uint8_t* data, uint32_t size, bool bigEndian) {
 }
 
 void shutdown_worker() {
+  if(!on_worker_thread()&&detail::sNativeModelRecording)abort_native_model_recording();
   if (!worker_running()) return;
   drain_sync();
   const uint64_t serial = enqueue_job(VitaJobType::Stop, nullptr, nullptr, nullptr, 0, nullptr, 0);
@@ -549,7 +633,8 @@ namespace {
 DisplayListShadowCache sDisplayListShadows(8u * 1024u * 1024u, false);
 bool sDisplayListShadowEnabled = true;
 
-DisplayListShadowCache::PinnedBytes display_list_shadow_pin(const void* data, uint32_t length,uint64_t* identity) {
+DisplayListShadowCache::PinnedBytes display_list_shadow_pin(const void* data, uint32_t length,uint64_t* identity,
+                                                           bool immutableRecipe=false) {
   // With the async GX consumer the immutable shadow is the transport itself,
   // not merely an optional cache: keeping the large display-list payload out
   // of the FIFO is what removes producer memcpy/back-pressure. The runtime
@@ -557,14 +642,18 @@ DisplayListShadowCache::PinnedBytes display_list_shadow_pin(const void* data, ui
   if (!sDisplayListShadowEnabled && !worker_running()) return nullptr;
 #if defined(__vita__)
   const uintptr_t address = reinterpret_cast<uintptr_t>(data);
-  // Only CDRAM (uncached CPU mapping) benefits; cached RAM is read directly.
-  if (address < 0x60000000u || address >= 0x70000000u) return nullptr;
+  // Ordinary cached-RAM lists keep their existing direct copy path. A native
+  // recipe requires an immutable pin regardless of the source memory type.
+  if (!display_list_shadow_source_allowed(address,immutableRecipe)) return nullptr;
 #endif
-  return sDisplayListShadows.pin(data, length,identity);
+  // Recipes skip the ordinary DL decode, so validate live bytes even if the
+  // caller missed a write notification (notably mutable PN selector bytes).
+  return sDisplayListShadows.pin(data,length,identity,immutableRecipe);
 }
 
 bool append_pinned_display_list(const void* guestSource, uint32_t length,
-                                DisplayListShadowCache::PinnedBytes pinned,uint64_t identity) {
+                                DisplayListShadowCache::PinnedBytes pinned,uint64_t identity,
+                                VitaJobSegmentType type=VitaJobSegmentType::PinnedDisplayList) {
   if (!worker_running() || !pinned || pinned->size() < length || length == 0) return false;
   constexpr uint32_t StableBatchByteLimit = 256u * 1024u;
   if (sPendingSegmentCount >= VitaJobSegmentCapacity - 2u ||
@@ -575,12 +664,14 @@ bool append_pinned_display_list(const void* guestSource, uint32_t length,
   if (!seal_inline_segment() || sPendingSegmentCount == VitaJobSegmentCapacity) return false;
   auto& segment = sPendingSegments[sPendingSegmentCount++];
   segment = {};
-  segment.type = VitaJobSegmentType::PinnedDisplayList;
+  segment.type = type;
   segment.bytes = length;
   segment.stableSource = static_cast<const uint8_t*>(guestSource);
   segment.pinnedIdentity=identity;
   segment.pinned = std::move(pinned);
   sPendingPinnedBytes += length;
+  native_model_cache_peak(ModelCachePeak::PendingSegments,sPendingSegmentCount);
+  native_model_cache_peak(ModelCachePeak::PendingPinnedBytes,sPendingPinnedBytes);
   if (aurora::vita::gfx::g_fifoProfileEnabled) {
     auto& p = aurora::vita::gfx::fifo_profile_accumulator();
     ++p.dlPinnedCalls;
@@ -602,6 +693,21 @@ void set_display_list_shadow_enabled(bool enabled) {
 
 void write_stable_data(const void* data, uint32_t length) {
 #if defined(MKW_TARGET_VITA)
+  if(detail::sNativeModelRecording){
+    if(!sNativeModelSawDraw&&data==sNativeModelCapture->source&&length==sNativeModelCapture->bytes){
+      sNativeModelSawDraw=true;return;
+    }
+    // Reject compound/unexpected lists without losing any recorded bytes.
+    detail::record_native_model_bytes(nullptr,NativeModelRecipe::MaxStateBytes+1);
+  }
+#endif
+  // Pinned DLs are separate FIFO segments and never reach write_data().
+  // Without this guard an unrelated GXCallDisplayList between two packet
+  // callbacks could change the consumer's pipeline yet pass the replay gate.
+  if(detail::sNativeReplayTracking.load(std::memory_order_relaxed) &&
+     !detail::sInDisplayList && data && length)
+    ++detail::sProducerWriteEpoch;
+#if defined(MKW_TARGET_VITA)
   // The span keeps the guest address as its stable source identity.
   if (!detail::sInDisplayList && data != nullptr && length != 0) {
     uint64_t identity=0;
@@ -614,6 +720,143 @@ void write_stable_data(const void* data, uint32_t length) {
 #endif
   write_stable_data_from(data, data, length);
 }
+
+#if defined(MKW_TARGET_VITA)
+namespace {
+void abort_native_model_recording() noexcept {
+  auto recording=std::move(sNativeModelCapture);
+  detail::sNativeModelRecording=false;
+  if(!recording)return;
+  native_model_cache_event(ModelCacheEvent::CaptureAborted);
+  if(!recording->before.empty())write_data(recording->before.data(),uint32_t(recording->before.size()));
+  if(sNativeModelSawDraw)write_stable_data(recording->source,recording->bytes);
+  if(!recording->after.empty())write_data(recording->after.data(),uint32_t(recording->after.size()));
+  sNativeModelSawDraw=false;
+}
+}
+bool detail::record_native_model_bytes(const void* data,uint32_t bytes) noexcept {
+  auto& output=sNativeModelSawDraw?sNativeModelCapture->after:sNativeModelCapture->before;
+  if((bytes&&!data)||bytes>NativeModelRecipe::MaxStateBytes-output.size()){
+    abort_native_model_recording();return false;
+  }
+  if(bytes){
+    const size_t needed=output.size()+bytes;
+    if(needed>output.capacity())output.reserve(std::min(NativeModelRecipe::MaxStateBytes,
+        std::max(needed,std::max(size_t(64),output.capacity()*2))));
+    const auto* p=static_cast<const uint8_t*>(data);output.insert(output.end(),p,p+bytes);
+  }
+  return true;
+}
+bool begin_native_model_recording(const void* source,uint32_t bytes) noexcept {
+  native_model_cache_event(ModelCacheEvent::CaptureAttempt);
+  const auto reject=[](ModelCacheEvent event){native_model_cache_event(event);return false;};
+  if(!worker_running()||on_worker_thread()||in_display_list())return reject(ModelCacheEvent::CaptureContextReject);
+  if(!source||bytes<3)return reject(ModelCacheEvent::CaptureSourceReject);
+  if(detail::sNativeModelRecording)return reject(ModelCacheEvent::CaptureBusyReject);
+  if(NativeModelRecipe::liveRecipes.load(std::memory_order_relaxed)>=NativeModelRecipe::max_live_recipes())
+    return reject(ModelCacheEvent::CaptureLimitReject);
+  sNativeModelCapture=std::make_shared<NativeModelRecipe>();
+  sNativeModelCapture->identity=++sNextNativeModelIdentity;
+  sNativeModelCapture->source=static_cast<const uint8_t*>(source);
+  sNativeModelCapture->bytes=bytes;
+  sNativeModelSawDraw=false;
+  invalidate_bp_write_cache();
+  detail::sNativeModelRecording=true;
+  return true;
+}
+NativeModelRecipeRef finish_native_model_recording(const float* position) noexcept {
+  if(!detail::sNativeModelRecording)return {};
+  if(!sNativeModelSawDraw){abort_native_model_recording();return {};}
+  NativeModelRecipeRef recipe=sNativeModelCapture;
+  native_model_cache_peak(ModelCachePeak::RecipePayloadBytes,recipe->before.capacity()+recipe->after.capacity());
+  // No captured byte reaches the queue until the complete recipe is sealed.
+  detail::sNativeModelRecording=false;
+  if(!write_native_model_recipe(recipe,position,true)){
+    abort_native_model_recording();return {};
+  }
+  sNativeModelCapture.reset();sNativeModelSawDraw=false;
+  sNativeModelCompiled.fetch_add(1,std::memory_order_relaxed);
+  return recipe;
+}
+void native_model_record_draw_boundary() noexcept {
+  if(detail::sNativeModelRecording&&!sNativeModelSawDraw)
+    sNativeModelCapture->materialBytes=uint32_t(sNativeModelCapture->before.size());
+}
+bool write_native_model_recipe(const NativeModelRecipeRef& recipe,const float* position,bool fullState) noexcept {
+  native_model_cache_event(ModelCacheEvent::TransportAttempt);
+  const auto reject=[](ModelCacheEvent event){native_model_cache_event(event);return false;};
+  if(!recipe||!recipe->identity||recipe->materialBytes>recipe->before.size()||!worker_running()||on_worker_thread()||in_display_list())return reject(ModelCacheEvent::TransportContractReject);
+  uint64_t identity=0;
+  auto pinned=display_list_shadow_pin(recipe->source,recipe->bytes,&identity,true);
+  if(!pinned||!identity)return reject(ModelCacheEvent::TransportPinReject);
+  if(!append_pinned_display_list(recipe->source,recipe->bytes,std::move(pinned),identity,
+                                  VitaJobSegmentType::NativeModel))return reject(ModelCacheEvent::TransportQueueReject);
+  auto& segment=sPendingSegments[sPendingSegmentCount-1];
+  segment.model=recipe;segment.modelFullState=fullState;segment.modelPatchPosition=position!=nullptr;
+  if(position)std::copy_n(position,12,segment.position.begin());
+  invalidate_bp_write_cache();
+  if(detail::sNativeReplayTracking.load(std::memory_order_relaxed))++detail::sProducerWriteEpoch;
+  return true;
+}
+uint64_t active_native_model_identity() noexcept{return sActiveNativeModelIdentity;}
+uint32_t native_model_transport_rejections() noexcept {
+  uint32_t mask=0;
+  if(!worker_running())mask|=model_reject_bit(ModelReject::WorkerInactive);
+  if(on_worker_thread())return mask|model_reject_bit(ModelReject::WorkerContext);
+  if(in_display_list())mask|=model_reject_bit(ModelReject::InsideDisplayList);
+  if(detail::sNativeModelRecording)mask|=model_reject_bit(ModelReject::RecordingBusy);
+  if(NativeModelRecipe::liveRecipes.load(std::memory_order_relaxed)>=NativeModelRecipe::max_live_recipes())
+    mask|=model_reject_bit(ModelReject::RecipeLimit);
+  return mask;
+}
+void record_native_model_admission(const ModelAdmissionFacts& facts,bool eligible) noexcept {
+  sNativeModelCensus.observe(facts,eligible);
+  sNativeModelCensusObserved.store(true,std::memory_order_release);
+}
+void record_native_model_stage(ModelStage stage) noexcept {sNativeModelCensus.event(stage);}
+ModelCensusSnapshot native_model_census_snapshot() noexcept {
+  if(!sNativeModelCensusObserved.load(std::memory_order_acquire))return {};
+  return sNativeModelCensus.snapshot();
+}
+ModelCensusEvidence native_model_census_evidence() noexcept {return sNativeModelCensus.evidence();}
+bool active_native_model_single_draw(uint8_t primitive,uint8_t fmt,uint16_t stride,const uint8_t* source) noexcept {
+  if(!sActiveNativeModelIdentity||!sActiveNativeModelSource||!sActiveNativeModelData||
+     source!=sActiveNativeModelSource+3)return false;
+  const auto draw=prepare_display_list(sActiveNativeModelData,detail::sActivePinnedBytes,stride);
+  return draw.valid&&(draw.command&0xf8u)==primitive&&(draw.command&7u)==fmt;
+}
+NativeModelStats native_model_stats() noexcept {
+  return {sNativeModelAttempts.load(std::memory_order_relaxed),sNativeModelHits.load(std::memory_order_relaxed),
+          sNativeModelFallbacks.load(std::memory_order_relaxed),sNativeModelCompiled.load(std::memory_order_relaxed)};
+}
+void set_native_draw_replay_tracking(bool enabled) noexcept {
+  detail::sNativeReplayTracking.store(enabled,std::memory_order_relaxed);
+  detail::sProducerWriteEpoch=0;
+  sNativeReplayAttempts.store(0,std::memory_order_relaxed);
+  sNativeReplayHits.store(0,std::memory_order_relaxed);
+  sNativeReplayFallbacks.store(0,std::memory_order_relaxed);
+}
+uint64_t producer_write_epoch() noexcept {return detail::sProducerWriteEpoch;}
+bool native_draw_replay_tracking_enabled() noexcept {
+  return detail::sNativeReplayTracking.load(std::memory_order_relaxed);
+}
+uint64_t active_pinned_identity() noexcept {return detail::sActivePinnedIdentity;}
+uint32_t active_pinned_bytes() noexcept {return detail::sActivePinnedBytes;}
+NativeReplayStats native_replay_stats() noexcept {
+  return {sNativeReplayAttempts.load(std::memory_order_relaxed),
+          sNativeReplayHits.load(std::memory_order_relaxed),
+          sNativeReplayFallbacks.load(std::memory_order_relaxed)};
+}
+bool write_native_draw_replay(const void* data,uint32_t length) noexcept {
+  if(!native_draw_replay_tracking_enabled()||!worker_running()||on_worker_thread()||
+     in_display_list()||!data||length<3)return false;
+  uint64_t identity=0;
+  auto pinned=display_list_shadow_pin(data,length,&identity);
+  if(!identity||!pinned)return false;
+  return append_pinned_display_list(data,length,std::move(pinned),identity,
+                                    VitaJobSegmentType::NativeDrawReplay);
+}
+#endif
 
 void write_data_grow(const void* data, uint32_t length) {
   uint32_t needed = detail::sBufferSize + length;
@@ -638,6 +881,8 @@ uint32_t end_display_list() {
   while (detail::sDlWritePos < padded && detail::sDlWritePos < detail::sDlSize) {
     detail::sDlBuffer[detail::sDlWritePos++] = 0;
   }
+  if(detail::sNativeReplayTracking.load(std::memory_order_relaxed) && detail::sDlWritePos)
+    ++detail::sProducerWriteEpoch;
 #if defined(MKW_TARGET_VITA)
   // Recorded lists are written here, not through DCFlush: publish the write so
   // cached shadows (and stable-geometry revisions) of this buffer are dropped.
@@ -659,6 +904,9 @@ static void note_drain_wait(uint64_t nanos) noexcept {
 }
 
 void drain() {
+#if defined(MKW_TARGET_VITA)
+  if(!on_worker_thread()&&detail::sNativeModelRecording)abort_native_model_recording();
+#endif
 #if !defined(MKW_TARGET_VITA)
   // SEALED, not DONE.
   const auto waited = aurora::wait_for_frame_worker_sealed();
@@ -719,6 +967,8 @@ const uint8_t* stable_source_for(const uint8_t* data,size_t bytes) {
 }
 void clear_buffer() {
   invalidate_bp_write_cache();
+  if(detail::sNativeReplayTracking.load(std::memory_order_relaxed))
+    ++detail::sProducerWriteEpoch;
   detail::sBufferSize = 0;
   detail::sStableSourceSpanCount = 0;
 #if defined(MKW_TARGET_VITA)
