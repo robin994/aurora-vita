@@ -48,7 +48,11 @@ SceUID sceKernelCreateSema(const char* name,int,int count,int max,void*) {
 int sceKernelDeleteSema(SceUID id) {std::lock_guard lock(registryMutex);semas.erase(id);return 0;}
 int sceKernelWaitSema(SceUID id,int count,void*) {
   auto s=semaphore(id);std::unique_lock lock(s->mutex);
-  require(s->cv.wait_for(lock,std::chrono::seconds(3),[&]{return s->count>=count;}),"lost wake/completion (3 s timeout)");
+  // Idle workers legitimately wait without a deadline, just as the Vita call
+  // with a null timeout does. Bound the caller's completion wait instead: a
+  // lost dispatched wake or acknowledgement still fails there in three seconds.
+  if(s->wake)s->cv.wait(lock,[&]{return s->count>=count;});
+  else require(s->cv.wait_for(lock,std::chrono::seconds(3),[&]{return s->count>=count;}),"lost completion (3 s timeout)");
   s->count-=count;return 0;
 }
 int sceKernelSignalSema(SceUID id,int count) {
@@ -125,9 +129,19 @@ struct BudgetJob {
   std::array<std::atomic<unsigned>,2048> visits{};
   std::atomic<unsigned> laneMask{0};
   uint32_t core3ChunkUs=500;
+  bool awaitCore3=false;
 };
 bool budget_task(void* opaque,size_t begin,size_t end,uint32_t lane) noexcept {
   auto& job=*static_cast<BudgetJob*>(opaque);job.laneMask.fetch_or(1u<<lane);
+  // Admission tests need the host scheduler to give the queued CPU3 task one
+  // turn before other lanes consume this small job. This is test-only: real
+  // dynamic dispatch correctly lets faster lanes consume all remaining work.
+  if(job.awaitCore3&&lane!=3) {
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+    while(!(job.laneMask.load()&8u)&&std::chrono::steady_clock::now()<deadline)
+      std::this_thread::yield();
+    require(job.laneMask.load()&8u,"admitted CPU3 job did not start");
+  }
   if(lane==3) {
     fakeSystemUs.fetch_add(job.core3ChunkUs);
   } else {
@@ -325,7 +339,7 @@ int main() {
   verify_budget_coverage(mediumGeneral,96,"medium generic coverage");
   require((mediumGeneral.laneMask.load()&(1u<<3))==0,"generic threshold unexpectedly used CPU3");
   fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);
-  BudgetJob mediumVertex;
+  BudgetJob mediumVertex;mediumVertex.awaitCore3=true;
   require(cpu_parallel_for_vertex(96,budget_task,&mediumVertex),"medium vertex job");
   verify_budget_coverage(mediumVertex,96,"medium vertex coverage");
   require((mediumVertex.laneMask.load()&(1u<<3))!=0,"vertex-specific granularity did not use CPU3");
@@ -341,7 +355,7 @@ int main() {
   verify_budget_coverage(sparseGeneralJob,256,"sparse general coverage");
   require((sparseGeneralJob.laneMask.load()&(1u<<3))==0,"general renderer path used CPU3");
   fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);
-  BudgetJob sparseBudgetJob;
+  BudgetJob sparseBudgetJob;sparseBudgetJob.awaitCore3=true;
   require(cpu_parallel_for_vertex(512,budget_task,&sparseBudgetJob),"sparse budget dynamic job");
   verify_budget_coverage(sparseBudgetJob,512,"sparse budget coverage");
   require((sparseBudgetJob.laneMask.load()&(1u<<3))!=0,"sparse budget never used CPU3");
@@ -354,7 +368,7 @@ int main() {
   require(initialize_cpu_workers(3,16,3,budget,true),"distinct budget initialize");
   currentCpuId=2;
   fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000);
-  BudgetJob distinctBudget;
+  BudgetJob distinctBudget;distinctBudget.awaitCore3=true;
   require(cpu_parallel_for_vertex(1024,budget_task,&distinctBudget),"distinct quota job");
   verify_budget_coverage(distinctBudget,1024,"distinct quota coverage");
   require(!(distinctBudget.laneMask.load()&2u),"CPU2 caller woke CPU2 helper in quota mode");
@@ -371,7 +385,7 @@ int main() {
   require(initialize_cpu_workers(3,16,3,budget),"budget initialize");
   require(cpu_core3_available(),"budget test needs CPU3");
   fakeSystemUs.fetch_add(10000);fakeIdle3Us.fetch_add(10000); // bootstrap with an idle core
-  BudgetJob budgetJob;
+  BudgetJob budgetJob;budgetJob.awaitCore3=true;
   require(cpu_parallel_for_vertex(1024,budget_task,&budgetJob),"budgeted dynamic job");
   verify_budget_coverage(budgetJob,1024,"budgeted dynamic coverage");
   auto budgetSnap=cpu_core3_budget_snapshot();
@@ -420,7 +434,7 @@ int main() {
   require(!budgetSnap.dispatchAllowed,"CPU3 dispatch remained enabled above observed target");
 
   fakeSystemUs.fetch_add(20000);fakeIdle3Us.fetch_add(20000); // idle time replenishes both buckets
-  BudgetJob renewedJob;
+  BudgetJob renewedJob;renewedJob.awaitCore3=true;
   require(cpu_parallel_for_vertex(512,budget_task,&renewedJob),"renewed budget job");
   verify_budget_coverage(renewedJob,512,"renewed budget coverage");
   budgetSnap=cpu_core3_budget_snapshot();

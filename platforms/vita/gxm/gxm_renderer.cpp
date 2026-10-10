@@ -1,4 +1,5 @@
 #include "gxm_renderer.hpp"
+#include "gxm_efb_ops.hpp"
 #include "../gfx/vita_frame_stats.hpp"
 #include "gxm_memory.hpp"
 #include "gxm_program_cache.hpp"
@@ -39,6 +40,17 @@
 namespace aurora::vita::gxm {
 namespace {
 using namespace gfx;
+#if defined(MKW_TARGET_VITA)
+// Only the WiiCompiled diagnostic observer reads this. 0=none, 1=EndScene,
+// 2=BeginScene, 3=Draw, 4=Finish, 5=DisplayQueueAddEntry,
+// 6=TransferFinish.
+std::atomic<uint32_t> sWicKernelOperation{0};
+inline void watch_kernel_operation(uint32_t operation) noexcept {
+  if(runtime_diagnostics_enabled())sWicKernelOperation.store(operation,std::memory_order_relaxed);
+}
+#else
+inline void watch_kernel_operation(uint32_t) noexcept {}
+#endif
 inline uint64_t diagnostic_now_us() noexcept {
   return runtime_diagnostics_enabled()?sceKernelGetProcessTimeWide():0;
 }
@@ -302,6 +314,12 @@ NativeTextureUpload prepare_native_texture(const TextureDesc& desc,bool exactBc1
 }
 } // namespace
 
+#if defined(MKW_TARGET_VITA)
+extern "C" uint32_t aurora_vita_gxm_kernel_operation() noexcept {
+  return sWicKernelOperation.load(std::memory_order_relaxed);
+}
+#endif
+
 struct Renderer::Impl {
   struct Surface { MemoryBlock memory; SceGxmColorSurface color{}; SceGxmSyncObject* sync = nullptr; };
   struct Buffer { MemoryBlock memory; size_t bytes = 0; bool inFlight = false; };
@@ -463,11 +481,15 @@ struct Renderer::Impl {
   uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
   bool end_scene() {
     if (!inScene) return true;
+    watch_kernel_operation(1);
     const int result = sceGxmEndScene(context, nullptr, nullptr);
+    watch_kernel_operation(0);
     inScene = false;
     if (result >= 0 && gxm_disabled(GxmDiagSceneFinish)) {
       const uint64_t waitStart = diagnostic_now_us();
+      watch_kernel_operation(4);
       sceGxmFinish(context);
+      watch_kernel_operation(0);
       ++finishCalls;
       const unsigned slot = std::min<unsigned>(stats.nativeSceneCount ? stats.nativeSceneCount - 1u : 0u, 3u);
       stats.diagSceneGpuUs[slot] += static_cast<uint32_t>(diagnostic_now_us() - waitStart);
@@ -493,7 +515,9 @@ struct Renderer::Impl {
     const uint32_t target = static_cast<uint32_t>(boundTarget);
     const uint64_t t0 = diagnostic_now_us();
     if (!end_scene()) return;
+    watch_kernel_operation(4);
     sceGxmFinish(context);
+    watch_kernel_operation(0);
     const uint64_t gpuUs = diagnostic_now_us() - t0;
     char line[768];
     int n = std::snprintf(line, sizeof line,
@@ -568,7 +592,9 @@ struct Renderer::Impl {
     // needs an explicit scene flag.
     unsigned flags = pendingFragmentTransferSync ? SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC : 0u;
     SceGxmSyncObject* vertexDependency = nullptr;
+    watch_kernel_operation(2);
     const int beginResult=sceGxmBeginScene(context,flags,rt,nullptr,vertexDependency,sync,cs,ds);
+    watch_kernel_operation(0);
     if(beginResult<0) {
       AURORA_VITA_LOG_ERROR(
           "[aurora-gxm] begin_scene_fail code=0x%08x flags=0x%x context=%p rt=%p bound=%llu "
@@ -940,6 +966,14 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   // exact GX edges; it may only be omitted by full-target internal passes.
   const uint64_t key = pipeline_key(nativeDesc);
   if (d.pipelines.find(key) != d.pipelines.end()) { ++d.stats.pipelineHits; return key; }
+#if defined(MKW_TARGET_VITA)
+  // Mark both sides of dynamic pipeline creation while investigating a menu
+  // transition that can stop producing frames without a GXM error.
+  const uint64_t pipelineStarted=d.diagnosticsEnabled?diagnostic_now_us():0;
+  if(d.diagnosticsEnabled)
+    AURORA_VITA_LOG_INFO("[aurora-gxm] pipeline_start key=%016llx\n",
+        static_cast<unsigned long long>(key));
+#endif
   if (d.pipelines.size() >= d.config.maxPipelines) { d.fail("native pipeline budget exhausted"); return 0; }
   auto source = build_material_cg(nativeDesc,!gxm_disabled(GxmDisableNativeMaterial),d.config.tevA4Mask);
   if (!source.ok()) { d.fail(source.error.c_str()); return 0; }
@@ -1080,6 +1114,12 @@ uint64_t Renderer::create_pipeline(const PipelineDesc& desc) {
   ++d.stats.pipelineMisses;
   // Created eagerly so pipeline prewarm also covers it before a sealed run.
   if (nativeDesc.fragmentScissor && !source.discardAll) d.create_scissor_free_variant(p, source.vertex);
+#if defined(MKW_TARGET_VITA)
+  if(d.diagnosticsEnabled)
+    AURORA_VITA_LOG_INFO("[aurora-gxm] pipeline_ready key=%016llx us=%llu\n",
+        static_cast<unsigned long long>(key),
+        static_cast<unsigned long long>(diagnostic_now_us()-pipelineStarted));
+#endif
   return key;
 }
 
@@ -1158,7 +1198,7 @@ Handle Renderer::create_texture(const TextureDesc& desc,CompactTextureData* prep
                                   desc.width,desc.height,texture.mipCount);
       if(nativeResult>=0) {
         if(d.diagnosticsEnabled)
-          AURORA_VITA_LOG_INFO("[aurora-gxm] compact_texture fmt=%u size=%ux%u mips=%u bytes=%u bc1=%u\n",
+          AURORA_VITA_LOG_DEBUG("[aurora-gxm] compact_texture fmt=%u size=%ux%u mips=%u bytes=%u bc1=%u\n",
             unsigned(desc.format),desc.width,desc.height,texture.mipCount,unsigned(native.pixels.size()),
             native.format==SCE_GXM_TEXTURE_FORMAT_UBC1_ABGR?1u:0u);
         d.resourceBytes+=texture.memory.size();
@@ -1225,12 +1265,22 @@ bool Renderer::begin_frame(const Color& color, float depth) {
   return begin_frame() && clear(color, depth);
 }
 
-bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool writeDepth) {
+bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool writeDepth,const Scissor* region) {
   auto& d = *impl_;
   if (!d.initialized || !d.frameActive) return d.fail("clear outside a frame");
   if (!std::isfinite(depth) || depth<0.f || depth>1.f) return d.fail("invalid clear depth");
   if (!rgb && !alpha && !writeDepth) return true;
-  if (writeDepth && !d.inScene && !gxm_disabled(GxmDisableDepthPolicy)) {
+  const auto area=efb_clear_area(region,d.width(),d.height());
+  if(area.rect.width<=0 || area.rect.height<=0)return true;
+  if(region) {
+    static uint64_t regionClears=0;
+    const auto n=++regionClears;
+    if(n<=8 || (n&(n-1u))==0)
+      AURORA_VITA_LOG_INFO("[aurora-gxm] efb_clear_region n=%llu rect=%d,%d %dx%d target=%ux%u full=%u masks=%u%u%u\n",
+          static_cast<unsigned long long>(n),area.rect.x,area.rect.y,area.rect.width,area.rect.height,
+          d.width(),d.height(),unsigned(area.fullTarget),unsigned(rgb),unsigned(alpha),unsigned(writeDepth));
+  }
+  if (writeDepth && area.fullTarget && !d.inScene && !gxm_disabled(GxmDisableDepthPolicy)) {
     // The clear triangle covers the whole target with depthFunc=Always, so
     // every depth value of the next scene is overwritten before any other
     // draw can read it. Do not force-load the old depth for every tile; the
@@ -1239,18 +1289,11 @@ bool Renderer::clear(const Color& color, float depth, bool rgb, bool alpha, bool
     else d.depthValid = false;
   }
   auto desc=d.pipelines.at(d.clearPipeline)->desc;
-  desc.fragmentScissor=false; // The clear always covers the complete target.
+  desc.fragmentScissor=!area.fullTarget;
   desc.colorWrite=rgb; desc.alphaWrite=alpha; desc.depthWrite=writeDepth;
   const auto key=create_pipeline(desc);
   if (!key) return false;
-  DrawPacket packet{};
-  packet.pipelineKey=key;
-  packet.vertices={d.clearVertices,0,48}; packet.indices={d.clearIndices,0,6};
-  packet.vertexCount=3; packet.indexCount=3;
-  packet.viewport.width=float(d.width()); packet.viewport.height=float(d.height());
-  packet.scissor.width=d.width(); packet.scissor.height=d.height();
-  packet.uniforms.kcolor[0]={color.r,color.g,color.b,color.a};
-  packet.uniforms.mvp[14]=depth-1.f;
+  const auto packet=efb_clear_packet(key,d.clearVertices,d.clearIndices,d.width(),d.height(),area,color,depth);
   return draw(packet);
 }
 
@@ -1714,7 +1757,10 @@ bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
   }
   const auto primitive = pipeline.primitive == Primitive::Triangles ? SCE_GXM_PRIMITIVE_TRIANGLES :
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
-  if (!d.check(sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount), "draw indexed")) return false;
+  watch_kernel_operation(3);
+  const int drawResult=sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount);
+  watch_kernel_operation(0);
+  if (!d.check(drawResult, "draw indexed")) return false;
   if(traceDraw) {
     AuroraViewDrawRecord row{};
     row.consumer_frame = aurora::vita::frame_index()+1;
@@ -1785,7 +1831,10 @@ bool Renderer::end_frame(bool present) {
   if (present) {
     const DisplayRequest request{surface.memory.data(), d.config.width, d.config.height, d.stride, d.config.waitVblank, &d.displayError};
     const uint64_t queueStarted=diagnostic_now_us();
-    if (!d.check(sceGxmDisplayQueueAddEntry(d.surfaces[d.front].sync, surface.sync, &request), "queue present")) return false;
+    watch_kernel_operation(5);
+    const int displayResult=sceGxmDisplayQueueAddEntry(d.surfaces[d.front].sync, surface.sync, &request);
+    watch_kernel_operation(0);
+    if (!d.check(displayResult, "queue present")) return false;
     const uint64_t queueFinished=diagnostic_now_us();
     d.stats.nativeDisplayQueueAddUs=queueFinished-queueStarted;
     d.displayed = true; d.front = d.back; d.back = (d.back + 1) % d.config.displayBuffers;
@@ -1863,10 +1912,15 @@ bool Renderer::finish(FinishReason reason) {
   const uint64_t waitStart=diagnostic_now_us();
   if(!d.end_scene()) return false;
   if(d.pendingFragmentTransferSync) {
-    if(!d.check(sceGxmTransferFinish(),"finish pending native transfer"))return false;
+    watch_kernel_operation(6);
+    const int transferResult=sceGxmTransferFinish();
+    watch_kernel_operation(0);
+    if(!d.check(transferResult,"finish pending native transfer"))return false;
     d.pendingFragmentTransferSync=false;
   }
+  watch_kernel_operation(4);
   sceGxmFinish(d.context);
+  watch_kernel_operation(0);
   ++d.finishCalls;
   const auto reasonIndex=std::min(static_cast<size_t>(reason),FinishReasonCount-1);
   ++d.finishReasonCalls[reasonIndex];
@@ -2139,10 +2193,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     if(!d.copyVertices) {
       // Base UVs follow the top-left EFB convention: actual clip-space top maps
       // to V=0 and bottom to V=1. Crop and mirror live in u_tex_transform.
-      const float vertices[]{-1,-1,-.5f,1, 0,1,1,
-                              3,-1,-.5f,1, 2,1,1,
-                             -1, 3,-.5f,1, 0,-1,1};
-      d.copyVertices=create_buffer(vertices,sizeof(vertices));
+      d.copyVertices=create_buffer(EfbCopyVertices,sizeof(EfbCopyVertices));
     }
     if(!d.copyVertices)return false;
     DrawPacket packet{};packet.pipelineKey=key;
@@ -2255,11 +2306,7 @@ bool Renderer::blit_to_default(Handle handle,const Scissor* source) {
   const auto key=create_pipeline(p);
   if(!key) return false;
   if(!d.blitVertices) {
-    // Match the legacy vitaGL display-copy convention. Native render targets are
-    // sampled with the opposite vertical origin from GL FBO textures, so the
-    // fullscreen copy must invert V once when presenting a captured EFB.
-    const float vertices[]{-1,-1,-.5f,1, 0,0,1, 3,-1,-.5f,1, 2,0,1, -1,3,-.5f,1, 0,2,1};
-    d.blitVertices=create_buffer(vertices,sizeof(vertices));
+    d.blitVertices=create_buffer(EfbCopyVertices,sizeof(EfbCopyVertices));
   }
   if(!d.blitVertices) return false;
   DrawPacket packet{};
@@ -2358,10 +2405,7 @@ bool Renderer::copy_display_region(const Scissor& source) {
   // previous frame may still be reading: that update forced sceGxmFinish on
   // every source change and clobbered blit_to_default's own triangle.
   if(!d.copyVertices) {
-    const float vertices[]{-1,-1,-.5f,1, 0,1,1,
-                            3,-1,-.5f,1, 2,1,1,
-                           -1, 3,-.5f,1, 0,-1,1};
-    d.copyVertices=create_buffer(vertices,sizeof(vertices));
+    d.copyVertices=create_buffer(EfbCopyVertices,sizeof(EfbCopyVertices));
   }
   if(!d.copyVertices) return false;
   uint32_t presentX=0,presentY=0,presentWidth=d.config.width,presentHeight=d.config.height;

@@ -3,9 +3,9 @@
 #include "../gfx/vita_renderer.hpp"
 #include "../gfx/vita_pipeline_key.hpp"
 #include "../gfx/vita_hash.hpp"
+#include "../gfx/vita_efb_copy.hpp"
 #if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
 #include "../../../lib/gfx/efb_ram_encoder.hpp"
-#include "../gfx/vita_efb_copy.hpp"
 #endif
 
 #if defined(AURORA_VITA_UPSTREAM)
@@ -267,6 +267,39 @@ ClipPoint project_for_diag(const std::array<float,16>& m,const gfx::CanonicalVer
           m[3]*x+m[7]*y+m[11]*z+m[15]*w};
 }
 
+void log_lit_mesh_sample(const gfx::PipelineDesc& pipeline,const gfx::VertexTransformState& state,
+                         const gfx::VertexDecodeLayout& layout,const uint8_t* raw,size_t bytes,
+                         uint32_t count,uint8_t primitive) noexcept {
+  if(!runtime_log_enabled(RuntimeLogLevel::Info))return;
+  const auto requirements=gfx::vertex_pipeline_requirements(pipeline);
+  static unsigned logged=0;
+  if(!requirements.needNormal || !count || logged>=16)return;
+  const auto& g=aurora::gx::g_gxState;
+  const unsigned n=++logged;
+  AURORA_VITA_LOG_INFO(
+    "[aurora-vita][lit-mesh] n=%u vertices=%u primitive=0x%x stride=%u pn=%u "
+    "viewport=%g,%g %gx%g scissor=%d,%d %dx%d depth=%u/%u cull=%u\n",
+    n,count,unsigned(primitive),unsigned(layout.streamStride),unsigned(state.currentPnMatrix),
+    g.renderViewport.left,g.renderViewport.top,g.renderViewport.width,g.renderViewport.height,
+    g.renderScissor.x,g.renderScissor.y,g.renderScissor.width,g.renderScissor.height,
+    pipeline.depthTest?1u:0u,unsigned(pipeline.depthFunc),unsigned(pipeline.cull));
+  // Clone three vertices only. The diagnostic uses the same pure CPU helpers
+  // as the streamed path without changing the actual draw or its uniforms.
+  for(unsigned i=0;i<std::min(count,3u);++i) {
+    gfx::CanonicalVertex vertex{};
+    const bool decoded=gfx::decode_vertex_into(raw,bytes,i,layout,vertex);
+    const bool transformed=decoded&&gfx::transform_vertex_for_pipeline(vertex,pipeline,state,requirements);
+    const auto clip=project_for_diag(state.projection,vertex,pipeline.positionIsClipSpace);
+    AURORA_VITA_LOG_INFO(
+      "[aurora-vita][lit-mesh-v] n=%u sample=%u decoded=%u transformed=%u pn=%u "
+      "eye=%g,%g,%g,%g clip=%g,%g,%g,%g color=%u,%u,%u,%u\n",
+      n,i,decoded?1u:0u,transformed?1u:0u,unsigned(vertex.pnMatrixIndex),
+      vertex.position[0],vertex.position[1],vertex.position[2],vertex.position[3],
+      clip.x,clip.y,clip.z,clip.w,
+      unsigned(vertex.color0[0]),unsigned(vertex.color0[1]),unsigned(vertex.color0[2]),unsigned(vertex.color0[3]));
+  }
+}
+
 void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::VertexTransformState& state,
                              const gfx::PipelineDesc& pipeline,const uint8_t* rawVertices,size_t rawBytes,
                              const gfx::VertexDecodeLayout& layout,uint32_t inputVertices) noexcept {
@@ -424,8 +457,8 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   {
     static uint64_t copyLogCount=0;
     const uint64_t n=++copyLogCount;
-    if(n<=8 || (n&(n-1))==0)
-      AURORA_VITA_LOG_DEBUG(
+    if(n<=16 || (n&(n-1))==0)
+      AURORA_VITA_LOG_INFO(
         "[aurora-vita] gx_copy_tex n=%llu src=%d,%d %dx%d dst=%ux%u fmt=0x%x mapped=%u clear=%u\n",
         static_cast<unsigned long long>(n),src.x,src.y,src.width,src.height,dstW,dstH,
         rawCopyFormat,static_cast<unsigned>(copyFormat),clear?1u:0u);
@@ -468,8 +501,53 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   const auto physicalFormat=copyFormat;
   constexpr auto sampleFormat=gfx::EfbCopyFormat::Passthrough;
 #endif
-  const auto h = renderer_->capture_current(oldHandle, src, dstW, dstH, physicalFormat, physicalFlipX, physicalFlipY);
+  gfx::Handle h=gfx::InvalidHandle;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  // Only sources outside the entire EFB storage are empty. Scratch light maps
+  // below the visible VI image remain real captures in the expanded EFB.
+  const bool emptySource=gfx::efb_copy_source_empty(src,renderer_->target_width(),renderer_->target_height());
+  if(emptySource && dstW && dstH) {
+    if(oldIt!=copyTextures_.end() && oldIt->second.syntheticEmpty &&
+       oldIt->second.width==dstW && oldIt->second.height==dstH) {
+      h=oldHandle;
+    } else {
+      // create_target zeros its color storage; no GPU readback, CPU staging
+      // copy or invalid source scissor is involved.
+      h=renderer_->efb().create(dstW,dstH,false);
+      if(h && oldHandle)renderer_->efb().destroy(oldHandle);
+    }
+    if(h) {
+      static unsigned clippedCopies=0;
+      if(++clippedCopies<=8 || (clippedCopies&(clippedCopies-1))==0)
+        AURORA_VITA_LOG_INFO("[aurora-vita] gx_copy_empty n=%u src=%d,%d %dx%d dst=%ux%u clear=%u\n",
+            clippedCopies,src.x,src.y,src.width,src.height,dstW,dstH,clear?1u:0u);
+    }
+  } else
+#endif
+  {
+    h=renderer_->capture_current(oldHandle, src, dstW, dstH, physicalFormat, physicalFlipX, physicalFlipY);
+  }
   if (!h) {
+#if defined(__vita__) && !defined(AURORA_VITA_UPSTREAM_STUB)
+    // Coverage alone loses the rectangle and format that failed. Keep enough
+    // evidence for offscreen/Mii diagnosis without enabling all Debug logging.
+    static uint64_t failedCopies=0;
+    const uint64_t n=++failedCopies;
+    if(n<=16 || (n&(n-1))==0) {
+      const auto fb=aurora::gx::logical_fb_size();
+      AURORA_VITA_LOG_ERROR(
+        "[aurora-vita][copy-failed] n=%llu dest=%p logical_src=%d,%d %dx%d logical_dst=%ux%u "
+        "src=%d,%d %dx%d dst=%ux%u fb=%ux%u target=%ux%u fmt=0x%x physical_fmt=%u "
+        "viewport=%g,%g %gx%g scissor=%d,%d %dx%d backend_last_error=%s\n",
+        static_cast<unsigned long long>(n),dest,g.texCopySrc.x,g.texCopySrc.y,
+        g.texCopySrc.width,g.texCopySrc.height,unsigned(g.texCopyDstWidth),unsigned(g.texCopyDstHeight),
+        src.x,src.y,src.width,src.height,dstW,dstH,fb.x,fb.y,
+        renderer_->target_width(),renderer_->target_height(),rawCopyFormat,unsigned(physicalFormat),
+        g.renderViewport.left,g.renderViewport.top,g.renderViewport.width,g.renderViewport.height,
+        g.renderScissor.x,g.renderScissor.y,g.renderScissor.width,g.renderScissor.height,
+        renderer_->last_error());
+    }
+#endif
     // capture_current may destroy an incompatible old target before allocation/copy; never retain
     // a potentially stale handle in the guest-destination map after failure.
     if (oldIt != copyTextures_.end()) copyTextures_.erase(oldIt);
@@ -479,7 +557,19 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
     return false;
   }
   if (telemetry_) telemetry_->efb_copy();
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  if(!emptySource && g.texCopySrc.y>=static_cast<int32_t>(aurora::gx::logical_fb_size().y)) {
+    static unsigned scratchCopies=0;
+    if(++scratchCopies<=4 || (scratchCopies&(scratchCopies-1))==0)
+      AURORA_VITA_LOG_INFO("[aurora-vita] gx_copy_scratch n=%u logical=%d,%d %dx%d physical=%d,%d %dx%d storage=%ux%u captured=1\n",
+          scratchCopies,g.texCopySrc.x,g.texCopySrc.y,g.texCopySrc.width,g.texCopySrc.height,
+          src.x,src.y,src.width,src.height,renderer_->target_width(),renderer_->target_height());
+  }
+#endif
   copyTextures_[copyKey] = CopyTextureEntry{h, dstW, dstH, oldRevision + 1, logicalFlipX, logicalFlipY, forceOpaque, sampleFormat};
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  copyTextures_[copyKey].syntheticEmpty=emptySource;
+#endif
 #if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
   auto& entry=copyTextures_[copyKey];
   entry.guestWidth=g.texCopyDstWidth;entry.guestHeight=g.texCopyDstHeight;
@@ -488,10 +578,16 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   resolvedTextureBindingsValid_=false;
   if (clear) {
 #if defined(AURORA_VITA_UPSTREAM_STUB)
-    renderer_->clear_current({0,0,0,0}, 0.f, g.colorUpdate, g.alphaUpdate, g.depthUpdate);
+    const gfx::Color cc{0,0,0,0};
+    constexpr float depth=0.f;
 #else
     const gfx::Color cc{g.clearColor[0],g.clearColor[1],g.clearColor[2],g.clearColor[3]};
-    renderer_->clear_current(cc, aurora::gx::clear_depth_value(), g.colorUpdate, g.alphaUpdate, g.depthUpdate);
+    const float depth=aurora::gx::clear_depth_value();
+#endif
+#if defined(AURORA_VITA_RENDERER_GXM)
+    renderer_->clear_current_region(src,cc,depth,g.colorUpdate,g.alphaUpdate,g.depthUpdate);
+#else
+    renderer_->clear_current(cc,depth,g.colorUpdate,g.alphaUpdate,g.depthUpdate);
 #endif
   }
   return true;
@@ -972,6 +1068,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   const auto& drawRecipe=streamFixed?gpuRecipe_:cpuRecipe_;
   const auto& gpuLayout=drawRecipe.gpuLayout;
   const auto& streamedPipeline=streamFixed?translatedGpuPipeline_:pipeline;
+#if defined(__vita__)
+  if(telemetry_&&!gpuGeometry&&!streamFixed&&!rawIndices&&
+     (source==gfx::SourcePrimitive::Triangles||source==gfx::SourcePrimitive::TriangleStrip||
+      source==gfx::SourcePrimitive::TriangleFan))
+    log_lit_mesh_sample(pipeline,vertexState,layout,rawVertices,rawBytes,vertexCount,primitive);
+#endif
   const size_t gpuStride=gpuLayout.count?gpuLayout.attributes[0].stride:sizeof(gfx::GpuVertex);
   const bool useStreamed=!gpuGeometry&&!(telemetry_&&telemetry_->split_vertex_phases())&&
       source!=gfx::SourcePrimitive::Lines&&source!=gfx::SourcePrimitive::LineStrip&&

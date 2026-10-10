@@ -8,6 +8,7 @@
 #include "integration/vita_frame_trace.hpp"
 #include "gfx/vita_memory_budget.hpp"
 #include "gfx/vita_native_assets.hpp"
+#include "gfx/vita_texture_snapshots.hpp"
 namespace aurora::vita::gfx { class Renderer; }
 namespace aurora::vita::gxbridge { class DrawSink; }
 namespace aurora::vita {
@@ -82,6 +83,7 @@ struct PerformanceSnapshot {
   uint64_t poolBusyFallbacks=0;
   gfx::FrameTelemetry frontend{};
   gfx::NativeAssetStats nativeAssets{};
+  gfx::TextureSnapshotStats textureSnapshots{};
   // gxm_disable bit 0x100 diagnostic: GPU time per scene of the last frame.
   uint32_t diagSceneGpuUs[4]{};
   bool core3Available=false;
@@ -119,6 +121,9 @@ struct BackendConfig {
   // Zero follows the display extent, preserving the validated raster scale.
   // Reduced resolution is opt-in and must be checked with GXCopyTex shadows.
   uint32_t render_width=0,render_height=0;
+  // Optional EFB storage beyond the visible raster. GX light maps can occupy
+  // rows that the display copy never scans out. Zero follows render_width/height.
+  uint32_t efb_width=0,efb_height=0;
   // Aurora never uses vitaGL immediate mode, so reserving a large legacy pool
   // only steals memory from textures, EFBs and the Wii guest runtime.
   uint32_t vgl_legacy_pool_size=0;
@@ -207,6 +212,7 @@ struct BackendConfig {
   bool display_list_shadow=true;
   bool prepared_display_lists=false;
   bool resident_geometry_cdram=false,exact_bc1=false;
+  size_t texture_snapshot_budget=0; // Included in texture_cache_budget.
   gfx::NativeAssetReader native_asset_reader=nullptr;
   void* native_asset_context=nullptr;
   // Exact producer-side BP material-write elision; enable separately for A/B.

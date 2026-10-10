@@ -606,7 +606,27 @@ struct ProcessTimeScope {
 uint64_t process_time_total_us() { return sProcessTotalUs; }
 #endif
 
+static void process_now(const u8* data, u32 size, bool bigEndian);
+#if defined(MKW_TARGET_VITA)
+static SynchronousDispatch sSynchronousDispatch = nullptr;
+void set_synchronous_dispatch(SynchronousDispatch dispatch) { sSynchronousDispatch = dispatch; }
+#endif
+
 void process(const u8* data, u32 size, bool bigEndian) {
+#if defined(MKW_TARGET_VITA)
+  if (sSynchronousDispatch) {
+    struct Args { const u8* data; u32 size; bool bigEndian; } args{data, size, bigEndian};
+    sSynchronousDispatch([](void* context) {
+      const auto& args = *static_cast<Args*>(context);
+      process_now(args.data, args.size, args.bigEndian);
+    }, &args);
+    return;
+  }
+#endif
+  process_now(data, size, bigEndian);
+}
+
+static void process_now(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
 #if defined(MKW_TARGET_VITA)
   ProcessTimeScope processTimeScope;

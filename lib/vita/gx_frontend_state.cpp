@@ -66,12 +66,8 @@ void invalidate_static_texture_cache() noexcept {
 }
 
 Vec2<uint32_t> logical_fb_size() noexcept {
-  // The Vita target is the final display surface, not a 640x528 GameCube EFB
-  // scratch allocation.  PAL titles can deliberately configure a shorter EFB
-  // and rely on the VI/display copy to scale those visible lines to the output.
-  // Using configured_fb_size() here forces Aurora's historical
-  // 528-line minimum (needed by some desktop/offscreen effects), which inserts
-  // 80 logical rows and pushes/crops bottom-of-screen UI on Vita.
+  // Scale the visible VI image to the visible raster. Extra EFB scratch rows
+  // have the same scale, but must not shrink or move the displayed image.
   return vi::visible_fb_size();
 }
 
@@ -80,13 +76,13 @@ gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcep
   const auto [logicalWidth, logicalHeight] = logical_fb_size();
   const auto [targetWidth, targetHeight] = gfx::get_render_target_size();
   if (!logicalWidth || !logicalHeight || !targetWidth || !targetHeight) return logicalViewport;
-  const float sx = static_cast<float>(targetWidth) / static_cast<float>(logicalWidth);
-  const float sy = static_cast<float>(targetHeight) / static_cast<float>(logicalHeight);
+  const auto x=[&](float value) { return static_cast<float>(double(value)*targetWidth/logicalWidth); };
+  const auto y=[&](float value) { return static_cast<float>(double(value)*targetHeight/logicalHeight); };
   return {
-      logicalViewport.left * sx,
-      logicalViewport.top * sy,
-      logicalViewport.width * sx,
-      logicalViewport.height * sy,
+      x(logicalViewport.left),
+      y(logicalViewport.top),
+      x(logicalViewport.width),
+      y(logicalViewport.height),
       logicalViewport.znear,
       logicalViewport.zfar,
   };
@@ -98,16 +94,20 @@ gfx::ClipRect map_logical_scissor(const gfx::ClipRect& logicalScissor) noexcept 
   const auto [targetWidth, targetHeight] = gfx::get_render_target_size();
   if (!logicalWidth || !logicalHeight || !targetWidth || !targetHeight) return logicalScissor;
 
-  const float sx = static_cast<float>(targetWidth) / static_cast<float>(logicalWidth);
-  const float sy = static_cast<float>(targetHeight) / static_cast<float>(logicalHeight);
-  const int32_t left = std::clamp(static_cast<int32_t>(std::floor(logicalScissor.x * sx)), 0,
-                                  static_cast<int32_t>(targetWidth));
-  const int32_t top = std::clamp(static_cast<int32_t>(std::floor(logicalScissor.y * sy)), 0,
-                                 static_cast<int32_t>(targetHeight));
-  const int32_t right = std::clamp(static_cast<int32_t>(std::ceil((logicalScissor.x + logicalScissor.width) * sx)),
-                                   left, static_cast<int32_t>(targetWidth));
-  const int32_t bottom = std::clamp(static_cast<int32_t>(std::ceil((logicalScissor.y + logicalScissor.height) * sy)),
-                                    top, static_cast<int32_t>(targetHeight));
+  // Multiply integer edges before division. A rounded float ratio previously
+  // mapped the visible right edge to 960.00006; expanded storage would expose
+  // that rounding as a spurious extra column in GXCopyDisp.
+  const auto x=[&](int32_t value) { return double(value)*targetWidth/logicalWidth; };
+  const auto y=[&](int32_t value) { return double(value)*targetHeight/logicalHeight; };
+  const auto [storageWidth, storageHeight] = gfx::get_efb_storage_size();
+  const int32_t left = std::clamp(static_cast<int32_t>(std::floor(x(logicalScissor.x))), 0,
+                                  static_cast<int32_t>(storageWidth));
+  const int32_t top = std::clamp(static_cast<int32_t>(std::floor(y(logicalScissor.y))), 0,
+                                 static_cast<int32_t>(storageHeight));
+  const int32_t right = std::clamp(static_cast<int32_t>(std::ceil(x(logicalScissor.x + logicalScissor.width))),
+                                   left, static_cast<int32_t>(storageWidth));
+  const int32_t bottom = std::clamp(static_cast<int32_t>(std::ceil(y(logicalScissor.y + logicalScissor.height))),
+                                    top, static_cast<int32_t>(storageHeight));
   return {left, top, right - left, bottom - top};
 }
 

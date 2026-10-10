@@ -12,7 +12,9 @@ namespace aurora::vita::gfx {
 struct RendererConfig {
   uint32_t width=960,height=544;
   uint32_t renderWidth=0,renderHeight=0;
+  uint32_t efbWidth=0,efbHeight=0;
   size_t textureBudget=24*1024*1024;
+  size_t textureSnapshotBudget=0; // Subset of textureBudget, opt-in.
   size_t pipelineBudget=512;
   uint32_t displayBuffers=3;
   bool waitVblank=true;
@@ -105,6 +107,11 @@ public:
                          EfbCopyFormat format=EfbCopyFormat::Passthrough,bool flipX=false,bool flipY=false) noexcept;
   Handle upload_efb_rgba(Handle existing,uint32_t width,uint32_t height,const void* rgba) noexcept;
   void clear_current(const Color& color,float depth,bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
+#if defined(AURORA_VITA_RENDERER_GXM)
+  // GXCopyTex clears only its source rectangle, preserving other EFB pixels.
+  void clear_current_region(const Scissor& source,const Color& color,float depth,
+                            bool clearRgb,bool clearAlpha,bool clearDepth) noexcept;
+#endif
   void execute(const CommandStream& stream) noexcept;
   /* Execute a stable slice of one prepared stream. GXCopyTex uses this to keep
    * the GameCube ordering boundary without rebuilding or duplicating geometry.

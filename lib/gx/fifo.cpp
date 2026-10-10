@@ -120,6 +120,8 @@ struct VitaWorkerState {
   std::array<VitaJob, VitaQueueDepth> jobs{};
   std::atomic<uint64_t> submitted{0};
   std::atomic<uint64_t> completed{0};
+  std::atomic<uint64_t> activeSerial{0};
+  std::atomic<uint32_t> activeType{0}, activeSegment{0};
   std::atomic<bool> completionWakePending{false};
   uint32_t producer = 0;
   uint32_t consumer = 0;
@@ -189,9 +191,15 @@ int vita_worker_main(SceSize, void*) {
     VitaJob& job = sVitaWorker.jobs[sVitaWorker.consumer % VitaQueueDepth];
     std::atomic_thread_fence(std::memory_order_acquire);
     const uint64_t serial = job.serial;
+    sVitaWorker.activeSerial.store(serial, std::memory_order_relaxed);
+    sVitaWorker.activeType.store(static_cast<uint32_t>(job.type) + 1u, std::memory_order_relaxed);
+    sVitaWorker.activeSegment.store(0, std::memory_order_relaxed);
 
     if (job.type == VitaJobType::Stop) {
       signal_completion(serial);
+      sVitaWorker.activeSerial.store(0, std::memory_order_relaxed);
+      sVitaWorker.activeType.store(0, std::memory_order_relaxed);
+      sVitaWorker.activeSegment.store(0, std::memory_order_relaxed);
       sceKernelSignalSema(sVitaWorker.space, 1);
       ++sVitaWorker.consumer;
       break;
@@ -200,6 +208,7 @@ int vita_worker_main(SceSize, void*) {
     if (job.type == VitaJobType::Fifo) {
       if (job.segmentCount != 0) {
         for (uint32_t i = 0; i < job.segmentCount; ++i) {
+          sVitaWorker.activeSegment.store(i + 1u, std::memory_order_relaxed);
           const auto& segment = job.segments[i];
           if (segment.type == VitaJobSegmentType::ViewMarker) {
             // A marker reuses otherwise irrelevant segment fields so the
@@ -249,6 +258,9 @@ int vita_worker_main(SceSize, void*) {
     for (uint32_t i = 0; i < job.segmentCount; ++i) job.segments[i].pinned.reset();
     job.segmentCount = 0;
     signal_completion(serial);
+    sVitaWorker.activeSerial.store(0, std::memory_order_relaxed);
+    sVitaWorker.activeType.store(0, std::memory_order_relaxed);
+    sVitaWorker.activeSegment.store(0, std::memory_order_relaxed);
     sceKernelSignalSema(sVitaWorker.space, 1);
     ++sVitaWorker.consumer;
   }
@@ -338,6 +350,9 @@ bool start_worker() {
   sVitaWorker.producer = sVitaWorker.consumer = 0;
   sVitaWorker.submitted.store(0, std::memory_order_release);
   sVitaWorker.completed.store(0, std::memory_order_release);
+  sVitaWorker.activeSerial.store(0, std::memory_order_relaxed);
+  sVitaWorker.activeType.store(0, std::memory_order_relaxed);
+  sVitaWorker.activeSegment.store(0, std::memory_order_relaxed);
   sVitaWorker.completionWakePending.store(false, std::memory_order_release);
   sVitaWorker.ready = sceKernelCreateSema("melee_gx_ready", 0, 0, VitaQueueDepth, nullptr);
   sVitaWorker.space = sceKernelCreateSema("melee_gx_space", 0, VitaQueueDepth, VitaQueueDepth, nullptr);
@@ -384,6 +399,16 @@ void write_view_marker(uint32_t view, uint64_t producerFrame) {
   segment.type=VitaJobSegmentType::ViewMarker;
   segment.pinnedIdentity=producerFrame;
   segment.offset=view;
+}
+
+WorkerProgress worker_progress() noexcept {
+  WorkerProgress state{};
+  state.submitted = sVitaWorker.submitted.load(std::memory_order_acquire);
+  state.completed = sVitaWorker.completed.load(std::memory_order_acquire);
+  state.activeSerial = sVitaWorker.activeSerial.load(std::memory_order_relaxed);
+  state.activeType = sVitaWorker.activeType.load(std::memory_order_relaxed);
+  state.segment = sVitaWorker.activeSegment.load(std::memory_order_relaxed);
+  return state;
 }
 
 void take_wait_stats(uint64_t& producerWaitUs, uint64_t& consumerWaitUs) {

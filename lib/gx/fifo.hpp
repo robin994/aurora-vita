@@ -70,6 +70,14 @@ uint64_t process_time_total_us();
 // Opt-in diagnostic marker; preserves the order of producer view transitions
 // and their draws in the existing FIFO batch without a GPU finish/flush.
 void write_view_marker(uint32_t view, uint64_t producerFrame);
+#if defined(MKW_TARGET_VITA)
+// Read-only, lock-free view for the Vita audio-thread stall observer.
+struct WorkerProgress {
+  uint64_t submitted = 0, completed = 0, activeSerial = 0;
+  uint32_t activeType = 0, segment = 0;
+};
+WorkerProgress worker_progress() noexcept;
+#endif
 #endif
 
 // Out-of-line slow path: grows internal buffer then appends data

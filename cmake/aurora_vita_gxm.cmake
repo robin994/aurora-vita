@@ -28,9 +28,11 @@ add_library(aurora::vita_backend ALIAS aurora_vita_gxm_backend)
 add_library(aurora::vita_gxm_backend ALIAS aurora_vita_gxm_backend)
 target_compile_features(aurora_vita_gxm_backend PUBLIC cxx_std_20)
 target_compile_definitions(aurora_vita_gxm_backend PUBLIC AURORA_VITA_RENDERER_GXM=1
-    AURORA_VITA_ASYNC_GX=$<BOOL:${AURORA_VITA_ASYNC_GX}>
     AURORA_VITA_DISTINCT_CPU_CORES=$<BOOL:${AURORA_VITA_DISTINCT_CPU_CORES}>
     AURORA_VITA_GXM_IMMEDIATE_DRAW_VIEW=$<BOOL:${AURORA_VITA_GXM_IMMEDIATE_DRAW_VIEW}>)
+# Only GXManage's worker startup uses this flag; no public layout depends on it.
+target_compile_definitions(aurora_vita_gxm_backend PRIVATE
+    AURORA_VITA_ASYNC_GX=$<BOOL:${AURORA_VITA_ASYNC_GX}>)
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE AURORA_VITA_DIRECT_STREAM_WRITE=0)
 target_compile_definitions(aurora_vita_gxm_backend PRIVATE
     AURORA_VITA_NATIVE_CMPR=$<BOOL:${AURORA_VITA_NATIVE_CMPR}>

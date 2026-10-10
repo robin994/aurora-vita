@@ -5,8 +5,19 @@
 #include <iterator>
 namespace fs=std::filesystem;
 int main(int argc,char** argv) {
-  if(argc<3||argc>4||(argc==4&&std::string(argv[3])!="--include-rgba")){
-    std::cerr<<"usage: vita_compile_native_assets REQUEST_DIRECTORY OUTPUT_ROOT [--include-rgba]\n";return 2;
+  if(argc<3||argc>5) {
+    std::cerr<<"usage: vita_compile_native_assets REQUEST_DIRECTORY OUTPUT_ROOT [--no-bc1] [--include-rgba]\n";return 2;
+  }
+  bool allowBc1=true;
+  // WiiCompiled already includes RGBA sidecars. Keep that default while
+  // accepting upstream's explicit flag and the existing --no-bc1 contract.
+  constexpr bool includeRgba=true;
+  for(int i=3;i<argc;++i) {
+    const std::string flag=argv[i];
+    if(flag=="--no-bc1")allowBc1=false;
+    else if(flag!="--include-rgba") {
+      std::cerr<<"unknown option: "<<flag<<'\n';return 2;
+    }
   }
   size_t compiled=0,rejected=0;
   for(const auto& file:fs::directory_iterator(argv[1])) {
@@ -14,7 +25,7 @@ int main(int argc,char** argv) {
     if(file.file_size()>16u*1024u*1024u){++rejected;continue;}
     std::ifstream input(file.path(),std::ios::binary);
     std::vector<uint8_t> request((std::istreambuf_iterator<char>(input)),{}),record;
-    if(!aurora::vita::gfx::compile_native_asset(request,record,argc==4)){++rejected;continue;}
+    if(!aurora::vita::gfx::compile_native_asset(request,record,allowBc1,includeRgba)){++rejected;continue;}
     const auto relative=aurora::vita::gfx::native_asset_path(request);
     const auto output=fs::path(argv[2])/relative;fs::create_directories(output.parent_path());
     if(fs::exists(output)) {

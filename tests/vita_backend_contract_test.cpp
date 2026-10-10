@@ -1,4 +1,5 @@
 #include "gxm/gxm_shader_gen.hpp"
+#include "gxm/gxm_efb_ops.hpp"
 #include "gfx/vita_pipeline_key.hpp"
 #include "gfx/vita_texture_decode.hpp"
 #include "gfx/vita_vertex_decode.hpp"
@@ -553,6 +554,62 @@ void native_extended_contract() {
   gxp[5]^=1;
   REQUIRE(!gxm::valid_gxm_program_cache(cache,gxp.data(),gxp.size(),vh,gxm::ProgramStage::Vertex));
 }
+void native_efb_copy_and_clear_contract() {
+  // Evaluate the actual uploaded fullscreen triangle against the native
+  // negative-Y viewport. An asymmetric source exposes vertical inversion.
+  const auto& vertices=gxm::EfbCopyVertices;
+  const auto uv=[&](float clipX,float clipY) {
+    const float a=(clipX-vertices[0])/(vertices[7]-vertices[0]);
+    const float b=(clipY-vertices[1])/(vertices[15]-vertices[1]);
+    return std::array<float,2>{vertices[4]+a*(vertices[11]-vertices[4])+b*(vertices[18]-vertices[4]),
+                             vertices[5]+a*(vertices[12]-vertices[5])+b*(vertices[19]-vertices[5])};
+  };
+  const uint8_t pixels[]{255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,0,255};
+  std::vector<uint8_t> expected;
+  REQUIRE(copy_efb_rgba8(pixels,2,2,{0,0,2,2},2,2,EfbCopyFormat::Passthrough,false,false,expected));
+  for(unsigned y=0;y<2;++y)for(unsigned x=0;x<2;++x) {
+    const auto sample=uv(float(x)-.5f,.5f-float(y));
+    const unsigned sourceX=unsigned(sample[0]*2),sourceY=unsigned(sample[1]*2);
+    REQUIRE(sourceX<2 && sourceY<2);
+    REQUIRE(std::memcmp(pixels+(sourceY*2+sourceX)*4,expected.data()+(y*2+x)*4,4)==0);
+  }
+  // The visible crop of the expanded EFB must not sample the scratch rows.
+  for(float y:{0.f,543.f})for(float x:{0.f,959.f}) {
+    const auto sample=uv(2.f*(x+.5f)/960.f-1.f,1.f-2.f*(y+.5f)/544.f);
+    REQUIRE(std::abs(sample[0]*960.f-(x+.5f))<.0002f);
+    REQUIRE(std::abs(sample[1]*544.f-(y+.5f))<.0002f);
+  }
+  const Scissor scratch{50,544,52,39};
+  const auto area=gxm::efb_clear_area(&scratch,1024,640);
+  REQUIRE(!area.fullTarget);
+  const auto packet=gxm::efb_clear_packet(7,8,9,1024,640,area,{0,0,0,0},.25f);
+  REQUIRE(packet.scissor.x==50 && packet.scissor.y==544 && packet.scissor.width==52 && packet.scissor.height==39);
+  REQUIRE(packet.viewport.width==1024 && packet.viewport.height==640);
+  REQUIRE(packet.uniforms.mvp[14]==-.75f);
+  // Rasterize the submitted clear coverage. Every visible pixel and every
+  // pixel outside the light-map rectangle must retain its previous content.
+  size_t visibleChanged=0,outsideChanged=0,cleared=0;
+  for(int y=0;y<640;++y)for(int x=0;x<1024;++x) {
+    const bool changed=x>=packet.scissor.x && y>=packet.scissor.y &&
+        x<int64_t(packet.scissor.x)+packet.scissor.width && y<int64_t(packet.scissor.y)+packet.scissor.height;
+    if(changed) {
+      ++cleared;
+      if(x<960 && y<544)++visibleChanged;
+      if(x<50 || x>=102 || y<544 || y>=583)++outsideChanged;
+    }
+  }
+  REQUIRE(visibleChanged==0 && outsideChanged==0 && cleared==52*39);
+  REQUIRE(gxm::efb_clear_area(nullptr,1024,640).fullTarget);
+  const Scissor full{0,0,1024,640};
+  REQUIRE(gxm::efb_clear_area(&full,1024,640).fullTarget);
+  const Scissor right{-2,638,5,5};
+  const auto clipped=gxm::efb_clear_area(&right,1024,640);
+  REQUIRE(clipped.rect.x==0 && clipped.rect.y==638 && clipped.rect.width==3 && clipped.rect.height==2);
+  const Scissor empty{0,640,32,32};
+  REQUIRE(gxm::efb_clear_area(&empty,1024,640).rect.height==0);
+  const Scissor negative{4,4,-1,32};
+  REQUIRE(gxm::efb_clear_area(&negative,1024,640).rect.width==0);
+}
 } // namespace
 int main() {
   (void)take_pipeline_invalidation_report();
@@ -684,6 +741,7 @@ int main() {
   }
   shader_masks(); shader_operations(); rejection_tests(); projection_contract(); common_decode_contract(); keys_and_defaults();
   native_extended_contract();
+  native_efb_copy_and_clear_contract();
   std::printf("PASS: %u checks, 1024 input-mask combinations; native Cg generation and shared CPU contracts (not GPU execution).\n", checks);
   return 0;
 }

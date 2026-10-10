@@ -2,6 +2,7 @@
 #include "vita_cpu_workers.hpp"
 #include "vita_fixed_vertex.hpp"
 #include "vita_draw_batch.hpp"
+#include "vita_native_assets.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -354,6 +355,17 @@ bool prepare_draw_into(PreparedDraw&out,const uint8_t*raw,size_t bytes,uint32_t 
   return true;
 }
 
+bool prepare_native_geometry(PreparedDraw& out,const uint8_t* raw,size_t bytes,uint32_t count,
+    SourcePrimitive source,const VertexDecodeLayout& layout,const PipelineDesc& pipeline,
+    const VertexTransformState& state,const DrawRecipe& recipe) noexcept {
+  if(!load_native_geometry(raw,bytes,count,source,layout,out))return false;
+  FusedVertexContext transformed{nullptr,0,&layout,&pipeline,&state,recipe.requirements,
+                                recipe.decodeSemantics,out.vertices.data()};
+  if(!pipeline.fixedVertexOnGpu&&!cpu_parallel_for_vertex(out.vertices.size(),profile_transform_range,&transformed)) {
+    out.error=PrepareDrawError::VertexTransformFailed;return false;
+  }
+  return true;
+}
 bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint8_t*raw,size_t bytes,uint32_t count,
                                 SourcePrimitive source,const uint16_t*rawIndices,uint32_t rawIndexCount,
                                 const VertexDecodeLayout&layout,const PipelineDesc&pipeline,
@@ -378,6 +390,34 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
   // real GX streams can change XF/current-matrix semantics independently of the
   // generated pipeline and produced visibly corrupted model geometry on Vita.
   if(uniforms)uniforms->mvp=state.projection;
+
+  // Offline records contain object-space vertices and triangle topology only.
+  // Retain the current XF matrices, CPU lighting/texgen and streaming lifetime.
+  // Matrix animation therefore uses exactly the same transform worker as the
+  // decoded path. Explicitly reindexed draws keep their existing source path.
+  bool indexedSource=false;
+  for(unsigned i=0;i<layout.count;++i)
+    indexedSource=indexedSource||layout.attributes[i].source==VertexSource::Index8||
+                  layout.attributes[i].source==VertexSource::Index16;
+  PreparedDraw native;
+  if(!rawIndexCount&&count>=48&&indexedSource&&
+      prepare_native_geometry(native,raw,size_t(count)*layout.streamStride,count,source,layout,pipeline,state,cachedRecipe)) {
+    const size_t vertexBytes=native.vertices.size()*gpuStride;
+    void* vertexDst=nullptr;
+    out.vertices=arena.reserve_vertices(vertexBytes,gpuStride,&vertexDst);
+    if(!out.vertices.buffer||!vertexDst){out.error=PrepareDrawError::StreamingOverflow;return false;}
+    for(size_t i=0;i<native.vertices.size();++i)
+      pack_gpu_vertex(static_cast<uint8_t*>(vertexDst)+i*gpuStride,native.vertices[i],gpuLayout);
+    out.vertexCount=static_cast<uint32_t>(native.vertices.size());
+    out.indexCount=static_cast<uint32_t>(native.indices.size());out.primitive=Primitive::Triangles;
+    if(out.indexCount) {
+      void* indexDst=nullptr;
+      out.indices=arena.reserve_indices(native.indices.size()*sizeof(uint16_t),alignof(uint16_t),&indexDst);
+      if(!out.indices.buffer||!indexDst){out.error=PrepareDrawError::StreamingOverflow;return false;}
+      std::memcpy(indexDst,native.indices.data(),native.indices.size()*sizeof(uint16_t));
+    }
+    return true;
+  }
 
   void* vertexDst=nullptr;
   out.vertices=arena.reserve_vertices(footprint.vertexBytes,gpuStride,&vertexDst);

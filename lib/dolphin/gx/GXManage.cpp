@@ -43,7 +43,7 @@ GXFifoObj* GXInit(void* base, u32 size) {
   // Initialize FIFO subsystem
   aurora::gx::fifo::init();
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_ASYNC_GX) && AURORA_VITA_ASYNC_GX
-  // GX decode, translation and GXM submission move to the worker on core 1.
+  // GX decode, translation and GXM submission move to the CPU2 worker.
   (void)aurora::gx::fifo::start_worker();
 #endif
   GXInitFifoBase(&sFifoObj, base, size);

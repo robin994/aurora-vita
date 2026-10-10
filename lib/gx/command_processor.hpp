@@ -22,6 +22,12 @@ void reset_cp_register_cache();
 
 // Process a buffer of GX FIFO commands
 void process(const uint8_t* data, uint32_t size, bool bigEndian);
+#if defined(MKW_TARGET_VITA)
+// An embedding runtime can execute synchronous GX processing on its native
+// thread stack while retaining FIFO order and caller-owned argument lifetimes.
+using SynchronousDispatch = void (*)(void (*)(void*), void*);
+void set_synchronous_dispatch(SynchronousDispatch dispatch);
+#endif
 
 // Submit already-packed direct vertex bytes against the current GX state.
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,

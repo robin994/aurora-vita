@@ -74,11 +74,19 @@ void TextureCache::pre_evict(size_t required,uint64_t frame,uint64_t protectKey)
 }
 Handle TextureCache::get_or_upload(const TextureDesc& desc,uint64_t frame,FrameStats* stats) noexcept {
   if(!native_) return 0;
+  const bool snapshot=snapshots_.eligible(desc);
+  if(snapshot) {
+    if(const auto handle=snapshots_.find(desc,frame)) {
+      byHandle_.at(handle)->lastUse=frame;
+      if(stats)++stats->textureHits;
+      return handle;
+    }
+  }
   const uint64_t stableKey=texture_key(desc);
-  if(desc.cacheable) {
+  if(!snapshot&&desc.cacheable) {
     const auto it=byKey_.find(stableKey);
     if(it!=byKey_.end()) { it->second.lastUse=frame;if(stats)++stats->textureHits;return it->second.handle; }
-  } else {
+  } else if(!snapshot) {
     // Streaming video updates the same GX texture sources every frame. Keep a
     // four-frame native ring so GXM can consume older frames while the CPU
     // transcodes directly into a retired slot instead of allocating, submitting,
@@ -105,7 +113,11 @@ Handle TextureCache::get_or_upload(const TextureDesc& desc,uint64_t frame,FrameS
   nativeDesc.immutableSource=desc.cacheable; // Stable cache source survives ownership handoff.
   nativeDesc.cacheable=false; // This facade is the only cache/retirement owner.
   gxm::CompactTextureData prepared;
-  if(gxm_disabled(GxmDisableNativeTextureMips)||!load_native_texture(nativeDesc,prepared,exactBc1_))
+  // The sidecar's private pixels are verified against the current source. A
+  // global GX invalidate must not force byte-identical static pixels through
+  // the decoder again. Preserve the original eligibility on the fallback.
+  auto assetDesc=nativeDesc;assetDesc.immutableSource=true;
+  if(gxm_disabled(GxmDisableNativeTextureMips)||!load_native_texture(assetDesc,prepared,exactBc1_))
     prepared=gxm::prepare_texture_upload(nativeDesc,!gxm_disabled(GxmDisableNativeTextureMips),exactBc1_);
   const size_t required=gxm::texture_upload_budget_bytes(prepared);lastRequestedBytes_=required;
   if(!required){++allocFailTotal_;failedKeys_.insert(stableKey);return 0;}
@@ -124,7 +136,19 @@ Handle TextureCache::get_or_upload(const TextureDesc& desc,uint64_t frame,FrameS
   }
   uint64_t key=stableKey;
   bool volatileRing=false;
-  if(!desc.cacheable) {
+  bool retainedSnapshot=false;
+  if(snapshot) {
+    while(!snapshots_.has_room(actual)) {
+      const auto victim=snapshots_.oldest_before(frame);
+      if(!victim)break;
+      erase(victim);++evictions_;
+    }
+    retainedSnapshot=snapshots_.remember(desc,handle,actual,frame);
+    // Snapshot identity is content-based. Keep GPU ownership in the existing
+    // handle map using a distinct key, without adding a guest-address alias.
+    key^=uint64_t(handle)*0x9e3779b97f4a7c15ull;
+    while(byKey_.contains(key))++key;
+  } else if(!desc.cacheable) {
     constexpr uint64_t VolatileSlots=4;
     constexpr uint64_t VolatileSalt=0x9e3779b97f4a7c15ull;
     const uint64_t ringKey=stableKey ^ (VolatileSalt*(1u+(frame%VolatileSlots)));
@@ -133,11 +157,15 @@ Handle TextureCache::get_or_upload(const TextureDesc& desc,uint64_t frame,FrameS
   }
   Entry entry{};
   entry.handle=handle;entry.key=key;entry.lastUse=frame;entry.bytes=native_->texture_bytes(handle);
-  entry.cacheable=desc.cacheable;entry.volatileRing=volatileRing;entry.hasMipmaps=desc.mipCount>1 || desc.generateMipmaps;
+  entry.cacheable=snapshot?retainedSnapshot:desc.cacheable;
+  entry.volatileRing=volatileRing;entry.hasMipmaps=desc.mipCount>1 || desc.generateMipmaps;
   entry.sourceId=desc.sourceId;entry.paletteSourceId=desc.paletteSourceId;
   entry.sourceBytes=desc.dataSize;entry.paletteBytes=desc.paletteSize;
+  // These GPU pixels are private, immutable copies. Guest writes are checked
+  // by content on the next lookup and must not destroy a still valid snapshot.
+  if(retainedSnapshot)entry.sourceId=entry.paletteSourceId=0;
   auto [it,ok]=byKey_.emplace(key,entry);
-  if(!ok) {native_->destroy_texture(handle);return 0;}
+  if(!ok) {snapshots_.erase(handle);native_->destroy_texture(handle);return 0;}
   byHandle_[handle]=&it->second;
   bytes_+=entry.bytes;highWaterBytes_=std::max(highWaterBytes_,bytes_);
   if(stats)++stats->textureUploads;
@@ -150,6 +178,7 @@ void TextureCache::erase(Handle h) noexcept {
   const auto it=byHandle_.find(h);
   if(it==byHandle_.end()) return;
   const auto key=it->second->key;
+  snapshots_.erase(h);
   bytes_-=it->second->bytes;
   if(native_) native_->destroy_texture(h);
   byHandle_.erase(it);byKey_.erase(key);
@@ -157,6 +186,7 @@ void TextureCache::erase(Handle h) noexcept {
 void TextureCache::clear() noexcept {
   if(native_) {native_->finish(FinishReason::ResourceDestroy);for(const auto& [h,_]:byHandle_)native_->destroy_texture(h);}
   byHandle_.clear();byKey_.clear();bytes_=0;failedKeys_.clear();failedFrame_=~uint64_t{0};
+  snapshots_.clear();
 }
 void TextureCache::trim(uint64_t frame) noexcept {
   for(auto it=byKey_.begin();it!=byKey_.end();) {
@@ -407,7 +437,9 @@ void EfbManager::clear() noexcept {
 }
 
 Renderer::Renderer(const RendererConfig& cfg):cfg_(cfg),native_(std::make_unique<gxm::Renderer>()),
-    pipelines_(cfg.pipelineBudget),textures_(cfg.textureBudget) {}
+    pipelines_(cfg.pipelineBudget),textures_(cfg.textureBudget) {
+  textures_.set_snapshot_budget(std::min(cfg.textureSnapshotBudget,cfg.textureBudget));
+}
 Renderer::~Renderer() {shutdown();}
 bool Renderer::initialize() noexcept {
   if(initialized_)return true;
@@ -433,8 +465,10 @@ bool Renderer::initialize() noexcept {
   buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=native_.get();
   const uint32_t renderWidth=cfg_.renderWidth?cfg_.renderWidth:cfg_.width;
   const uint32_t renderHeight=cfg_.renderHeight?cfg_.renderHeight:cfg_.height;
-  if(renderWidth!=cfg_.width || renderHeight!=cfg_.height) {
-    mainEfb_=efb_.create(renderWidth,renderHeight,true);
+  const uint32_t efbWidth=cfg_.efbWidth?cfg_.efbWidth:renderWidth;
+  const uint32_t efbHeight=cfg_.efbHeight?cfg_.efbHeight:renderHeight;
+  if(efbWidth!=cfg_.width || efbHeight!=cfg_.height) {
+    mainEfb_=efb_.create(efbWidth,efbHeight,true);
     if(!mainEfb_) {
       native_->shutdown();
       buffers_.native_=textures_.native_=pipelines_.native_=efb_.native_=nullptr;
@@ -445,7 +479,7 @@ bool Renderer::initialize() noexcept {
   pipelines_.prewarm_hot(nullptr,cfg_.startupProgress,cfg_.startupProgressUser);
   if(cfg_.sealRuntimeShaderCompilationAfterPrewarm)
     native_->set_runtime_shader_compilation_enabled(false);
-  targetWidth_=renderWidth;targetHeight_=renderHeight;initialized_=true;failed_=false;
+  targetWidth_=efbWidth;targetHeight_=efbHeight;initialized_=true;failed_=false;
   return true;
 }
 void Renderer::shutdown() noexcept {
@@ -500,7 +534,8 @@ void Renderer::end_frame() noexcept {
 }
 bool Renderer::present(bool display) noexcept {
   if(!failed_ && mainEfb_ && boundEfb_==mainEfb_) {
-    const Scissor full{0,0,static_cast<int32_t>(targetWidth_),static_cast<int32_t>(targetHeight_)};
+    const Scissor full{0,0,static_cast<int32_t>(cfg_.renderWidth?cfg_.renderWidth:cfg_.width),
+                          static_cast<int32_t>(cfg_.renderHeight?cfg_.renderHeight:cfg_.height)};
     if(!native_->blit_to_default(mainEfb_,&full)) failed_=true;
     else {boundEfb_=0;targetWidth_=cfg_.width;targetHeight_=cfg_.height;}
   }
@@ -562,6 +597,9 @@ Handle Renderer::capture_current(Handle existing,const Scissor& s,uint32_t dw,ui
 Handle Renderer::upload_efb_rgba(Handle existing,uint32_t w,uint32_t h,const void* data) noexcept {return efb_.upload_rgba(existing,w,h,data);}
 void Renderer::clear_current(const Color& c,float z,bool rgb,bool alpha,bool depth) noexcept {
   if(!native_->clear(c,z,rgb,alpha,depth))failed_=true;
+}
+void Renderer::clear_current_region(const Scissor& source,const Color& c,float z,bool rgb,bool alpha,bool depth) noexcept {
+  if(!native_->clear(c,z,rgb,alpha,depth,&source))failed_=true;
 }
 // GXM receives immutable native descriptors at each draw; there are no GL binding
 // mirrors to invalidate. The GX cache and source generations remain shared.

@@ -1,5 +1,12 @@
 # Select exactly one hardware implementation. The common target has no GL/GXM API.
 get_filename_component(AURORA_VITA_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+# The optional native reader is an allocation failure boundary. Keep exception
+# handling in this leaf source so bad_alloc can return to the original path;
+# the rest of the Vita renderer retains its existing -fno-exceptions policy.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_property(SOURCE ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_native_assets.cpp
+        APPEND PROPERTY COMPILE_OPTIONS -fexceptions)
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/aurora_vita_frontend.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/AuroraVitaRendererSelection.cmake")
 option(AURORA_VITA_WITH_UPSTREAM_GX "Compile the Vita bridge against Aurora's real GX structs (requires AURORA_ENABLE_GX)" OFF)
@@ -67,6 +74,10 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_compact_texture_test.cpp)
     target_link_libraries(aurora_vita_compact_texture_test PRIVATE aurora::vita_common)
     add_test(NAME vita_compact_texture COMMAND aurora_vita_compact_texture_test)
+    add_executable(aurora_vita_texture_snapshots_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_texture_snapshots_test.cpp)
+    target_link_libraries(aurora_vita_texture_snapshots_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_texture_snapshots COMMAND aurora_vita_texture_snapshots_test)
     add_executable(aurora_vita_geometry_recipe_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_geometry_recipe_test.cpp)
     target_link_libraries(aurora_vita_geometry_recipe_test PRIVATE aurora::vita_backend)

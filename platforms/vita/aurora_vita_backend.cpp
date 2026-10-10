@@ -129,8 +129,6 @@ void queue_on_gx_worker(void (*task)(void*), const Args& args) noexcept {
   (void)task; (void)args;
 #endif
 }
-// Last renderer failure observed by the worker, reported by the next begin_frame.
-std::atomic<bool> g_workerFrameFailed{false};
 // Game-thread view of discard_present() for the frame being built.
 bool g_mainDiscardPresent=false;
 struct RuntimeFlagsArgs { uint32_t flags=0; };
@@ -412,7 +410,15 @@ bool initialize(const BackendConfig& c) noexcept {
                   renderWidth,renderHeight,c.width,c.height);
     return false;
   }
-  aurora::vita::render_size::configure(renderWidth,renderHeight,c.width,c.height);
+  const uint32_t efbWidth=c.efb_width?c.efb_width:renderWidth;
+  const uint32_t efbHeight=c.efb_height?c.efb_height:renderHeight;
+  if(efbWidth<renderWidth || efbHeight<renderHeight || efbWidth>2048 || efbHeight>2048) {
+    g_initFailure=InitFailure::RendererInitFailed;
+    std::snprintf(g_initFailureDetail,sizeof(g_initFailureDetail),
+                  "invalid EFB storage %ux%u for raster %ux%u",efbWidth,efbHeight,renderWidth,renderHeight);
+    return false;
+  }
+  aurora::vita::render_size::configure(renderWidth,renderHeight,c.width,c.height,efbWidth,efbHeight);
   gfx::set_texture_decode_diagnostics(c.diagnostics_enabled&&c.texture_decode_diagnostics);
 #if defined(__vita__) && !defined(AURORA_VITA_RENDERER_GXM)
   gfx::configure_program_binary_cache(g_programCachePath.empty()?nullptr:g_programCachePath.c_str());
@@ -526,7 +532,9 @@ bool initialize(const BackendConfig& c) noexcept {
 #endif
   gfx::RendererConfig rc{}; rc.width=c.width; rc.height=c.height;
   rc.renderWidth=renderWidth; rc.renderHeight=renderHeight;
+  rc.efbWidth=efbWidth;rc.efbHeight=efbHeight;
   rc.textureBudget=c.texture_cache_budget;
+  rc.textureSnapshotBudget=c.texture_snapshot_budget;
   rc.displayBuffers=c.vgl_display_buffer_count;
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
@@ -727,23 +735,28 @@ bool begin_frame_now() noexcept {
     g_renderer->clear_current(g_pendingDisplayClear.color,g_pendingDisplayClear.depth,
                               g_pendingDisplayClear.clearRgb,g_pendingDisplayClear.clearAlpha,
                               g_pendingDisplayClear.clearDepth);
+    if(g_renderer->failed()) return false;
     g_pendingDisplayClear.pending=false;
   }
   g_drawSink->begin_frame(g_frame);
   return true;
 }
 struct NoArgs { uint8_t unused=0; };
-void begin_frame_task(void*) { g_workerFrameFailed.store(!begin_frame_now(),std::memory_order_relaxed); }
+void begin_frame_task(void* context) {
+  *static_cast<bool*>(context)=begin_frame_now();
+}
 } // namespace
 
 bool begin_frame() noexcept {
   if(!g_initialized) return false;
   g_mainDiscardPresent=false;
   if(gx_worker_active()) {
-    // A failure is reported one frame late; the worker skips the failed frame's
-    // draws through the renderer's own failed() state meanwhile.
-    queue_on_gx_worker(begin_frame_task,NoArgs{});
-    return !g_workerFrameFailed.load(std::memory_order_relaxed);
+    // A failed previous frame must not reject the new begin while the worker
+    // opens it successfully. Wait for this exact begin result; the subsequent
+    // GX decoding and draw submissions remain asynchronous until end_frame.
+    bool begun=false;
+    aurora::gx::fifo::run_sync(begin_frame_task,&begun);
+    return begun;
   }
   return begin_frame_now();
 }
@@ -834,7 +847,6 @@ void end_frame_now() noexcept {
 }
 void end_frame_task(void*) {
   end_frame_now();
-  g_workerFrameFailed.store(g_renderer->failed(),std::memory_order_relaxed);
 }
 struct ShaderCompileArgs { bool enabled=false; };
 void set_shader_compile_task(void* p) {
@@ -936,6 +948,7 @@ PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* su
   out.producerWaitUs=g_lastProducerWaitUs;out.consumerWaitUs=g_lastConsumerWaitUs;
   out.poolBusyFallbacks=gfx::cpu_pool_busy_fallbacks();
   out.frontend=g_telemetry.frame();out.nativeAssets=gfx::native_asset_stats();
+  if(g_renderer)out.textureSnapshots=g_renderer->textures().snapshot_stats();
   out.frameIndex=g_frame;
   out.frameUs=g_last;
   out.displayQueueLastUs=g_displayQueueLastUs;

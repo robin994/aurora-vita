@@ -483,9 +483,8 @@ struct GXState {
   }
   // Bumped by the decoded register writes that feed populate_pipeline_config, and by nothing else.
   u32 pipelineStateGeneration = next_gx_state_epoch();
-  // Vita: bumped by indexed-array base/size/stride changes. Those feed only the
-  // vertex decode layout, not the translated pipeline, so the Vita DrawSink
-  // rebuilds the layout without retranslating the whole pipeline.
+  // Vita: bumped by VCD/VAT and indexed-array base/size/stride changes. Array
+  // rebinding feeds only the decode layout; VCD/VAT also invalidate pipelines.
   u32 layoutStateGeneration = next_gx_state_epoch();
   // Vita vertex-program state that is consumed by the CPU transform and by the
   // optional fixed-vertex GPU shader, but is not necessarily part of the base
@@ -510,7 +509,14 @@ struct GXState {
   // For state that another register bank writes behind the XF cache's back.
   void invalidateXfReg(u32 reg) { xfRegCacheValid[reg >> 6] &= ~(u64{1} << (reg & 63)); }
 
-  void clearVtxSizeCache() { lastVtxFmt = GX_MAX_VTXFMT; }
+  void clearVtxSizeCache() {
+    lastVtxFmt = GX_MAX_VTXFMT;
+    // VCD/VAT writes change both the FIFO footprint and the decode plan. The
+    // DrawSink keeps that plan across pipeline translations, so invalidating
+    // only lastVtxFmt left it reading the previous vertex format and stride.
+    layoutStateGeneration = next_gx_state_epoch();
+    mark_dirty(StateDomain::Layout);
+  }
 };
 extern GXState g_gxState;
 struct ShaderInfo;

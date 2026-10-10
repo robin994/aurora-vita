@@ -82,7 +82,8 @@ public:
   size_t texture_bytes(gfx::Handle handle) const noexcept;
   bool begin_frame();
   bool begin_frame(const gfx::Color& clearColor, float clearDepth = 1.f);
-  bool clear(const gfx::Color& color, float depth, bool rgb=true, bool alpha=true, bool writeDepth=true);
+  bool clear(const gfx::Color& color, float depth, bool rgb=true, bool alpha=true, bool writeDepth=true,
+             const gfx::Scissor* region=nullptr);
   bool finish(gfx::FinishReason reason=gfx::FinishReason::Explicit);
   gfx::Handle create_target(uint32_t width, uint32_t height, bool depth=true);
   bool bind_target(gfx::Handle handle);

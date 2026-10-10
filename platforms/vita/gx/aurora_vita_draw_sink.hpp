@@ -218,6 +218,7 @@ private:
     gfx::EfbCopyFormat sampleFormat=gfx::EfbCopyFormat::Passthrough;
     uint32_t guestWidth=0,guestHeight=0,rawFormat=0;
     bool ramPending=false;
+    bool syntheticEmpty=false;
   };
   gfx::FlatHashMap<uintptr_t,CopyTextureEntry> copyTextures_{};
   bool initialized_ = false;

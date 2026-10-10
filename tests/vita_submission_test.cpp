@@ -263,6 +263,14 @@ void published_memory() {
       v.frameIndex!=v.budget.staticGeometryHits||v.frameIndex!=v.budget.staticGeometryEntries))torn=true;}
   writer.join();CHECK(!torn&&snapshot.read().frameIndex==9999);
 }
+void performance_without_renderer() {
+  // Startup and failed initialization may sample diagnostics before a native
+  // renderer exists. The texture content index must remain safe in that case.
+  const auto value=aurora::vita::performance_snapshot();
+  CHECK(value.textureSnapshots.entries==0&&value.textureSnapshots.gpuBytes==0);
+  CHECK(value.textureSnapshots.hits==0&&value.textureSnapshots.budget==0);
+  CHECK(aurora::vita::completed_performance_snapshot().textureSnapshots.uploads==0);
+}
 void pipeline_bindings() {
   int vertexA=0,vertexB=0,fragmentA=0,fragmentB=0;
   PipelineBindingState previous{&vertexA,&fragmentA,1,1,1};
@@ -280,6 +288,6 @@ void pipeline_bindings() {
   CHECK(pipeline_setter_count(pipeline_state_changes(previous,next,true))==7);
 }
 }
-int main(){local_batching();shared_lifetimes();revision_identity_skips_payload_comparison();published_copies();pipeline_bindings();
+int main(){performance_without_renderer();local_batching();shared_lifetimes();revision_identity_skips_payload_comparison();published_copies();pipeline_bindings();
   fixed_snapshots();submission_views();composed_statistics();published_memory();
   std::printf("submission: %u checks, %u failures\n",checks,failures);return failures?1:0;}

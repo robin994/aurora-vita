@@ -1,17 +1,20 @@
 #include "vita_native_assets.hpp"
 #include <xxhash.h>
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <new>
 namespace aurora::vita::gfx {
 static_assert(std::endian::native == std::endian::little,
               "AVNR canonical float records require a little-endian host");
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
 namespace {
 constexpr uint32_t Magic=0x524e5641,Version=1,Limit=16*1024*1024;
-NativeAssetReader sReader=nullptr;void* sContext=nullptr;NativeAssetStats sStats{};
+NativeAssetReader sReader=nullptr;void* sContext=nullptr;
+struct AtomicStats {std::atomic<uint64_t> textureHits{0},geometryHits{0},misses{0},rejected{0},allocationFailures{0};} sStats;
 void word(std::vector<uint8_t>& b,uint32_t v){for(unsigned i=0;i<4;++i)b.push_back(uint8_t(v>>(8*i)));}
 void span(std::vector<uint8_t>& b,const void* p,size_t n){if(n){const auto* d=static_cast<const uint8_t*>(p);b.insert(b.end(),d,d+n);}}
 struct Input {
@@ -63,14 +66,26 @@ std::vector<uint8_t> record_payload(const std::vector<uint8_t>& req,uint32_t typ
   if(!in.ok||in.pos!=record.size()||magic!=Magic||version!=Version||kind!=type||sourceBytes!=req.size()||
       !payloadBytes||payloadBytes>Limit||std::memcmp(source,req.data(),sourceBytes)||
       XXH64(payload,payloadBytes,0)!=checksum) {++sStats.rejected;return {};}
-  return {payload,payload+payloadBytes};
+  // The reader already owns the complete verified record. Keep that allocation
+  // and remove the prefix in place: duplicating a 4 MiB payload here exhausted
+  // the Vita application heap during race loading despite free system RAM.
+  record.erase(record.begin(),record.begin()+size_t(payload-record.data()));
+  return record;
 }
 }
-void configure_native_assets(NativeAssetReader reader,void* context) noexcept {sReader=reader;sContext=context;sStats={};}
-NativeAssetStats native_asset_stats() noexcept {return sStats;}
+void configure_native_assets(NativeAssetReader reader,void* context) noexcept {
+  sReader=reader;sContext=context;
+  sStats.textureHits=0;sStats.geometryHits=0;sStats.misses=0;sStats.rejected=0;
+  sStats.allocationFailures=0;
+}
+NativeAssetStats native_asset_stats() noexcept {
+  return {sStats.textureHits.load(std::memory_order_relaxed),sStats.geometryHits.load(std::memory_order_relaxed),
+          sStats.misses.load(std::memory_order_relaxed),sStats.rejected.load(std::memory_order_relaxed),
+          sStats.allocationFailures.load(std::memory_order_relaxed)};
+}
 std::vector<uint8_t> native_texture_request(const TextureDesc& d) {
   if(!d.data||!d.dataSize||d.dataSize>Limit||d.paletteSize>65536||(!d.palette&&d.paletteSize))return {};
-  std::vector<uint8_t> req;req.reserve(32+d.dataSize+d.paletteSize);
+  std::vector<uint8_t> req;req.reserve(36+d.dataSize+d.paletteSize);
   for(uint32_t v:{1u,d.width,d.height,unsigned(d.format),unsigned(d.paletteFormat),unsigned(d.mipCount),unsigned(d.generateMipmaps),unsigned(d.dataSize),unsigned(d.paletteSize)})word(req,v);
   span(req,d.data,d.dataSize);span(req,d.palette,d.paletteSize);return req;
 }
@@ -99,12 +114,15 @@ bool read_native_blob(const char* path,std::vector<uint8_t>& bytes,size_t limit)
   if(bytes.empty()||bytes.size()>limit){bytes.clear();return false;}
   return true;
 }
-bool compile_native_asset(const std::vector<uint8_t>& req,std::vector<uint8_t>& record,bool includeRgba) {
+bool compile_native_asset(const std::vector<uint8_t>& req,std::vector<uint8_t>& record,bool allowBc1,bool includeRgba) {
   record.clear();if(req.empty()||req.size()>Limit)return false;
   std::vector<uint8_t> payload;const uint32_t type=req[0];
   if(type==1) {
     TextureDesc desc;if(!texture_input(req,desc))return false;
-    auto out=gxm::prepare_texture_upload(desc,true,true);
+    auto out=gxm::prepare_texture_upload(desc,true,allowBc1);
+    // RGBA is also a native GXM upload. Paletted/RGB5A3/CMPR images which
+    // cannot be represented exactly in a compact format must be decoded here
+    // on the build host, rather than on the console at each cold upload.
     if(!out.ok()||(!includeRgba&&out.format==NativeTextureFormat::Rgba8))return false;
     for(uint32_t v:{unsigned(out.format),out.stride,out.mipCount,unsigned(out.swizzled)})word(payload,v);
     span(payload,out.pixels.data(),out.pixels.size());
@@ -126,7 +144,7 @@ bool compile_native_asset(const std::vector<uint8_t>& req,std::vector<uint8_t>& 
   for(uint32_t v:{Magic,Version,type,unsigned(req.size()),unsigned(payload.size()),uint32_t(checksum),uint32_t(checksum>>32)})word(record,v);
   span(record,req.data(),req.size());span(record,payload.data(),payload.size());return true;
 }
-bool load_native_texture(const TextureDesc& desc,gxm::CompactTextureData& out,bool allowBc1) noexcept {
+bool load_native_texture(const TextureDesc& desc,gxm::CompactTextureData& out,bool allowBc1) noexcept try {
   if(!sReader||!desc.immutableSource)return false;
   auto payload=record_payload(native_texture_request(desc),1);if(payload.empty())return false;
   Input in{payload};const auto fmt=in.word(),stride=in.word(),mips=in.word(),swizzled=in.word();
@@ -141,11 +159,16 @@ bool load_native_texture(const TextureDesc& desc,gxm::CompactTextureData& out,bo
     expected+=fmt==unsigned(NativeTextureFormat::Bc1)?dxt1_texture_size(w,h):size_t(swizzled?w:(w+7u)&~7u)*h*bpp;
   }
   if(!in.ok||payload.size()-in.pos!=expected)return false;
+  // Move the same reader-owned allocation through to GXM's prepared upload.
+  // Removing the 16-byte native header needs no second large pixel buffer.
+  payload.erase(payload.begin(),payload.begin()+in.pos);
   out={};out.format=NativeTextureFormat(fmt);out.stride=stride;out.mipCount=mips;out.swizzled=swizzled;
-  out.pixels.assign(payload.data()+in.pos,payload.data()+payload.size());++sStats.textureHits;return true;
+  out.pixels=std::move(payload);++sStats.textureHits;return true;
+} catch(const std::bad_alloc&) {
+  ++sStats.allocationFailures;return false;
 }
 bool load_native_geometry(const uint8_t* raw,size_t bytes,uint32_t count,SourcePrimitive primitive,
-                          const VertexDecodeLayout& layout,PreparedDraw& out) noexcept {
+                          const VertexDecodeLayout& layout,PreparedDraw& out) noexcept try {
   if(!sReader||primitive>SourcePrimitive::TriangleFan)return false;
   auto payload=record_payload(native_geometry_request(raw,bytes,count,primitive,layout),2);if(payload.empty())return false;
   Input in{payload};const size_t vertices=in.word(),indices=in.word();
@@ -155,5 +178,7 @@ bool load_native_geometry(const uint8_t* raw,size_t bytes,uint32_t count,SourceP
   std::memcpy(out.vertices.data(),v,vertices*168);
   for(size_t i=0;i<indices;++i){const auto* p=in.span(2);if(!p)return false;out.indices[i]=uint16_t(p[0])|(uint16_t(p[1])<<8);if(out.indices[i]>=vertices)return false;}
   out.primitive=Primitive::Triangles;out.error=PrepareDrawError::None;++sStats.geometryHits;return true;
+} catch(const std::bad_alloc&) {
+  ++sStats.allocationFailures;return false;
 }
 } // namespace aurora::vita::gfx

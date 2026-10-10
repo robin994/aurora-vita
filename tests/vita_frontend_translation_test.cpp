@@ -4,6 +4,8 @@
 #include "aurora_vita_backend.hpp"
 #include "../lib/gx/command_processor.hpp"
 #include "../lib/gx/fifo.hpp"
+#include "../lib/vita/render_size.hpp"
+#include <dolphin/vi.h>
 #include <array>
 #include <bit>
 #include <atomic>
@@ -23,6 +25,39 @@ using namespace aurora::vita;
 unsigned failures=0,checks=0;
 #undef CHECK
 #define CHECK(x) do {++checks;if(!(x)){++failures;std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);}} while(0)
+void visible_raster_and_scratch_efb() {
+  GXRenderModeObj mode{};mode.fbWidth=608;mode.efbHeight=456;mode.xfbHeight=456;
+  VIConfigure(&mode);
+  auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+  aurora::vita::render_size::configure(960,544,960,544);
+  const aurora::gfx::Viewport visible{0,0,608,456,0,1};
+  const auto before=aurora::gx::map_logical_viewport(visible);
+  const auto clipped=aurora::gx::map_logical_scissor({0,456,32,32});
+  CHECK(clipped.height==0);
+  aurora::vita::render_size::configure(960,544,960,544,1024,640);
+  const auto after=aurora::gx::map_logical_viewport(visible);
+  CHECK(after==before);CHECK(after.width==960 && after.height==544);
+  const auto copy=aurora::gx::map_logical_scissor({0,456,32,32});
+  CHECK(copy.x==0 && copy.y==544 && copy.width==51 && copy.height==39);
+  const auto second=aurora::gx::map_logical_scissor({32,456,32,32});
+  CHECK(second.x==50 && second.y==544 && second.width==52 && second.height==39);
+  CHECK(copy.y+copy.height<=640 && second.x+second.width<=1024);
+  // Drawing and copying use the same mapping; the previous synthetic zero
+  // texture never represented these valid GX light-map pixels.
+  g.logicalViewport={0,456,32,32,0,1};g.logicalScissor={0,456,32,32};
+  const auto draw=aurora::gx::map_logical_render_state();
+  CHECK(draw.scissor==copy);CHECK(draw.viewport.top==544 && draw.viewport.height>38);
+  const auto display=aurora::gx::map_logical_scissor({0,0,608,456});
+  CHECK(display.x==0 && display.y==0 && display.width==960 && display.height==544);
+  const auto partial=aurora::gx::map_logical_scissor({600,450,1,1});
+  CHECK(partial.x==947 && partial.y==536 && partial.width==2 && partial.height==3);
+  // Native launcher coordinates and a following title initialization retain
+  // their original behavior; scratch storage is opt-in per consumer.
+  g.viewportPolicy=AURORA_VIEWPORT_NATIVE;
+  CHECK(aurora::gx::map_logical_scissor({0,456,32,32})==aurora::gfx::ClipRect(0,456,32,32));
+  aurora::vita::render_size::configure(960,544,960,544);VIConfigure(nullptr);
+  g=aurora::gx::GXState{};
+}
 void pooled_snapshot_transitions() {
   using gfx::FixedUniformPool;
   for(size_t budget:{size_t(0),sizeof(gfx::FixedVertexUniforms),FixedUniformPool::MaxRetainedBytes}) {
@@ -216,6 +251,61 @@ void xf_equal_position_writes_oracle() {
   set_xf_equal_position_writes(false);
   CHECK(xf_equal_position_stats().inspected==0);
 }
+void cp_vertex_layout_transitions() {
+  // Real CP writes must invalidate a cached decode layout, even when the VAT
+  // number stays at zero. Dropping an attribute or shortening its scalar type
+  // previously kept the old stride and rejected every subsequent draw.
+  struct Write {uint8_t reg;uint32_t changed;uint32_t original;};
+  const std::array<Write,5> writes{{
+      {0x50,1u<<9,(1u<<9)|(1u<<13)}, // VCD low: remove CLR0.
+      {0x60,(1u<<2)|(1u<<10),1u|(1u<<2)|(1u<<10)}, // VCD high: remove TEX0.
+      {0x70,1u|(3u<<1)|(5u<<14)|(1u<<21)|(4u<<22),
+            1u|(4u<<1)|(1u<<13)|(5u<<14)|(1u<<21)|(4u<<22)}, // VAT A: XYZ S16.
+      {0x80,1u|(3u<<1),1u|(4u<<1)}, // VAT B: TEX1 ST S16.
+      {0x90,(1u<<5)|(3u<<6),(1u<<5)|(4u<<6)}, // VAT C: TEX5 ST S16.
+  }};
+  for(const auto& [reg,value,original]:writes) {
+    auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+    aurora::gx::fifo::reset_cp_register_cache();
+    g.proj.m0={1,0,0,0};g.proj.m1={0,1,0,0};g.proj.m2={0,0,1,0};g.proj.m3={0,0,0,1};
+    g.pnMtx[0].pos.m0={1,0,0,0};g.pnMtx[0].pos.m1={0,1,0,0};g.pnMtx[0].pos.m2={0,0,1,0};
+    g.renderViewport={0,0,960,544,0,1};g.logicalViewport=g.renderViewport;
+    g.renderScissor={0,0,960,544};g.logicalScissor=g.renderScissor;
+    for(auto attr:{GX_VA_POS,GX_VA_CLR0,GX_VA_TEX0,GX_VA_TEX1,GX_VA_TEX5})g.vtxDesc[attr]=GX_DIRECT;
+    g.vtxFmts[0].attrs[GX_VA_POS]={GX_POS_XYZ,GX_F32,0};
+    g.vtxFmts[0].attrs[GX_VA_CLR0]={GX_CLR_RGBA,GX_RGBA8,0};
+    for(auto attr:{GX_VA_TEX0,GX_VA_TEX1,GX_VA_TEX5})g.vtxFmts[0].attrs[attr]={GX_TEX_ST,GX_F32,0};
+    gfx::Renderer renderer;CHECK(renderer.initialize());renderer.begin_frame();
+    gfx::Telemetry telemetry;telemetry.begin_frame(0);
+    gxbridge::DrawSink sink;gxbridge::DrawSinkConfig config{};config.telemetry=&telemetry;
+    CHECK(sink.initialize(renderer,config));sink.begin_frame(0);
+    const auto submit=[&] {
+      const auto layout=gxbridge::translate_current_vertex_layout(0);
+      std::vector<uint8_t> raw(size_t(layout.streamStride)*4,0);
+      const auto result=sink.submit(GX_QUADS,0,raw.data(),raw.size(),4);
+      CHECK(result.ok);CHECK(result.drawError==gfx::PrepareDrawError::None);
+      if(result.ok)g.stateDirty=false;
+    };
+    submit();const auto generation=g.layoutStateGeneration;
+    const auto translations=telemetry.frame().counters.layoutTranslations;
+    std::array<uint8_t,6> cp{0x08,reg,uint8_t(value>>24),uint8_t(value>>16),uint8_t(value>>8),uint8_t(value)};
+    aurora::gx::fifo::process(cp.data(),cp.size(),true);
+    CHECK(g.layoutStateGeneration!=generation);
+    submit();CHECK(telemetry.frame().counters.layoutTranslations==translations+1);
+    // A duplicate register packet must not cause another layout translation.
+    const auto after=g.layoutStateGeneration;
+    aurora::gx::fifo::process(cp.data(),cp.size(),true);submit();
+    CHECK(g.layoutStateGeneration==after);
+    CHECK(telemetry.frame().counters.layoutTranslations==translations+1);
+    // Growing the layout again must also rebuild it. A stale shorter layout
+    // can accept a draw while silently reading the wrong vertex boundaries.
+    cp={0x08,reg,uint8_t(original>>24),uint8_t(original>>16),uint8_t(original>>8),uint8_t(original)};
+    aurora::gx::fifo::process(cp.data(),cp.size(),true);submit();
+    CHECK(g.layoutStateGeneration!=after);
+    CHECK(telemetry.frame().counters.layoutTranslations==translations+2);
+    sink.flush();sink.shutdown();renderer.shutdown();
+  }
+}
 void state_transitions() {
   using aurora::gx::StateDomain;
   auto& g=aurora::gx::g_gxState;
@@ -385,6 +475,10 @@ void completed_frame_does_not_fence() {
   shutdown();CHECK(!completed_performance_snapshot().completedFrame);CHECK(!completed_memory_snapshot().completedFrame);
   BackendConfig invalid=config;invalid.render_width=invalid.width+1;
   CHECK(!initialize(invalid));CHECK(!completed_memory_snapshot().completedFrame);
+  invalid=config;invalid.efb_width=config.width-1;
+  CHECK(!initialize(invalid));
+  invalid=config;invalid.efb_height=2049;
+  CHECK(!initialize(invalid));
   CHECK(initialize(config));CHECK(!completed_memory_snapshot().completedFrame);
   CHECK(begin_frame());end_frame();CHECK(completed_memory_snapshot().frameIndex==1);
   shutdown();CHECK(!completed_memory_snapshot().completedFrame);
@@ -641,5 +735,5 @@ void async_view_markers_preserve_fifo_order() {
 }
 
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();async_view_markers_preserve_fifo_order();
+int main(){visible_raster_and_scratch_efb();pooled_snapshot_transitions();layouts();fragment_updates();cp_vertex_layout_transitions();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();async_view_markers_preserve_fifo_order();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

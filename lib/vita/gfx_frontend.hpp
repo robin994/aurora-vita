@@ -207,6 +207,9 @@ struct TextureBind {
 inline Vec2<uint32_t> get_render_target_size() noexcept {
   return {vita::render_size::g_renderWidth,vita::render_size::g_renderHeight};
 }
+inline Vec2<uint32_t> get_efb_storage_size() noexcept {
+  return {vita::render_size::g_efbWidth,vita::render_size::g_efbHeight};
+}
 inline Vec2<uint32_t> get_frame_buffer_size() noexcept {
   return {vita::render_size::g_frameWidth,vita::render_size::g_frameHeight};
 }

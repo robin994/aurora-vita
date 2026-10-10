@@ -2,6 +2,7 @@
 #include "vita_gfx_types.hpp"
 #include "vita_native_fwd.hpp"
 #include "vita_hash_map.hpp"
+#include "vita_texture_snapshots.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -15,6 +16,9 @@ public:
   size_t invalidate_source_range(uint64_t start,size_t bytes) noexcept;
   size_t bytes()const noexcept{return bytes_;}size_t entries()const noexcept{return byKey_.size();}
   void set_exact_bc1(bool enabled) noexcept {exactBc1_=enabled;}
+  // Configure at renderer construction, before any GPU texture is uploaded.
+  void set_snapshot_budget(size_t budget) noexcept {snapshots_.configure(budget);}
+  TextureSnapshotStats snapshot_stats() const noexcept {return snapshots_.stats();}
   size_t budget() const noexcept{return budget_;}
   size_t high_water_bytes() const noexcept{return highWaterBytes_;}
   uint64_t evictions() const noexcept{return evictions_;}
@@ -26,6 +30,7 @@ public:
 private:
   friend class Renderer;
   bool exactBc1_=false;
+  TextureSnapshots snapshots_;
 #if defined(AURORA_VITA_RENDERER_GXM)
   gxm::Renderer* native_=nullptr;
 #endif
