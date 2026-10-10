@@ -539,6 +539,9 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
   rc.nativeFragmentPrepareCache=c.gxm_fragment_prepare_cache;
+#if defined(MKW_TARGET_VITA)
+  rc.nativeSampleDrawTimings=c.gxm_render_budget_probe;
+#endif
   rc.nativeVertexUniformDelta=c.gxm_uniform_delta_upload;
   rc.nativeTevA4Mask=c.gxm_a4_fragment_opt;
   rc.residentGeometryInCdram=c.resident_geometry_cdram;rc.exactBc1=c.exact_bc1;
@@ -700,6 +703,9 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.staticGeometryStableOnly=c.static_geometry_stable_only;
   dc.allowLitFixedVertexGpu=c.gxm_lit_fixed_vertex_gpu;
   dc.localDrawBatching=g_config.gxm_local_draw_batching;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  dc.renderBudgetProbe=c.gxm_render_budget_probe;
+#endif
   dc.immediateDrawView=c.gxm_immediate_draw_view;
   dc.allowStreamedFixedVertexGpu=c.gxm_streamed_fixed_vertex_gpu;
   dc.allowDynamicTexMatrixGpu=c.gxm_dynamic_tex_matrix_gpu;
@@ -823,6 +829,26 @@ void end_frame_now() noexcept {
     g_telemetry.end_frame(g_last);
   }
   ++g_frame;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  if(g_config.gxm_render_budget_probe&&(g_frame<=4 || (g_frame%32)==0)) {
+    const auto& s=g_renderer->stats();
+    std::fprintf(stderr,
+        "[wic-render-budget] frame=%llu worker_frame_us=%llu native_draws=%u sampled=%u "
+        "pipeline_us=%llu texture_us=%llu draw_us=%llu display_queue_us=%llu "
+        "native_efb=%u native_efb_scene_us=%llu native_efb_transfer_us=%llu "
+        "native_finish=%u\n",
+        static_cast<unsigned long long>(g_frame),
+        static_cast<unsigned long long>(g_last),s.drawCalls,unsigned(s.nativeTimingsSampled),
+        static_cast<unsigned long long>(s.nativePipelineUs),
+        static_cast<unsigned long long>(s.nativeTextureUs),
+        static_cast<unsigned long long>(s.nativeDrawUs),
+        static_cast<unsigned long long>(s.nativeDisplayQueueAddUs),
+        s.nativeEfbCopies,
+        static_cast<unsigned long long>(s.nativeEfbEndSceneUs),
+        static_cast<unsigned long long>(s.nativeEfbTransferSubmitUs),
+        s.nativeFinishCalls);
+  }
+#endif
   if(g_config.diagnostics_enabled) {
     g_lastFifoProfile=gfx::fifo_profile_take();
 #if defined(MKW_TARGET_VITA)

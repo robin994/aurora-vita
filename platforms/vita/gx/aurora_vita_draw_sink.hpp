@@ -62,6 +62,9 @@ struct DrawSinkConfig {
   bool staticGeometryStableOnly = false;
   bool allowLitFixedVertexGpu = false;
   bool localDrawBatching = false;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  bool renderBudgetProbe = false;
+#endif
   bool immediateDrawView = false;
   bool allowStreamedFixedVertexGpu = false;
   bool allowDynamicTexMatrixGpu = false;
@@ -215,6 +218,11 @@ private:
   uint32_t frameDynamicCopyFallbackDraws_ = 0;
   uint32_t frameBatchedDraws_ = 0;
   uint64_t frameStartSubmittedDraws_ = 0;
+  bool renderBudgetProbe_ = false;
+  uint32_t frameEfbCopyCalls_ = 0;
+  uint64_t frameEfbFlushUs_ = 0;
+  uint64_t frameEfbCaptureUs_ = 0;
+  uint64_t frameEfbClearUs_ = 0;
 #endif
   struct CopyTextureEntry {
     gfx::Handle handle=gfx::InvalidHandle;

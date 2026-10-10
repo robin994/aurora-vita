@@ -451,6 +451,9 @@ bool Renderer::initialize() noexcept {
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
   c.d16Depth=cfg_.nativeD16Depth;
   c.fragmentPrepareCache=cfg_.nativeFragmentPrepareCache;
+#if defined(MKW_TARGET_VITA)
+  c.sampleDrawTimings=cfg_.nativeSampleDrawTimings;
+#endif
   c.vertexUniformDelta=cfg_.nativeVertexUniformDelta;
   c.tevA4Mask=cfg_.nativeTevA4Mask;
   c.residentGeometryInCdram=cfg_.residentGeometryInCdram;c.exactBc1=cfg_.exactBc1;

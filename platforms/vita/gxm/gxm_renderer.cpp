@@ -1255,7 +1255,14 @@ bool Renderer::begin_frame() {
   if(d.diagnosticsEnabled)++d.diagFrameCounter;
   d.stats.nativeFragmentPrepareHits=d.fragmentPrepareHits;
   d.stats.nativeFragmentPrepareMisses=d.fragmentPrepareMisses;
-  d.profileDraws = d.diagnosticsEnabled&&(++d.profileFrame % 120u) == 60u;
+  const uint64_t profileFrame=++d.profileFrame;
+  d.profileDraws = d.diagnosticsEnabled&&(profileFrame % 120u) == 60u;
+#if defined(MKW_TARGET_VITA)
+  // Opt-in sparse sampling with all other expensive diagnostic machinery off.
+  // Every 32nd frame can be excluded from steady-state FPS comparisons.
+  if(d.config.sampleDrawTimings && profileFrame%32u==0)
+    d.profileDraws=true;
+#endif
   d.stats.nativeTimingsSampled=d.profileDraws;
   d.frameActive = true; d.boundTarget = 0;
   return true;
@@ -1813,7 +1820,11 @@ bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
   if(gxm_disabled(GxmDiagDrawGpu)) d.diag_draw_gpu(packet,p);
   pi->second->inFlight = true; active->inFlight = true;
   vi->second.inFlight = true; ii->second.inFlight = true;
-  if(d.diagnosticsEnabled) {
+  bool countNativeDraws=d.diagnosticsEnabled;
+#if defined(MKW_TARGET_VITA)
+  countNativeDraws=countNativeDraws||d.config.sampleDrawTimings;
+#endif
+  if(countNativeDraws) {
     ++d.stats.drawCalls;
     d.stats.triangles += pipeline.primitive == Primitive::Triangles ? packet.indexCount / 3 : packet.indexCount - 2;
   }
@@ -1890,7 +1901,7 @@ bool Renderer::end_frame(bool present) {
       d.sceneWindowSum=0;d.sceneWindowFrames=0;
     }
   }
-  if (d.profileDraws) log_memory_state("profile-frame");
+  if (d.profileDraws && d.diagnosticsEnabled) log_memory_state("profile-frame");
   return true;
 }
 

@@ -200,6 +200,8 @@ struct BackendConfig {
   bool gxm_d16_depth=false;
   // Adjacent streamed triangles only; hardware A/B before enabling in a port.
   bool gxm_local_draw_batching=false;
+  // Sampling is opt-in and scoped to the WiiCompiled GXM backend.
+  bool gxm_render_budget_probe=false;
   // Native GXM render-target scene budget. Gameplay telemetry should stay below
   // this in steady state; Strikers currently averages ~2.4 and peaks at 3.
   uint32_t gxm_scenes_per_frame=5;

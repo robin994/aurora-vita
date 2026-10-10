@@ -22,6 +22,9 @@ struct Config {
   bool waitVblank = true;
   bool d16Depth = false;
   bool fragmentPrepareCache = false;
+#if defined(MKW_TARGET_VITA)
+  bool sampleDrawTimings = false;
+#endif
   // A3 experimental indexed-PN uniform delta. Default OFF on all consumers.
   bool vertexUniformDelta = false;
   // A4 native arithmetic TEV: bit0 identical TEX/TEXCOORD fetch sharing,

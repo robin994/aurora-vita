@@ -27,6 +27,9 @@ struct RendererConfig {
   size_t nativeCdramReserveBytes=8*1024*1024;
   bool nativeD16Depth=false;
   bool nativeFragmentPrepareCache=false;
+#if defined(MKW_TARGET_VITA)
+  bool nativeSampleDrawTimings=false;
+#endif
   bool nativeVertexUniformDelta=false;
   uint8_t nativeTevA4Mask=0;
   bool residentGeometryInCdram=false,exactBc1=false;
