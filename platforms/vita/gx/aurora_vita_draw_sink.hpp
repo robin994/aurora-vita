@@ -219,6 +219,7 @@ private:
   uint32_t frameBatchedDraws_ = 0;
   uint64_t frameStartSubmittedDraws_ = 0;
   bool renderBudgetProbe_ = false;
+  bool renderBudgetFrame_ = false;
   uint32_t frameEfbCopyCalls_ = 0;
   uint64_t frameEfbFlushUs_ = 0;
   uint64_t frameEfbCaptureUs_ = 0;

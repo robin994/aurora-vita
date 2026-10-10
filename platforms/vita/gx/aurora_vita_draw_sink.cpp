@@ -22,11 +22,28 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM) && !defined(__vita__)
+#include <chrono>
+#endif
 #if defined(__vita__)
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/processmgr.h>
 #endif
 
 namespace aurora::vita::gxbridge {
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+namespace {
+uint64_t render_budget_now_us() noexcept {
+#if defined(__vita__)
+  return sceKernelGetProcessTimeWide();
+#else
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
+#endif
+}
+}
+#endif
 
 gfx::MemoryBudgetSnapshot DrawSink::memory_budget() const noexcept {
   if (!renderer_ || !arena_) return {};
@@ -187,6 +204,9 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
   frameBatchedDraws_=0;
   frameEfbCopyCalls_=0;
   frameEfbFlushUs_=frameEfbCaptureUs_=frameEfbClearUs_=0;
+  // Frame indices start at zero; the GXM sampler records completed frames
+  // 32, 64, ... (and the first four for startup sanity).
+  renderBudgetFrame_=renderBudgetProbe_ && (frame<4 || (frame%32)==31);
 #endif
   stream_.reset();
   frameDrawIndex_ = 0;
@@ -421,7 +441,7 @@ void log_large_draw_geometry(const gfx::PreparedDraw& prepared,const gfx::Vertex
 bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   if (!initialized_ || !renderer_ || !dest) return false;
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
-  const uint64_t startProbe=renderBudgetProbe_?gfx::telemetry_now_us():0;
+  const uint64_t startProbe=renderBudgetFrame_?render_budget_now_us():0;
   if(renderBudgetProbe_)++frameEfbCopyCalls_;
 #endif
   resolvedTextureBindingsValid_=false;
@@ -430,8 +450,8 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   // GXCopyTex is an ordering boundary: all draws before it must hit the source EFB.
   flush();
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
-  const uint64_t afterFlushProbe=renderBudgetProbe_?gfx::telemetry_now_us():0;
-  if(renderBudgetProbe_)frameEfbFlushUs_+=afterFlushProbe-startProbe;
+  const uint64_t afterFlushProbe=renderBudgetFrame_?render_budget_now_us():0;
+  if(renderBudgetFrame_)frameEfbFlushUs_+=afterFlushProbe-startProbe;
 #endif
   const auto& g = aurora::gx::g_gxState;
   gfx::Scissor src{};
@@ -560,8 +580,8 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
     h=renderer_->capture_current(oldHandle, src, dstW, dstH, physicalFormat, physicalFlipX, physicalFlipY);
   }
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
-  const uint64_t afterCaptureProbe=renderBudgetProbe_?gfx::telemetry_now_us():0;
-  if(renderBudgetProbe_)frameEfbCaptureUs_+=afterCaptureProbe-afterFlushProbe;
+  const uint64_t afterCaptureProbe=renderBudgetFrame_?render_budget_now_us():0;
+  if(renderBudgetFrame_)frameEfbCaptureUs_+=afterCaptureProbe-afterFlushProbe;
 #endif
   if (!h) {
 #if defined(__vita__) && !defined(AURORA_VITA_UPSTREAM_STUB)
@@ -627,7 +647,7 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
 #endif
   }
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
-  if(renderBudgetProbe_)frameEfbClearUs_+=gfx::telemetry_now_us()-afterCaptureProbe;
+  if(renderBudgetFrame_)frameEfbClearUs_+=render_budget_now_us()-afterCaptureProbe;
 #endif
   return true;
 }

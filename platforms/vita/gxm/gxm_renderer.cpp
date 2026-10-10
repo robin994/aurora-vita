@@ -54,6 +54,25 @@ inline void watch_kernel_operation(uint32_t) noexcept {}
 inline uint64_t diagnostic_now_us() noexcept {
   return runtime_diagnostics_enabled()?sceKernelGetProcessTimeWide():0;
 }
+// The quiet WiiCompiled probe takes a timestamp only on sampled GXM phases.
+// The normal diagnostic clock intentionally returns zero in quiet mode.
+inline uint64_t sampled_now_us(bool sampled) noexcept {
+  return sampled ? sceKernelGetProcessTimeWide() : diagnostic_now_us();
+}
+#if defined(MKW_TARGET_VITA)
+void log_resource_sync_sample(const char* type,uint64_t handle,size_t bytes,
+                              uint32_t width,uint32_t height) noexcept {
+  // Sampling one release in an exponential series distinguishes target churn
+  // from pipeline/buffer eviction without flooding the 1-FPS device log.
+  static uint64_t releases=0;
+  const uint64_t n=++releases;
+  if(n>12 && (n&(n-1))!=0)return;
+  std::fprintf(stderr,
+      "[wic-resource-sync] n=%llu type=%s handle=%llu bytes=%zu width=%u height=%u\n",
+      static_cast<unsigned long long>(n),type,
+      static_cast<unsigned long long>(handle),bytes,width,height);
+}
+#endif
 struct DisplayRequest {
   void* address;
   uint32_t width, height, stride;
@@ -1263,6 +1282,7 @@ bool Renderer::begin_frame() {
   if(d.config.sampleDrawTimings && profileFrame%32u==0)
     d.profileDraws=true;
 #endif
+  if(d.profileDraws && !d.frameStarted)d.frameStarted=sampled_now_us(true);
   d.stats.nativeTimingsSampled=d.profileDraws;
   d.frameActive = true; d.boundTarget = 0;
   return true;
@@ -1722,18 +1742,18 @@ bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
       return true;
     }
   }
-  uint64_t profileTick = d.profileDraws ? diagnostic_now_us() : 0;
+  uint64_t profileTick = d.profileDraws ? sampled_now_us(true) : 0;
   d.resolvedPipelineHint=active;d.resolvedPipelineHintKey=activeKey;
   const bool pipelineBound=bind_pipeline(activeKey,packet.gpu_uniforms(),packet.scissor,packet.fixedVertexUniforms,&packet.texture_bindings(),
                                          packet.vertexUniformRevision,packet.fragmentUniformRevision,
                                          packet.textureBindingRevision);
   d.resolvedPipelineHint=nullptr;d.resolvedPipelineHintKey=0;
   if(!pipelineBound) return false;
-  if(d.profileDraws) { const auto now=diagnostic_now_us(); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }
+  if(d.profileDraws) { const auto now=sampled_now_us(true); d.stats.nativePipelineUs+=now-profileTick; profileTick=now; }
   for(unsigned i=0;i<MaxTextures;++i) if(p.textureMask&(1u<<i))
     if(!bind_texture(packet.texture_bindings()[i].texture,i,packet.texture_bindings()[i].sampler,
                      (pipeline.nativeTextureWrapMask&(1u<<i))!=0)) return false;
-  if(d.profileDraws) { const auto now=diagnostic_now_us(); d.stats.nativeTextureUs+=now-profileTick; profileTick=now; }
+  if(d.profileDraws) { const auto now=sampled_now_us(true); d.stats.nativeTextureUs+=now-profileTick; profileTick=now; }
   if(!d.viewportValid||!same_viewport(d.cachedViewport,vp)) {
     const float low = std::min(vp.znear, vp.zfar), high = std::max(vp.znear, vp.zfar);
     sceGxmSetViewport(d.context, vp.x + vp.width * .5f, vp.width * .5f,
@@ -1816,7 +1836,7 @@ bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
     }
     viewTrace.draw(row);
   }
-  if(d.profileDraws) d.stats.nativeDrawUs+=diagnostic_now_us()-profileTick;
+  if(d.profileDraws) d.stats.nativeDrawUs+=sampled_now_us(true)-profileTick;
   if(gxm_disabled(GxmDiagDrawGpu)) d.diag_draw_gpu(packet,p);
   pi->second->inFlight = true; active->inFlight = true;
   vi->second.inFlight = true; ii->second.inFlight = true;
@@ -1834,19 +1854,19 @@ bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
 bool Renderer::end_frame(bool present) {
   auto& d = *impl_;
   if (!d.frameActive) return d.fail("end_frame outside a frame");
-  const uint64_t timingStart=diagnostic_now_us();
+  const uint64_t timingStart=sampled_now_us(d.profileDraws);
   if (!d.end_scene()) return false;
-  const uint64_t afterEnd=diagnostic_now_us();
+  const uint64_t afterEnd=sampled_now_us(d.profileDraws);
   d.frameActive = false;
   auto& surface = d.surfaces[d.back];
   if (present) {
     const DisplayRequest request{surface.memory.data(), d.config.width, d.config.height, d.stride, d.config.waitVblank, &d.displayError};
-    const uint64_t queueStarted=diagnostic_now_us();
+    const uint64_t queueStarted=sampled_now_us(d.profileDraws);
     watch_kernel_operation(5);
     const int displayResult=sceGxmDisplayQueueAddEntry(d.surfaces[d.front].sync, surface.sync, &request);
     watch_kernel_operation(0);
     if (!d.check(displayResult, "queue present")) return false;
-    const uint64_t queueFinished=diagnostic_now_us();
+    const uint64_t queueFinished=sampled_now_us(d.profileDraws);
     d.stats.nativeDisplayQueueAddUs=queueFinished-queueStarted;
     d.displayed = true; d.front = d.back; d.back = (d.back + 1) % d.config.displayBuffers;
   } else {
@@ -1854,7 +1874,7 @@ bool Renderer::end_frame(bool present) {
     // same offscreen surface can become the next scene's target.
     if(!finish(FinishReason::FrameDiscard)) return false;
   }
-  const uint64_t afterQueue=diagnostic_now_us();
+  const uint64_t afterQueue=sampled_now_us(d.profileDraws);
   static uint64_t presentCount=0;
   const uint64_t count=++presentCount;
   if(present && (count<=8 || (count&(count-1))==0))
@@ -1863,7 +1883,7 @@ bool Renderer::end_frame(bool present) {
       static_cast<unsigned long long>(afterEnd-timingStart),
       static_cast<unsigned long long>(afterQueue-afterEnd),
       static_cast<unsigned long long>(afterQueue-timingStart));
-  d.stats.cpuFrameUs = diagnostic_now_us() - d.frameStarted;
+  d.stats.cpuFrameUs = sampled_now_us(d.profileDraws) - d.frameStarted;
   // Includes synchronizations issued between frames (resource destruction).
   d.stats.nativeFinishReasonCalls=d.finishReasonCalls;d.stats.nativeFinishReasonWaitUs=d.finishReasonWaitUs;
   d.stats.nativeFinishCalls = static_cast<uint32_t>(d.finishCalls - d.finishCallsAtFrameStart);
@@ -1920,7 +1940,11 @@ bool Renderer::readback_rgba8(std::vector<uint8_t>& pixels) {
 bool Renderer::finish(FinishReason reason) {
   auto& d=*impl_;
   if(!d.context) return true;
-  const uint64_t waitStart=diagnostic_now_us();
+  bool sampleWait=false;
+#if defined(MKW_TARGET_VITA)
+  sampleWait=d.config.sampleDrawTimings;
+#endif
+  const uint64_t waitStart=sampled_now_us(sampleWait);
   if(!d.end_scene()) return false;
   if(d.pendingFragmentTransferSync) {
     watch_kernel_operation(6);
@@ -1935,7 +1959,7 @@ bool Renderer::finish(FinishReason reason) {
   ++d.finishCalls;
   const auto reasonIndex=std::min(static_cast<size_t>(reason),FinishReasonCount-1);
   ++d.finishReasonCalls[reasonIndex];
-  d.finishReasonWaitUs[reasonIndex]+=diagnostic_now_us()-waitStart;
+  d.finishReasonWaitUs[reasonIndex]+=sampled_now_us(sampleWait)-waitStart;
   d.stats.nativeFinishReasonCalls=d.finishReasonCalls;
   d.stats.nativeFinishReasonWaitUs=d.finishReasonWaitUs;
   d.pendingVertexDependency=nullptr;
@@ -2006,6 +2030,10 @@ void Renderer::destroy_buffer(Handle handle,bool storageRetired) {
   auto& d=*impl_;
   auto it=d.buffers.find(handle);
   if(it==d.buffers.end()) return;
+#if defined(MKW_TARGET_VITA)
+  if(d.config.sampleDrawTimings && it->second.inFlight && !storageRetired)
+    log_resource_sync_sample("buffer",handle,it->second.bytes,0,0);
+#endif
   if(it->second.inFlight && !storageRetired && !finish(FinishReason::ResourceDestroy)) return;
   if(d.boundVertexBuffer==handle){d.vertexStreamValid=false;d.boundVertexBuffer=0;}
   d.resourceBytes-=it->second.memory.size();
@@ -2016,6 +2044,10 @@ void Renderer::destroy_pipeline(uint64_t key) {
   auto& d=*impl_;
   auto it=d.pipelines.find(key);
   if(it==d.pipelines.end() || key==d.clearPipeline) return;
+#if defined(MKW_TARGET_VITA)
+  if(d.config.sampleDrawTimings && it->second->inFlight)
+    log_resource_sync_sample("pipeline",key,0,0,0);
+#endif
   if(it->second->inFlight && !finish(FinishReason::ResourceDestroy)) return;
   // Program state persists across scenes: a pipeline recreated later with the
   // same key must not be mistaken for the released programs still set here.
@@ -2035,6 +2067,11 @@ void Renderer::destroy_texture(Handle handle) {
   auto& d=*impl_;
   auto it=d.textures.find(handle);
   if(it==d.textures.end()) return;
+#if defined(MKW_TARGET_VITA)
+  if(d.config.sampleDrawTimings && (it->second->inFlight || handle==d.boundTarget))
+    log_resource_sync_sample(it->second->target?"efb_target":"texture",handle,
+        it->second->memory.size()+it->second->depth.size(),it->second->width,it->second->height);
+#endif
   if((it->second->inFlight || handle==d.boundTarget) && !finish(FinishReason::ResourceDestroy)) return;
   if(handle==d.boundTarget) d.boundTarget=0;
   d.invalidate_texture_binding(handle);
@@ -2185,11 +2222,11 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
       sourceTexture=d.displaySource;
     }
 
-    const uint64_t copyStarted=diagnostic_now_us();
+    const uint64_t copyStarted=sampled_now_us(d.profileDraws);
     // bind_target ends the source scene and threads its fragment sync object
     // into the destination scene. No CPU wait is required.
     if(!bind_target(handle))return false;
-    const uint64_t afterSourceEnd=diagnostic_now_us();
+    const uint64_t afterSourceEnd=sampled_now_us(d.profileDraws);
 
     PipelineDesc p{};
     p.cull=CullMode::None;p.depthTest=false;p.depthWrite=false;p.reversedZ=false;
@@ -2223,7 +2260,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
     binding.uvBiasX=float(source.x)/float(sourceWidth);
     binding.uvBiasY=float(source.y)/float(sourceHeight);
     if(!draw(packet))return false;
-    const uint64_t afterDraw=diagnostic_now_us();
+    const uint64_t afterDraw=sampled_now_us(d.profileDraws);
     if(!bind_target(originalTarget))return false;
     ++d.stats.nativeEfbCopies;
     d.stats.nativeEfbEndSceneUs+=afterSourceEnd-copyStarted;
@@ -2258,9 +2295,9 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
 
   // Unmodified copies stay on the transfer engine. All mirror/opaque fixups use
   // the draw path above, so this transfer never needs a CPU-side pixel pass.
-  const uint64_t copyStarted=diagnostic_now_us();
+  const uint64_t copyStarted=sampled_now_us(d.profileDraws);
   if(!d.end_scene())return false;
-  const uint64_t afterSourceFinish=diagnostic_now_us();
+  const uint64_t afterSourceFinish=sampled_now_us(d.profileDraws);
   const int transferResult=sameSize?
       sceGxmTransferCopy(destination.width,destination.height,0,0,SCE_GXM_TRANSFER_COLORKEY_NONE,
           SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR,SCE_GXM_TRANSFER_LINEAR,sourceData,
@@ -2275,7 +2312,7 @@ bool Renderer::copy_current_to_target(Handle handle,const Scissor& source,EfbCop
           destination.memory.data(),0,0,static_cast<int>(destination.stride*4u),
           sourceSync,SCE_GXM_TRANSFER_FRAGMENT_SYNC,nullptr);
   if(!d.check(transferResult,sameSize?"native EFB copy transfer":"native EFB downscale transfer"))return false;
-  const uint64_t afterTransferSubmit=diagnostic_now_us();
+  const uint64_t afterTransferSubmit=sampled_now_us(d.profileDraws);
   ++d.stats.nativeEfbCopies;
   d.stats.nativeEfbEndSceneUs+=afterSourceFinish-copyStarted;
   d.stats.nativeEfbTransferSubmitUs+=afterTransferSubmit-afterSourceFinish;

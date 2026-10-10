@@ -61,6 +61,10 @@ bool g_telemetryEnabled=false;
 bool g_coverageEnabled=false;
 bool g_traceEnabled=false;
 uint64_t g_frame=0,g_start=0,g_last=0;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+std::array<uint64_t,gfx::FinishReasonCount> g_lastProbeFinishCounts{};
+std::array<uint64_t,gfx::FinishReasonCount> g_lastProbeFinishWaitUs{};
+#endif
 uint64_t g_displayQueueLastUs=0,g_displayQueueTotalUs=0,g_displayQueueMaxUs=0,g_displayQueueSamples=0;
 uint64_t g_displayQueueBlockedSamples=0;
 std::unique_ptr<gfx::Renderer> g_renderer;
@@ -83,7 +87,12 @@ bool g_displayClearValid=false;
 bool g_discardPresent=false;
 
 uint64_t now_us() noexcept {
-  if(!runtime_diagnostics_enabled())return 0;
+  bool enabled=runtime_diagnostics_enabled();
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  // Quiet WiiCompiled runs may request bounded frame-boundary timing only.
+  enabled=enabled||g_config.gxm_render_budget_probe;
+#endif
+  if(!enabled)return 0;
 #if defined(__vita__)
   return sceKernelGetProcessTimeWide();
 #else
@@ -724,6 +733,10 @@ bool initialize(const BackendConfig& c) noexcept {
   if (g_coverageEnabled&&c.coverage_log_path) ensure_parent_dir(c.coverage_log_path);
   if (g_traceEnabled&&c.trace_log_path) ensure_parent_dir(c.trace_log_path);
   g_initialized=true; g_frame=0; g_last=0;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  g_lastProbeFinishCounts={};
+  g_lastProbeFinishWaitUs={};
+#endif
   return true;
 }
 
@@ -830,13 +843,27 @@ void end_frame_now() noexcept {
   }
   ++g_frame;
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
-  if(g_config.gxm_render_budget_probe&&(g_frame<=4 || (g_frame%32)==0)) {
+  if(g_config.gxm_render_budget_probe) {
     const auto& s=g_renderer->stats();
-    std::fprintf(stderr,
+    const auto finishDelta=[&](gfx::FinishReason reason) {
+      const size_t index=static_cast<size_t>(reason);
+      const auto current=s.nativeFinishReasonCalls[index];
+      const auto last=g_lastProbeFinishCounts[index];
+      return current>=last?current-last:current;
+    };
+    const auto waitDelta=[&](gfx::FinishReason reason) {
+      const size_t index=static_cast<size_t>(reason);
+      const auto current=s.nativeFinishReasonWaitUs[index];
+      const auto last=g_lastProbeFinishWaitUs[index];
+      return current>=last?current-last:current;
+    };
+    if(g_frame<=4 || (g_frame%32)==0) std::fprintf(stderr,
         "[wic-render-budget] frame=%llu worker_frame_us=%llu native_draws=%u sampled=%u "
         "pipeline_us=%llu texture_us=%llu draw_us=%llu display_queue_us=%llu "
         "native_efb=%u native_efb_scene_us=%llu native_efb_transfer_us=%llu "
-        "native_finish=%u\n",
+        "native_finish=%u finish_destroy=%llu finish_destroy_us=%llu "
+        "finish_buffer=%llu finish_texture=%llu finish_readback=%llu "
+        "finish_target=%llu finish_explicit=%llu finish_stream=%llu finish_discard=%llu\n",
         static_cast<unsigned long long>(g_frame),
         static_cast<unsigned long long>(g_last),s.drawCalls,unsigned(s.nativeTimingsSampled),
         static_cast<unsigned long long>(s.nativePipelineUs),
@@ -846,7 +873,18 @@ void end_frame_now() noexcept {
         s.nativeEfbCopies,
         static_cast<unsigned long long>(s.nativeEfbEndSceneUs),
         static_cast<unsigned long long>(s.nativeEfbTransferSubmitUs),
-        s.nativeFinishCalls);
+        s.nativeFinishCalls,
+        static_cast<unsigned long long>(finishDelta(gfx::FinishReason::ResourceDestroy)),
+        static_cast<unsigned long long>(waitDelta(gfx::FinishReason::ResourceDestroy)),
+        static_cast<unsigned long long>(finishDelta(gfx::FinishReason::BufferMutation)),
+        static_cast<unsigned long long>(finishDelta(gfx::FinishReason::TextureMutation)),
+        static_cast<unsigned long long>(finishDelta(gfx::FinishReason::Readback)),
+        static_cast<unsigned long long>(finishDelta(gfx::FinishReason::TargetMutation)),
+        static_cast<unsigned long long>(finishDelta(gfx::FinishReason::Explicit)),
+        static_cast<unsigned long long>(finishDelta(gfx::FinishReason::StreamReuse)),
+        static_cast<unsigned long long>(finishDelta(gfx::FinishReason::FrameDiscard)));
+    g_lastProbeFinishCounts=s.nativeFinishReasonCalls;
+    g_lastProbeFinishWaitUs=s.nativeFinishReasonWaitUs;
   }
 #endif
   if(g_config.diagnostics_enabled) {
