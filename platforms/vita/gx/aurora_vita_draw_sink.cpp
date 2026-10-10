@@ -164,6 +164,20 @@ void DrawSink::shutdown() noexcept {
 
 void DrawSink::begin_frame(uint64_t frame) noexcept {
   if (!initialized_ || !arena_) return;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  if(frame!=0 && (frame<=4 || (frame%64)==0)){
+    AURORA_VITA_LOG_INFO(
+        "[wic-draw-health] completed_frame=%llu submitted=%llu requested=%u merged=%u white_fallback_draws=%u dynamic_copy_fallback_draws=%u batching=%u\n",
+        static_cast<unsigned long long>(frame-1),
+        static_cast<unsigned long long>(submittedDraws_-frameStartSubmittedDraws_),
+        frameDrawIndex_,frameBatchedDraws_,frameWhiteFallbackDraws_,frameDynamicCopyFallbackDraws_,
+        unsigned(localDrawBatching_));
+  }
+  frameStartSubmittedDraws_=submittedDraws_;
+  frameWhiteFallbackDraws_=0;
+  frameDynamicCopyFallbackDraws_=0;
+  frameBatchedDraws_=0;
+#endif
   stream_.reset();
   frameDrawIndex_ = 0;
   fixedVertexUniforms_.reset();lastFixedUniforms_=nullptr;
@@ -818,6 +832,19 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     bindings[slot].source = gfx::TextureSource::Cache;
     if (translated.valid || translated.dynamicCopy) bindings[slot].sampler = translated.sampler;
     result.fallbackTextureMask |= static_cast<uint8_t>(1u << slot);
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+    static uint64_t fallbackSamples=0;
+    const uint64_t fallbackNumber=++fallbackSamples;
+    if(fallbackNumber<=12 || (fallbackNumber&(fallbackNumber-1))==0) {
+      AURORA_VITA_LOG_INFO(
+          "[wic-texture-fallback] n=%llu draw=%u slot=%u dynamic_copy=%u valid=%u format=%u width=%u height=%u bytes=%zu source_id=%llx\n",
+          static_cast<unsigned long long>(fallbackNumber),drawIndex,slot,
+          unsigned(translated.dynamicCopy),unsigned(translated.valid),
+          unsigned(translated.texture.format),translated.texture.width,
+          translated.texture.height,translated.texture.dataSize,
+          static_cast<unsigned long long>(translated.texture.sourceId));
+    }
+#endif
     if (translated.dynamicCopy) result.warnings |= SubmitWarning::DynamicCopyFallback;
     else result.warnings |= SubmitWarning::MissingTextureFallback;
   }
@@ -839,6 +866,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   resolvedTextureStateIdentity_=aurora::gx::g_gxState.stateIdentity;
   }
   if (result.fallbackTextureMask != 0) {
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+    ++frameWhiteFallbackDraws_;
+    if((static_cast<uint8_t>(result.warnings) &
+        static_cast<uint8_t>(SubmitWarning::DynamicCopyFallback))!=0)
+      ++frameDynamicCopyFallbackDraws_;
+#endif
     uint32_t fallbackCount = 0;
     for (uint8_t bits = result.fallbackTextureMask; bits; bits >>= 1) fallbackCount += bits & 1u;
     if (telemetry_) telemetry_->fallback_texture(fallbackCount);
@@ -1264,11 +1297,16 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
     queuedPipelineValid_=false;
   }else if(useStreamed) {
     const auto queueStreamed=[&]() noexcept {
-      return gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
+      const auto before=stream_.size();
+      const bool accepted=gfx::enqueue_streamed_draw(stream_,streamed,resolvedPipelineKey,uniforms,
           translate_viewport(),translate_scissor(),bindings,&error,vertexStateVersion_,
           streamFixed?&buildFixedUniforms():nullptr,
           localDrawBatching_&&renderer_->uses_local_stream_indices()&&!gfx::gxm_disabled(gfx::GxmDisableLocalBatch)?arena_.get():nullptr,
           telemetry_,fragmentUniformVersion_,translatedVertexRevision_,resolvedTextureBindingVersion_);
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+      if(accepted&&localDrawBatching_&&before==stream_.size())++frameBatchedDraws_;
+#endif
+      return accepted;
     };
 #if defined(AURORA_VITA_RENDERER_GXM) && AURORA_VITA_GXM_DIRECT_DRAW_SUBMIT
     if(localDrawBatching_&&!gfx::gxm_disabled(gfx::GxmDisableLocalBatch))enqueued=queueStreamed();

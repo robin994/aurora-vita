@@ -94,6 +94,102 @@ void local_batching() {
   CHECK(enqueue_streamed_draw(stream,paddedB.draw,123,uniforms,viewport,scissor,textures,nullptr,0,nullptr,&padded));
   CHECK(stream.size()==2&&paddedB.indices[0]==0);
 }
+// The production ring aligns U16 index allocations to 16 bytes. Verify the
+// WiiCompiled opt-in compaction moves only pending bytes and preserves the
+// exact triangle list as the draw grows across several padded reservations.
+void padded_batch_compaction() {
+  BufferPool pool;StreamingArenaConfig cfg{};
+  cfg.vertexBytes=4096;cfg.indexBytes=4096;cfg.alignment=16;cfg.slots=1;
+  StreamingArena arena(pool,cfg);CHECK(arena.initialize());arena.begin_frame(0);
+  auto a=reserve_triangle(arena);
+  auto b=reserve_triangle(arena);
+  CHECK(a.draw.indices.offset==0&&b.draw.indices.offset==16);
+  CHECK(arena.compact_pending_draw(a.draw.vertices,a.draw.indices,
+                                   b.draw.vertices,b.draw.indices,3,3));
+  CHECK(a.indices[0]==0&&a.indices[1]==1&&a.indices[2]==2);
+  CHECK(a.indices[3]==3&&a.indices[4]==4&&a.indices[5]==5);
+  CHECK(arena.index_used()==16&&arena.vertex_used()==96);
+  auto mergedV=a.draw.vertices;mergedV.size+=b.draw.vertices.size;
+  auto mergedI=a.draw.indices;mergedI.size+=b.draw.indices.size;
+  auto c=reserve_triangle(arena);
+  CHECK(arena.compact_pending_draw(mergedV,mergedI,c.draw.vertices,c.draw.indices,6,3));
+  CHECK(a.indices[6]==6&&a.indices[7]==7&&a.indices[8]==8);
+  CHECK(arena.index_used()==32&&arena.vertex_used()==144);
+  CHECK(arena.flush());
+  const auto d=reserve_triangle(arena);
+  CHECK(!arena.compact_pending_draw(mergedV,mergedI,d.draw.vertices,d.draw.indices,6,3));
+  CHECK(d.indices[0]==0&&d.indices[2]==2);
+
+  StreamingArena second(pool,cfg);CHECK(second.initialize());second.begin_frame(0);
+  const auto previous=reserve_triangle(second),invalid=reserve_triangle(second,3);
+  const auto usedBefore=second.index_used(),verticesBefore=second.vertex_used();
+  CHECK(!second.compact_pending_draw(previous.draw.vertices,previous.draw.indices,
+                                     invalid.draw.vertices,invalid.draw.indices,3,3));
+  CHECK(previous.indices[0]==0&&previous.indices[2]==2);
+  CHECK(invalid.indices[0]==0&&invalid.indices[2]==3);
+  CHECK(second.index_used()==usedBefore&&second.vertex_used()==verticesBefore);
+}
+void padded_quad_batch_preserves_order() {
+  BufferPool pool;StreamingArenaConfig cfg{};
+  cfg.vertexBytes=64*1024;cfg.indexBytes=64*1024;cfg.alignment=16;cfg.slots=1;
+  StreamingArena arena(pool,cfg);CHECK(arena.initialize());arena.begin_frame(0);
+  BufferSlice vertices{},indices{};
+  const uint8_t* firstVertices=nullptr;
+  const uint16_t* firstIndices=nullptr;
+  constexpr uint32_t Count=128,Stride=32;
+  const uint16_t quadIndices[]{0,1,2,2,3,0};
+  for(uint32_t quad=0;quad<Count;++quad) {
+    void* gpuVertices=nullptr;void* gpuIndices=nullptr;
+    const auto nextV=arena.reserve_vertices(4*Stride,16,&gpuVertices);
+    const auto nextI=arena.reserve_indices(sizeof(quadIndices),2,&gpuIndices);
+    CHECK(nextV.buffer&&nextI.buffer&&gpuVertices&&gpuIndices);
+    if(!gpuVertices||!gpuIndices)break;
+    std::memset(gpuVertices,0,4*Stride);
+    for(uint32_t v=0;v<4;++v)
+      std::memcpy(static_cast<uint8_t*>(gpuVertices)+v*Stride,&quad,sizeof(quad));
+    std::memcpy(gpuIndices,quadIndices,sizeof(quadIndices));
+    if(quad==0){
+      vertices=nextV;indices=nextI;
+      firstVertices=static_cast<const uint8_t*>(gpuVertices);
+      firstIndices=static_cast<const uint16_t*>(gpuIndices);
+      continue;
+    }
+    CHECK(arena.compact_pending_draw(vertices,indices,nextV,nextI,4*quad,4));
+    vertices.size+=nextV.size;indices.size+=nextI.size;
+  }
+  CHECK(vertices.size==Count*4*Stride);
+  CHECK(indices.size==Count*6*sizeof(uint16_t));
+  CHECK(arena.index_used()==Count*6*sizeof(uint16_t));
+  CHECK(arena.vertex_used()==Count*4*Stride);
+  // The original order of the quads and the exact U16 triangle topology are
+  // unchanged. Only the number of native draw calls may drop to one.
+  if(firstVertices&&firstIndices)for(uint32_t quad=0;quad<Count;++quad) {
+    for(uint32_t v=0;v<4;++v) {
+      uint32_t marker=0;
+      std::memcpy(&marker,firstVertices+(quad*4+v)*Stride,sizeof(marker));
+      CHECK(marker==quad);
+    }
+    for(uint32_t i=0;i<6;++i)CHECK(firstIndices[quad*6+i]==quad*4+quadIndices[i]);
+  }
+}
+void padded_draw_requires_exact_material_and_clip_state() {
+  DrawPacket a{},b{};
+  a.pipelineKey=b.pipelineKey=0x55;
+  a.vertices={1,0,128};b.vertices={1,128,128};
+  a.indices={2,0,12};b.indices={2,16,12};
+  a.vertexCount=b.vertexCount=4;
+  a.indexCount=b.indexCount=6;
+  CHECK(!local_draws_mergeable(a,b));
+  CHECK(local_draw_states_mergeable(a,b));
+  auto change=b;
+  change.scissor.x=7;CHECK(!local_draw_states_mergeable(a,change));
+  change=b;change.uniforms.mvp[12]=.25f;CHECK(!local_draw_states_mergeable(a,change));
+  change=b;change.textures[0].sampler.minLod=2;CHECK(!local_draw_states_mergeable(a,change));
+  change=b;change.pipelineKey++;CHECK(!local_draw_states_mergeable(a,change));
+  change=b;change.fixedVertexUniforms=nullptr;
+  FixedVertexUniforms fixed{};a.fixedVertexUniforms=&fixed;
+  CHECK(!local_draw_states_mergeable(a,change));
+}
 void shared_lifetimes() {
   CommandStream stream;DrawUniforms uniforms{};std::array<TextureBinding,MaxTextures> textures{};
   auto& first=stream.emplace_geometry_draw();stream.share_draw_state(first,uniforms,textures,1);
@@ -288,6 +384,6 @@ void pipeline_bindings() {
   CHECK(pipeline_setter_count(pipeline_state_changes(previous,next,true))==7);
 }
 }
-int main(){performance_without_renderer();local_batching();shared_lifetimes();revision_identity_skips_payload_comparison();published_copies();pipeline_bindings();
+int main(){performance_without_renderer();local_batching();padded_batch_compaction();padded_quad_batch_preserves_order();padded_draw_requires_exact_material_and_clip_state();shared_lifetimes();revision_identity_skips_payload_comparison();published_copies();pipeline_bindings();
   fixed_snapshots();submission_views();composed_statistics();published_memory();
   std::printf("submission: %u checks, %u failures\n",checks,failures);return failures?1:0;}

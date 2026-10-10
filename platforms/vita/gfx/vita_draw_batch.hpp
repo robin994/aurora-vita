@@ -4,9 +4,10 @@
 #include "vita_byte_compare.h"
 
 namespace aurora::vita::gfx {
-// Only adjacent, CPU-prepared triangle lists may use this predicate. Their
-// caller rebases the second index range to the first draw before submission.
-inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noexcept {
+// Verify all render state before considering a merge. The pending arena may
+// contain alignment padding between otherwise compatible GPU buffer slices;
+// compacting such padding is separate from proving state equivalence.
+inline bool local_draw_states_mergeable(const DrawPacket& a, const DrawPacket& b) noexcept {
   if (!a.pipelineKey || a.pipelineKey != b.pipelineKey ||
       a.absoluteVertexIndices || b.absoluteVertexIndices ||
       a.firstVertex || b.firstVertex || a.instanceCount != 1 || b.instanceCount != 1 ||
@@ -17,9 +18,7 @@ inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noex
     if (!a.fixedVertexUniforms || !b.fixedVertexUniforms ||
         !aurora_vita_bytes_equal(a.fixedVertexUniforms,b.fixedVertexUniforms,sizeof(FixedVertexUniforms))) return false;
   }
-  if (a.vertices.buffer != b.vertices.buffer || a.indices.buffer != b.indices.buffer ||
-      uint64_t(a.vertices.offset) + a.vertices.size != b.vertices.offset ||
-      uint64_t(a.indices.offset) + a.indices.size != b.indices.offset) return false;
+  if (a.vertices.buffer != b.vertices.buffer || a.indices.buffer != b.indices.buffer) return false;
   if (a.viewport.x != b.viewport.x || a.viewport.y != b.viewport.y ||
       a.viewport.width != b.viewport.width || a.viewport.height != b.viewport.height ||
       a.viewport.znear != b.viewport.znear || a.viewport.zfar != b.viewport.zfar ||
@@ -40,5 +39,11 @@ inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noex
         x.uvBiasX != y.uvBiasX || x.uvBiasY != y.uvBiasY) return false;
   }
   return true;
+}
+// Original strict predicate: no byte movements, only exactly adjacent slices.
+inline bool local_draws_mergeable(const DrawPacket& a, const DrawPacket& b) noexcept {
+  return local_draw_states_mergeable(a,b) &&
+      uint64_t(a.vertices.offset) + a.vertices.size == b.vertices.offset &&
+      uint64_t(a.indices.offset) + a.indices.size == b.indices.offset;
 }
 } // namespace aurora::vita::gfx

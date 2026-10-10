@@ -41,6 +41,11 @@ public:
   bool rebase_pending_indices(const BufferSlice& slice,uint32_t count,
                               uint32_t vertexBase,uint32_t localVertexCount) noexcept;
   bool indices_pending(const BufferSlice& slice) const noexcept;
+  // WiiCompiled-only caller: coalesce a pending draw across arena alignment
+  // padding. Neither draw may have been flushed, submitted or made GPU-visible.
+  bool compact_pending_draw(const BufferSlice& previousVertices,const BufferSlice& previousIndices,
+                            const BufferSlice& nextVertices,const BufferSlice& nextIndices,
+                            uint32_t previousVertexCount,uint32_t nextVertexCount) noexcept;
   bool flush() noexcept;
   void mark_current_submitted() noexcept;
   bool can_reserve(size_t vertexBytes,size_t vertexAlignment,size_t indexBytes,size_t indexAlignment) const noexcept;

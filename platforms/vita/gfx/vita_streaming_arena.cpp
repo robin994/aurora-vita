@@ -40,6 +40,71 @@ bool StreamingArena::rebase_pending_indices(const BufferSlice& slice,uint32_t co
   return true;
 }
 
+bool StreamingArena::compact_pending_draw(const BufferSlice& previousVertices,
+                                          const BufferSlice& previousIndices,
+                                          const BufferSlice& nextVertices,
+                                          const BufferSlice& nextIndices,
+                                          uint32_t previousVertexCount,
+                                          uint32_t nextVertexCount) noexcept {
+#if AURORA_VITA_GXM_DIRECT_STREAM_WRITE || AURORA_VITA_DIRECT_STREAM_WRITE
+  // Do not relocate bytes which have already been written to uncached GPU
+  // memory. The staged GXM path below is the first correctness A/B candidate.
+  return false;
+#else
+  if(!initialized_||current_>=slots_.size()||!previousVertexCount||!nextVertexCount||
+     uint64_t(previousVertexCount)+nextVertexCount>=64000u)return false;
+  auto& slot=slots_[current_];
+  const auto verticesPending=[&](const BufferSlice& slice) noexcept {
+    return slice.buffer==slot.vertex&&slice.offset>=slot.vflushed&&slice.offset<=slot.voff&&
+        slice.size<=slot.voff-slice.offset;
+  };
+  if(!verticesPending(previousVertices)||!verticesPending(nextVertices)||
+     !indices_pending(previousIndices)||!indices_pending(nextIndices)||
+     previousVertices.size%previousVertexCount||nextVertices.size%nextVertexCount||
+     previousVertices.size/previousVertexCount!=nextVertices.size/nextVertexCount||
+     !previousIndices.size||!nextIndices.size||
+     ((previousIndices.size|nextIndices.size)&1u)||
+     nextIndices.offset%alignof(uint16_t)||
+     vertexStage_.size()<slot.voff||indexStage_.size()<slot.ioff)return false;
+
+  const uint64_t vTarget=uint64_t(previousVertices.offset)+previousVertices.size;
+  const uint64_t iTarget=uint64_t(previousIndices.offset)+previousIndices.size;
+  const uint64_t vSourceEnd=uint64_t(nextVertices.offset)+nextVertices.size;
+  const uint64_t iSourceEnd=uint64_t(nextIndices.offset)+nextIndices.size;
+  const uint64_t vNewEnd=vTarget+nextVertices.size;
+  const uint64_t iNewEnd=iTarget+nextIndices.size;
+  if(vTarget>nextVertices.offset||iTarget>nextIndices.offset||
+     vNewEnd>std::numeric_limits<uint32_t>::max()||
+     iNewEnd>std::numeric_limits<uint32_t>::max()||
+     vTarget%4||iTarget%alignof(uint16_t)||
+     vSourceEnd>slot.voff||iSourceEnd>slot.ioff||
+     // Only the newest two reservations may move. Never skip other arena
+     // allocations between the last pending draw and the new draw.
+     nextVertices.offset-vTarget>=cfg_.alignment||
+     nextIndices.offset-iTarget>=cfg_.alignment||
+     align_up(vSourceEnd,cfg_.alignment)!=slot.voff||
+     align_up(iSourceEnd,cfg_.alignment)!=slot.ioff)return false;
+
+  const auto* sourceIndices=reinterpret_cast<const uint16_t*>(
+      indexStage_.data()+nextIndices.offset);
+  const uint32_t count=nextIndices.size/sizeof(uint16_t);
+  for(uint32_t i=0;i<count;++i)
+    if(sourceIndices[i]>=nextVertexCount)return false;
+  // This is a pre-flush operation on owned staging memory. The consumer sees
+  // only the completed, compacted index range after StreamingArena::flush().
+  std::memmove(vertexStage_.data()+vTarget,vertexStage_.data()+nextVertices.offset,
+               nextVertices.size);
+  std::memmove(indexStage_.data()+iTarget,indexStage_.data()+nextIndices.offset,
+               nextIndices.size);
+  auto* destinationIndices=reinterpret_cast<uint16_t*>(indexStage_.data()+iTarget);
+  for(uint32_t i=0;i<count;++i)
+    destinationIndices[i]=static_cast<uint16_t>(destinationIndices[i]+previousVertexCount);
+  slot.voff=align_up(vNewEnd,cfg_.alignment);
+  slot.ioff=align_up(iNewEnd,cfg_.alignment);
+  return true;
+#endif
+}
+
 StreamingArena::StreamingArena(BufferPool& pool, StreamingArenaConfig cfg) noexcept : pool_(pool), cfg_(cfg) {}
 StreamingArena::~StreamingArena() { shutdown(); }
 

@@ -210,6 +210,12 @@ private:
   uint32_t staticGeometryMinVertices_ = 48;
   uint32_t diagnosticDrawLimit_ = 0;
   uint32_t frameDrawIndex_ = 0;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+  uint32_t frameWhiteFallbackDraws_ = 0;
+  uint32_t frameDynamicCopyFallbackDraws_ = 0;
+  uint32_t frameBatchedDraws_ = 0;
+  uint64_t frameStartSubmittedDraws_ = 0;
+#endif
   struct CopyTextureEntry {
     gfx::Handle handle=gfx::InvalidHandle;
     uint32_t width=0,height=0;

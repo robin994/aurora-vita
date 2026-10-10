@@ -538,9 +538,26 @@ bool enqueue_streamed_draw(CommandStream&stream,const StreamedDraw&prepared,uint
   if(batchArena){
     if(tail){
       if(telemetry)telemetry->batch_candidate();
-      if(local_draws_mergeable(*tail,d)){
-        if(batchArena->indices_pending(tail->indices)&&
-           batchArena->rebase_pending_indices(d.indices,d.indexCount,tail->vertexCount,d.vertexCount)){
+      if(local_draw_states_mergeable(*tail,d)){
+        bool rebased=false;
+        if(local_draws_mergeable(*tail,d)) {
+          rebased=batchArena->indices_pending(tail->indices)&&
+              batchArena->rebase_pending_indices(d.indices,d.indexCount,tail->vertexCount,d.vertexCount);
+        }
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
+        else {
+          // WiiCompiled emits thousands of tiny quads. U16 index lists (12
+          // bytes) are padded to 16 by the ring, so the old adjacent-slice
+          // predicate rejected nearly every compatible pair. Move only the
+          // newest unflushed slices into those padding gaps and rebase indices
+          // before publication. The command barrier and strict state equality
+          // checks above still protect order, EFB copies and material changes.
+          rebased=batchArena->compact_pending_draw(
+              tail->vertices,tail->indices,d.vertices,d.indices,
+              tail->vertexCount,d.vertexCount);
+        }
+#endif
+        if(rebased){
           tail->vertices.size+=d.vertices.size;tail->indices.size+=d.indices.size;
           tail->vertexCount+=d.vertexCount;tail->indexCount+=d.indexCount;
           if(telemetry)telemetry->batch_merged(d.indexCount);
