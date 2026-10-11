@@ -24,12 +24,12 @@ bool build_indices(std::vector<uint16_t>&o,SourcePrimitive p,uint32_t n) noexcep
   return false;
 }
 
-bool build_indices_into(uint16_t* out,SourcePrimitive p,uint32_t n) noexcept {
+bool build_indices_into(uint16_t* out,SourcePrimitive p,uint32_t n,uint32_t base) noexcept {
   if(!out&&n)return false;
   size_t w=0;
   const auto emit=[&](uint32_t v) noexcept {
     if(v>std::numeric_limits<uint16_t>::max())return false;
-    out[w++]=static_cast<uint16_t>(v);return true;
+    out[w++]=static_cast<uint16_t>(base+v);return true;
   };
   const auto triangle=[&](uint32_t a,uint32_t b,uint32_t c) noexcept {
     return emit(a)&&emit(b)&&emit(c);
@@ -409,14 +409,27 @@ bool prepare_streamed_draw_into(StreamedDraw&out,StreamingArena&arena,const uint
   if(fused.probeHashes)reuseProbe->observe(count,decodeSemantics);
 
   if(footprint.indexCount){
+    // vitaGL's packed VBO path stores each attribute byte offset in GXM's
+    // uint16_t field. Bind the frame buffer at offset zero and rebase indices
+    // while generating them, as enqueue_draw already does for this backend.
+    // Native GXM binds the slice as its stream base and keeps local indices.
+    uint32_t indexBase=0;
+    if(!Renderer::uses_local_stream_indices()) {
+      if(out.vertices.offset%gpuStride){out.error=PrepareDrawError::InvalidInput;return false;}
+      indexBase=out.vertices.offset/static_cast<uint32_t>(gpuStride);
+      if(uint64_t(indexBase)+count>Renderer::max_indexed_vertices()) {
+        out.error=PrepareDrawError::TooManyVertices;return false;
+      }
+      out.absoluteVertexIndices=true;
+    }
     void* indexDst=nullptr;
     out.indices=arena.reserve_indices(footprint.indexBytes,alignof(uint16_t),&indexDst);
     if(!out.indices.buffer||!indexDst){out.error=PrepareDrawError::StreamingOverflow;return false;}
     auto*dst=static_cast<uint16_t*>(indexDst);
     { ScopedTelemetryPhase phase(telemetry,TelemetryPhase::CommandBuild);
       if(rawIndexCount){
-        for(uint32_t i=0;i<rawIndexCount;++i){if(rawIndices[i]>=count){out.error=PrepareDrawError::InvalidInput;return false;}dst[i]=rawIndices[i];}
-      }else if(!build_indices_into(dst,source,count)){
+        for(uint32_t i=0;i<rawIndexCount;++i){if(rawIndices[i]>=count){out.error=PrepareDrawError::InvalidInput;return false;}dst[i]=static_cast<uint16_t>(indexBase+rawIndices[i]);}
+      }else if(!build_indices_into(dst,source,count,indexBase)){
         out.error=PrepareDrawError::TooManyVertices;return false;
       }
     }
@@ -496,7 +509,7 @@ bool enqueue_streamed_draw(CommandStream&stream,const StreamedDraw&prepared,uint
   auto* tail=batchArena&&prepared.primitive==Primitive::Triangles?stream.tail_draw():nullptr;
   DrawPacket& d=stream.emplace_geometry_draw();
   d.pipelineKey=resolvedPipelineKey;d.vertices=prepared.vertices;d.indices=prepared.indices;
-  d.vertexCount=prepared.vertexCount;d.indexCount=prepared.indexCount;d.absoluteVertexIndices=false;
+  d.vertexCount=prepared.vertexCount;d.indexCount=prepared.indexCount;d.absoluteVertexIndices=prepared.absoluteVertexIndices;
   d.firstVertex=0;d.instanceCount=1;
   stream.share_draw_state(d,uniforms,textures,uniformRevision,textureBindingRevision);
   d.uniformRevision=uniformRevision;d.fragmentUniformRevision=fragmentUniformRevision;

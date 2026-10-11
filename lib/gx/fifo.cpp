@@ -1,5 +1,6 @@
 #include "fifo.hpp"
 #include "native_model_census.hpp"
+#include "native_model_registry.hpp"
 #include "fifo.hpp"
 #include "command_processor.hpp"
 #include "bp_write_cache.hpp"
@@ -23,6 +24,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+#if defined(__vita__) && defined(AURORA_VITA_ASYNC_GX) && AURORA_VITA_ASYNC_GX
+#if !defined(_GLIBCXX_GTHREAD_USE_WEAK) || _GLIBCXX_GTHREAD_USE_WEAK != 0
+#error "Vita async GX requires atomic libstdc++ shared_ptr reference counts"
+#endif
+#endif
 
 #if defined(MKW_TARGET_VITA)
 #include <psp2/kernel/threadmgr.h>
@@ -95,7 +102,7 @@ constexpr size_t VitaWorkerStackBytes = 1024u * 1024u;
 constexpr uint32_t VitaJobSegmentCapacity = 128;
 
 enum class VitaJobType : uint8_t { Fifo, Callback, Stop };
-enum class VitaJobSegmentType : uint8_t { Inline, PinnedDisplayList, ViewMarker, NativeDrawReplay, NativeModel };
+enum class VitaJobSegmentType : uint8_t { Inline, PinnedDisplayList, ViewMarker, NativeDrawReplay, NativeModel, NativePnPalette };
 
 struct VitaJobSegment {
   VitaJobSegmentType type = VitaJobSegmentType::Inline;
@@ -148,6 +155,8 @@ uint32_t sPendingPinnedBytes = 0;
 std::atomic<uint64_t> sProducerWaitUs{0}, sConsumerWaitUs{0};
 std::atomic<uint64_t> sNativeReplayAttempts{0},sNativeReplayHits{0},sNativeReplayFallbacks{0};
 std::atomic<uint64_t> sNativeModelAttempts{0},sNativeModelHits{0},sNativeModelFallbacks{0},sNativeModelCompiled{0};
+bool sNativePnPaletteEnabled = false, sNativePnPaletteDiagnostics = false;
+std::atomic<uint64_t> sNativePnPaletteQueued{0}, sNativePnPaletteApplied{0}, sNativePnPaletteMatrices{0};
 ModelAdmissionCensus sNativeModelCensus;
 std::atomic<bool> sNativeModelCensusObserved{false};
 uint64_t sActiveNativeModelIdentity=0,sNextNativeModelIdentity=0;
@@ -232,6 +241,14 @@ int vita_worker_main(SceSize, void*) {
             continue;
           }
           if (segment.bytes == 0) continue;
+          if (segment.type == VitaJobSegmentType::NativePnPalette) {
+            if (segment.offset <= job.bytes.size() && segment.bytes <= job.bytes.size() - segment.offset &&
+                apply_native_pn_palette(job.bytes.data() + segment.offset, segment.bytes) && sNativePnPaletteDiagnostics) {
+              sNativePnPaletteApplied.fetch_add(1, std::memory_order_relaxed);
+              sNativePnPaletteMatrices.fetch_add(segment.bytes / sizeof(NativePnMatrix), std::memory_order_relaxed);
+            }
+            continue;
+          }
           if (segment.type == VitaJobSegmentType::Inline) {
             if (segment.offset > job.bytes.size() || segment.bytes > job.bytes.size() - segment.offset) continue;
             detail::sActiveProcessData = job.bytes.data();
@@ -585,6 +602,60 @@ void init() {
 #endif
 }
 
+void set_native_pn_palette_enabled(bool enabled, bool diagnostics) noexcept {
+#if defined(MKW_TARGET_VITA)
+  sNativePnPaletteEnabled = enabled;
+  sNativePnPaletteDiagnostics = diagnostics;
+  sNativePnPaletteQueued.store(0, std::memory_order_relaxed);
+  sNativePnPaletteApplied.store(0, std::memory_order_relaxed);
+  sNativePnPaletteMatrices.store(0, std::memory_order_relaxed);
+#else
+  (void)enabled; (void)diagnostics;
+#endif
+}
+
+bool can_write_native_pn_palette() noexcept {
+#if defined(MKW_TARGET_VITA)
+  return sNativePnPaletteEnabled && worker_running() && !on_worker_thread() &&
+         !detail::sInDisplayList && !detail::sNativeModelRecording;
+#else
+  return false;
+#endif
+}
+
+bool write_native_pn_palette(const NativePnMatrix* matrices, size_t count) noexcept {
+#if defined(MKW_TARGET_VITA)
+  if (!can_write_native_pn_palette() || !matrices || !count || count > NativePnPaletteCapacity) return false;
+  for (size_t i = 0; i < count; ++i)
+    if (matrices[i].slot >= NativePnPaletteCapacity) return false;
+  // Reuse the batch byte arena, with no per-palette allocation or extra job.
+  // Reserve room for the preceding inline segment and the native segment.
+  if (sPendingSegmentCount >= VitaJobSegmentCapacity - 2u || detail::sBufferSize >= 256u * 1024u) drain();
+  if (!seal_inline_segment() || sPendingSegmentCount == VitaJobSegmentCapacity) return false;
+  auto& segment = sPendingSegments[sPendingSegmentCount++];
+  segment = {};
+  segment.type = VitaJobSegmentType::NativePnPalette;
+  segment.offset = detail::sBufferSize;
+  segment.bytes = static_cast<uint32_t>(count * sizeof(NativePnMatrix));
+  write_data(matrices, segment.bytes);
+  sPendingInlineOffset = detail::sBufferSize;
+  if (sNativePnPaletteDiagnostics) sNativePnPaletteQueued.fetch_add(1, std::memory_order_relaxed);
+  return true;
+#else
+  (void)matrices; (void)count; return false;
+#endif
+}
+
+NativePnPaletteStats native_pn_palette_stats() noexcept {
+#if defined(MKW_TARGET_VITA)
+  return {sNativePnPaletteQueued.load(std::memory_order_relaxed),
+          sNativePnPaletteApplied.load(std::memory_order_relaxed),
+          sNativePnPaletteMatrices.load(std::memory_order_relaxed)};
+#else
+  return {};
+#endif
+}
+
 void write_stable_data_from(const void* bytes, const void* stableSource, uint32_t length) {
   if (detail::sInDisplayList) {
     write_data(bytes, length);
@@ -828,6 +899,17 @@ bool active_native_model_single_draw(uint8_t primitive,uint8_t fmt,uint16_t stri
 NativeModelStats native_model_stats() noexcept {
   return {sNativeModelAttempts.load(std::memory_order_relaxed),sNativeModelHits.load(std::memory_order_relaxed),
           sNativeModelFallbacks.load(std::memory_order_relaxed),sNativeModelCompiled.load(std::memory_order_relaxed)};
+}
+
+void release_native_model_sources(uint32_t ownerLevel) noexcept {
+  std::vector<NativeModelSourceSpan> retired;
+  native_model_registry().release_sources_after(ownerLevel,
+      [&](const NativeModelSourceSpan& source) { retired.push_back(source); });
+  if (retired.empty()) return;
+  run_sync([](void* context) {
+    const auto& sources = *static_cast<const std::vector<NativeModelSourceSpan>*>(context);
+    aurora::vita::draw_sink().invalidate_native_model_sources(sources.data(), sources.size());
+  }, &retired);
 }
 void set_native_draw_replay_tracking(bool enabled) noexcept {
   detail::sNativeReplayTracking.store(enabled,std::memory_order_relaxed);

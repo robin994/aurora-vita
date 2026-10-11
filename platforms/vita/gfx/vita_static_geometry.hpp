@@ -350,6 +350,35 @@ public:
     return result;
   }
 
+  // Remove source identities before the loader reuses their allocations.
+  // GPU buffers remain charged and alive until the existing retirement fence.
+  size_t invalidate_source_range(const void* data, size_t bytes) noexcept {
+    if (!data || !bytes) return 0;
+    const uintptr_t start = reinterpret_cast<uintptr_t>(data);
+    const auto overlaps = [&](const void* source, size_t size) {
+      if (!source || !size) return false;
+      const uintptr_t address = reinterpret_cast<uintptr_t>(source);
+      return address <= start ? start - address < size : address - start < bytes;
+    };
+    std::vector<uint64_t> invalid;
+    for (const auto& [key, entry] : entries_) {
+      bool matches = overlaps(entry->stableSource, entry->stableSourceBytes);
+      for (const auto& snapshot : entry->snapshots)
+        matches = matches || overlaps(snapshot.source, snapshot.size);
+      if (matches) invalid.push_back(key);
+    }
+    for (const auto key : invalid) {
+      const auto it = entries_.find(key);
+      auto& entry = *it->second;
+      const size_t gpuBytes = size_t(entry.vertices.size) + entry.indices.size;
+      retired_.push_back(Retired{entry.vertices.buffer, entry.indices.buffer, frame_, gpuBytes});
+      retiredBytes_ += gpuBytes;
+      bytes_ = entry.accountedBytes <= bytes_ ? bytes_ - entry.accountedBytes : 0;
+      entries_.erase(it);
+    }
+    return invalid.size();
+  }
+
   void clear() noexcept {
     if(!retired_.empty())renderer_.buffers().wait_idle();
     for(const auto& r:retired_) {

@@ -12,6 +12,7 @@
 #include "../../../tests/upstream_gx_stub.hpp"
 #else
 #include "../../../lib/gx/gx.hpp"
+#include "../../../lib/gx/command_processor.hpp"
 #endif
 #endif
 #include <array>
@@ -154,6 +155,9 @@ void DrawSink::set_runtime_feature_flags(uint32_t flags) noexcept {
 #if defined(AURORA_VITA_UPSTREAM)
   translatedStateValid_=false;
   resolvedTextureBindingsValid_=false;
+#if !defined(AURORA_VITA_UPSTREAM_STUB)
+  nativeModelUniforms_.invalidate();
+#endif
 #endif
   fixedPipelineKeys_.clear();
   reset_pipeline_run_cache();
@@ -164,6 +168,7 @@ void DrawSink::shutdown() noexcept {
 #if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
   nativeModels_.clear();
   nativeModelCache_.release();
+  nativeModelUniforms_.invalidate();
 #endif
   clear_native_replay();
   if (!initialized_ && !arena_) return;
@@ -580,11 +585,26 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // rebuild whenever no tracked write explains the dirty flag.
   const bool untrackedDirty=aurora::gx::g_gxState.stateDirty && revisions.serial==consumedStateSerial_;
   const bool broadDirty=untrackedDirty || gfx::gxm_disabled(gfx::GxmDisableStateDomains);
+#if defined(MKW_TARGET_VITA) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  // An ordinary GX draw can consume legacy writes without publishing a new
+  // revision. A subsequent native draw must not reuse the older CPU snapshot.
+  if(untrackedDirty)nativeModelUniforms_.invalidate();
+#endif
   const uint32_t stateGeneration = aurora::gx::g_gxState.pipelineStateGeneration;
   const uint32_t layoutGeneration = aurora::gx::g_gxState.layoutStateGeneration;
   const uint32_t vertexProgramGeneration = aurora::gx::g_gxState.vertexProgramStateGeneration;
   const bool translatedCacheHit = translatedStateValid_ && translatedStateGeneration_ == stateGeneration &&
                                   translatedPrimitive_ == primitive && translatedFmt_ == fmt;
+  const auto& gxState = aurora::gx::g_gxState;
+  const UniformContract uniformContract{gxState.stateIdentity, gxState.pipelineUniformGeneration,
+                                        layoutGeneration, vertexProgramGeneration, primitive, fmt};
+  // Only the decoder's explicitly classified BP depth/blend transitions can
+  // bypass the pipeline-miss uniform rebuild. The snapshot must have the same
+  // complete contract; revisions below still track matrix/fragment changes.
+  const bool rasterUniformHit = aurora::gx::fifo::raster_uniform_reuse_enabled() &&
+      translatedVertexStateValid_ && !broadDirty && gxState.pipelineRasterGeneration == stateGeneration &&
+      translatedUniformContract_ == uniformContract;
+  const bool uniformPipelineMiss = !translatedCacheHit && !rasterUniformHit;
   if (translatedCacheHit && translatedLayoutGeneration_ != layoutGeneration) {
     // Only indexed-array bindings changed: the pipeline, its key and every
     // flag derived from it stay valid; rebuild the decode layout alone.
@@ -787,11 +807,12 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   // The GPU vertex path copies only the state its generated shader can consume.
   // Indexed-PN and lit draws include their position/normal palettes and lights;
   // unsupported bump/dynamic-tex-matrix cases remain on the CPU path.
-  const bool rebuildVertex=!translatedVertexStateValid_ || !translatedCacheHit || broadDirty ||
+  const bool rebuildVertex=!translatedVertexStateValid_ || uniformPipelineMiss || broadDirty ||
       translatedVertexRevision_!=revisions.vertex ||
       (translatedVertexStateLightweight_&&!fixedCandidate&&!fixedStreamCandidate);
-  const bool rebuildFragment=!translatedVertexStateValid_ || broadDirty ||
-      translatedFragmentRevision_!=revisions.fragment;
+  const auto fragmentRevision=gfx::fragment_uniform_revision(pipeline,revisions);
+  const bool rebuildFragment=!translatedVertexStateValid_ || uniformPipelineMiss || broadDirty ||
+      translatedFragmentRevision_!=fragmentRevision;
   if(rebuildVertex||rebuildFragment){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
     gfx::ScopedTelemetryPhase sub(telemetry_,gfx::TelemetryPhase::StateVertex);
@@ -800,7 +821,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       if(rebuildFragment)telemetry_->count_fragment_translation();
     }
     ++vertexStateVersion_;
-    if(rebuildFragment) fragmentUniformVersion_=revisions.fragment;
+    if(rebuildFragment) fragmentUniformVersion_=broadDirty?0:fragmentRevision;
     if(rebuildVertex){
       if(fixedCandidate||fixedStreamCandidate){
         translate_fixed_vertex_state(translatedVertexState_,translatedUniforms_,translatedGpuPipeline_,rebuildFragment);
@@ -811,8 +832,9 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       }
     }else translate_fragment_uniforms(translatedUniforms_,pipeline);
     translatedVertexRevision_=revisions.vertex;
-    translatedFragmentRevision_=revisions.fragment;
+    translatedFragmentRevision_=fragmentRevision;
     translatedVertexStateValid_=true;
+    translatedUniformContract_=uniformContract;
   }
   consumedStateSerial_=revisions.serial;
   const auto& vertexState=translatedVertexState_;
@@ -1282,6 +1304,24 @@ std::array<gfx::TextureBinding,gfx::MaxTextures> DrawSink::resolve_textures(
     }
     bindings[slot].texture = white;
     bindings[slot].source = gfx::TextureSource::Cache;
+#if defined(AURORA_VITA_TEXTURE_FALLBACK_DIAGNOSTICS)
+    if(runtime_log_enabled(RuntimeLogLevel::Info)){
+      // Diagnostic builds only: bounded and once per guest source. Never dump
+      // texture payloads or turn a failed upload into an unbounded frame log.
+      static std::array<uintptr_t,32> loggedSources{};
+      static unsigned loggedCount=0;
+      const auto& raw=aurora::gx::g_gxState.loadedTextures[slot];
+      const auto source=reinterpret_cast<uintptr_t>(raw.data);
+      if(loggedCount<loggedSources.size()&&
+         std::find(loggedSources.begin(),loggedSources.begin()+loggedCount,source)==loggedSources.begin()+loggedCount){
+        loggedSources[loggedCount++]=source;
+        AURORA_VITA_LOG_INFO("[aurora-vita] texture_fallback frame=%llu slot=%u source=0x%llX fmt=0x%X w=%u h=%u mips=%u tlut=%u valid=%u dynamic=%u\n",
+            (unsigned long long)renderer_->frame(),slot,(unsigned long long)source,unsigned(raw.format()),
+            unsigned(raw.width()),unsigned(raw.height()),unsigned(raw.mip_count()),unsigned(raw.tlut),
+            unsigned(translated.valid),unsigned(translated.dynamicCopy));
+      }
+    }
+#endif
     if (translated.valid || translated.dynamicCopy) bindings[slot].sampler = translated.sampler;
     result.fallbackTextureMask |= static_cast<uint8_t>(1u << slot);
     if (translated.dynamicCopy) result.warnings |= SubmitWarning::DynamicCopyFallback;
@@ -1348,10 +1388,15 @@ bool DrawSink::submit_native_model_recipe(uint64_t identity,uint64_t pinnedIdent
   if(std::memcmp(&layout,&geometry.sourceLayout,sizeof(layout)))return reject(ModelCacheEvent::ConsumerLayout);
   if(geometry.vertices.buffer!=native.packet.vertices.buffer||geometry.indices.buffer!=native.packet.indices.buffer)return reject(ModelCacheEvent::ConsumerBuffers);
   gfx::ScopedTelemetryPhase drawTimer(telemetry_,gfx::TelemetryPhase::DrawFrontend);
-  // Resolve from current GX/TLUT/EFB state, never retain a cached GPU texture
-  // handle across draws. The same resolver is used by the reference path.
+  // Use the reference path's live resolver and revision/volatile/EFB guards,
+  // rather than texture handles from the captured packet.
+  const auto& gxState=aurora::gx::g_gxState;
+  const auto& revisions=gxState.stateRevisions;
+  const bool preparedMaterial=native_model_prepared_enabled();
+  const bool untrackedDirty=gxState.stateDirty&&revisions.serial==consumedStateSerial_;
+  const bool broadDirty=!preparedMaterial||untrackedDirty||gfx::gxm_disabled(gfx::GxmDisableStateDomains);
   SubmitResult textures{};uint8_t nativeWrapMask=0;
-  const auto bindings=resolve_textures(native.textureMask,true,nativeWrapMask,textures);
+  const auto bindings=resolve_textures(native.textureMask,broadDirty,nativeWrapMask,textures);
   if(textures.fallbackTextureMask)return reject(ModelCacheEvent::ConsumerTextures);
   uint8_t opaqueMask=0;uint32_t copyModes=0;
 #if defined(AURORA_VITA_RENDERER_GXM)
@@ -1362,11 +1407,20 @@ bool DrawSink::submit_native_model_recipe(uint64_t identity,uint64_t pinnedIdent
 #endif
   if(native.pipeline.nativeTextureWrapMask!=nativeWrapMask||
      native.pipeline.textureForceOpaqueMask!=opaqueMask||native.pipeline.textureCopyModeBits!=copyModes)return reject(ModelCacheEvent::ConsumerTextureModes);
-  gfx::VertexTransformState vertex{};gfx::DrawUniforms uniforms{};
-  {
+  const auto fragmentRevision=gfx::fragment_uniform_revision(native.pipeline,revisions);
+  const gfx::NativeModelUniformStamp stamp{identity,revisions.vertex,fragmentRevision,
+                                         gxState.stateIdentity,gxState.vertexProgramStateGeneration};
+  nativeModelUniforms_.prepare(stamp,broadDirty,[&](auto& vertex,auto& uniforms,bool vertexChanged,bool fragmentChanged){
     gfx::ScopedTelemetryPhase phase(telemetry_,gfx::TelemetryPhase::StateTranslate);
-    translate_fixed_vertex_state(vertex,uniforms,native.pipeline,true);
-  }
+    if(telemetry_){
+      if(vertexChanged)telemetry_->count_vertex_translation();
+      if(fragmentChanged)telemetry_->count_fragment_translation();
+    }
+    if(vertexChanged)translate_fixed_vertex_state(vertex,uniforms,native.pipeline,fragmentChanged);
+    else translate_fragment_uniforms(uniforms,native.pipeline);
+  });
+  const auto& vertex=nativeModelUniforms_.vertex();
+  const auto& uniforms=nativeModelUniforms_.uniforms();
   gfx::FixedVertexUniforms* fixed=nullptr;
   if(native_model_uniform_build_enabled()) {
     fixed=&build_fixed_uniforms(native.pipeline,vertex);
@@ -1391,6 +1445,7 @@ bool DrawSink::submit_native_model_recipe(uint64_t identity,uint64_t pinnedIdent
   aurora::gx::g_gxState.lastVtxFmt=static_cast<GXVtxFmt>(native.fmt);
   aurora::gx::g_gxState.lastVtxSize=layout.streamStride;
   aurora::gx::g_gxState.stateDirty=false;
+  consumedStateSerial_=revisions.serial;
   ++submittedDraws_;++frameDrawIndex_;
   if(telemetry_){telemetry_->add_draw(packet.vertexCount,packet.indexCount,packet.indexCount/3);
     telemetry_->gpu_geometry(true,packet.vertexCount);}
@@ -1404,6 +1459,21 @@ bool DrawSink::submit_native_model_recipe(uint64_t identity,uint64_t pinnedIdent
   return true;
 #else
   (void)identity;(void)pinnedIdentity;return false;
+#endif
+}
+
+void DrawSink::invalidate_native_model_sources(const aurora::gx::fifo::NativeModelSourceSpan* sources,
+                                             size_t count) noexcept {
+#if defined(MKW_TARGET_VITA) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  if(!sources||!count)return;
+  if(staticGeometry_)for(size_t i=0;i<count;++i)
+    staticGeometry_->invalidate_source_range(sources[i].data,sources[i].bytes);
+  // Metadata owns no GPU buffers. Clearing it prevents any retained recipe
+  // from dereferencing a retired entry; persistent meshes remain resident.
+  nativeModels_.clear();nativeModelCache_.clear();nativeModelUniforms_.invalidate();
+  clear_native_replay();
+#else
+  (void)sources;(void)count;
 #endif
 }
 

@@ -19,11 +19,17 @@ inline uint64_t program_cache_hash(const void* bytes,size_t count,uint64_t hash=
   for(size_t i=0;i<count;++i)hash=(hash^p[i])*1099511628211ull;
   return hash;
 }
-inline uint64_t program_source_hash(const char* vertex,const char* fragment) noexcept {
+enum class ProgramShaderLanguage : uint8_t { Glsl, Cg };
+inline uint64_t program_source_hash(const char* vertex,const char* fragment,
+                                   ProgramShaderLanguage language=ProgramShaderLanguage::Glsl) noexcept {
   // Include the binding contract and a terminator between stages, not only the
   // fragment text: Vita's GLSL pair compiler assigns shared varying semantics.
   static constexpr char contract[]="aurora-vitagl-binary-v1-attrs-pos0-color1,2-tex3:10-basis11:13";
   auto h=program_cache_hash(contract,sizeof(contract));
+  if(language==ProgramShaderLanguage::Cg){
+    static constexpr char cgContract[]="cg-v1-explicit-semantics-mvp-float4-columns-fog-float4x3";
+    h=program_cache_hash(cgContract,sizeof(cgContract),h);
+  }
   h=program_cache_hash(vertex,std::strlen(vertex)+1,h);
   return program_cache_hash(fragment,std::strlen(fragment)+1,h);
 }

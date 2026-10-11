@@ -1,5 +1,6 @@
 #include "../lib/gx/gx.hpp"
 #include "../lib/gx/fifo.hpp"
+#include "../lib/gx/native_model_registry.hpp"
 #include "../lib/dolphin/gx/__gx.h"
 #include "aurora_vita_backend.hpp"
 #include "gx/aurora_vita_draw_sink.hpp"
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <tuple>
 using namespace aurora::vita;
 using namespace aurora::gx::fifo;
 #undef CHECK
@@ -27,13 +29,28 @@ Snapshot snapshot(bool requireGpu=true){
     out.packet.fixedVertexUniforms=nullptr;
   },&result);CHECK(!requireGpu||result.gpu);return result;
 }
+gfx::TelemetryCounters counters(){
+  gfx::TelemetryCounters result{};
+  run_sync([](void* out){*static_cast<gfx::TelemetryCounters*>(out)=telemetry().frame().counters;},&result);
+  return result;
+}
 void same(const Snapshot& native,const Snapshot& reference){
   CHECK(native.packet.pipelineKey==reference.packet.pipelineKey);
   CHECK(!std::memcmp(&native.packet.uniforms,&reference.packet.uniforms,sizeof(native.packet.uniforms)));
   CHECK(!std::memcmp(&native.fixed,&reference.fixed,offsetof(gfx::FixedVertexUniforms,revision)));
   CHECK(native.packet.vertices.buffer==reference.packet.vertices.buffer);
   CHECK(native.packet.indices.buffer==reference.packet.indices.buffer);
-  CHECK(!std::memcmp(&native.packet.textures,&reference.packet.textures,sizeof(native.packet.textures)));
+  for(unsigned slot=0;slot<gfx::MaxTextures;++slot){
+    const auto& a=native.packet.textures[slot];const auto& b=reference.packet.textures[slot];
+    // Compare all semantic fields; TextureBinding contains unspecified padding.
+    CHECK(std::tie(a.texture,a.source,a.flipX,a.flipY,a.forceOpaque,a.sampleFormat,
+                   a.uvScaleX,a.uvScaleY,a.uvBiasX,a.uvBiasY)==
+          std::tie(b.texture,b.source,b.flipX,b.flipY,b.forceOpaque,b.sampleFormat,
+                   b.uvScaleX,b.uvScaleY,b.uvBiasX,b.uvBiasY));
+    const auto& s=a.sampler;const auto& t=b.sampler;
+    CHECK(std::tie(s.wrapS,s.wrapT,s.minFilter,s.magFilter,s.lodBias,s.minLod,s.maxLod)==
+          std::tie(t.wrapS,t.wrapT,t.minFilter,t.magFilter,t.lodBias,t.minLod,t.maxLod));
+  }
   CHECK(!std::memcmp(&native.packet.viewport,&reference.packet.viewport,sizeof(native.packet.viewport)));
   CHECK(!std::memcmp(&native.packet.scissor,&reference.packet.scissor,sizeof(native.packet.scissor)));
 }
@@ -111,8 +128,15 @@ int main(){
   // keep all older queued values immutable across ordinary/native transitions.
   CHECK(begin_frame());
   CHECK(write_native_model_recipe(recipe));auto duplicateA=snapshot();
+  const auto preparedCounts=counters();
   CHECK(write_native_model_recipe(recipe));auto duplicateB=snapshot();
   same(duplicateA,duplicateB);CHECK(duplicateA.fixedAddress==duplicateB.fixedAddress);
+  if(native_model_prepared_enabled()){
+    const auto reusedCounts=counters();
+    CHECK(reusedCounts.vertexTranslations==preparedCounts.vertexTranslations);
+    CHECK(reusedCounts.fragmentTranslations==preparedCounts.fragmentTranslations);
+    CHECK(reusedCounts.textureResolves==preparedCounts.textureResolves);
+  }
   run_sync([](void*){gfx::gxm_disable_mask()=gfx::GxmDisableFixedSnapshot;},nullptr);
   CHECK(write_native_model_recipe(recipe));auto maskedA=snapshot();
   CHECK(write_native_model_recipe(recipe));auto maskedB=snapshot();same(maskedA,maskedB);
@@ -127,6 +151,17 @@ int main(){
     CHECK(!std::memcmp(reinterpret_cast<const void*>(h.address),&h.value,
         offsetof(gfx::FixedVertexUniforms,revision)));},&held);
   write_stable_data(list.data(),list.size());same(moved,snapshot());
+  // Ordinary draws may consume a legacy dirty write without a domain revision.
+  // The next native snapshot must include it even after stateDirty is cleared.
+  run_sync([](void*){auto& g=aurora::gx::g_gxState;g.colorRegs[0]={0.8f,0.7f,0.6f,1};g.stateDirty=true;},nullptr);
+  write_stable_data(list.data(),list.size());auto untracked=snapshot();
+  CHECK(write_native_model_recipe(recipe));same(snapshot(),untracked);
+  run_sync([](void*){gfx::gxm_disable_mask()=gfx::GxmDisableStateDomains;},nullptr);
+  CHECK(write_native_model_recipe(recipe));auto domainMasked=snapshot();const auto maskedCounts=counters();
+  CHECK(write_native_model_recipe(recipe));same(domainMasked,snapshot());
+  CHECK(counters().vertexTranslations==maskedCounts.vertexTranslations+1);
+  CHECK(counters().fragmentTranslations==maskedCounts.fragmentTranslations+1);
+  run_sync([](void*){gfx::gxm_disable_mask()=0;},nullptr);
   run_sync([](void*){gfx::gxm_disable_mask()=gfx::GxmDisableFixedSnapshot|gfx::GxmDisableFixedBuild;},nullptr);
   CHECK(write_native_model_recipe(recipe));auto fullBuild=snapshot();
   CHECK(write_native_model_recipe(recipe));same(fullBuild,snapshot());
@@ -178,6 +213,42 @@ int main(){
     g.depthUpdate=!g.depthUpdate;g.pipelineStateGeneration=aurora::gx::next_gx_state_epoch();g.mark_dirty();
   },nullptr);CHECK(write_native_model_recipe(recipe));auto fallback=snapshot();CHECK(native_model_stats().fallback==raster.fallback+1);
   write_stable_data(list.data(),list.size());same(fallback,snapshot());end_frame();
+  // Asset release drains a pending draw before retiring its resident mesh.
+  // Reloading the same DL allocation receives a new loader generation.
+  if(native_model_prepared_enabled()){
+    CHECK(begin_frame());auto& registry=native_model_registry();
+    const auto source=reinterpret_cast<uintptr_t>(list.data());
+    const auto generation=registry.register_source(source,list.data(),list.size(),1);CHECK(generation);
+    CHECK(write_native_model_recipe(recipe));
+    release_native_model_sources(0);
+    CHECK(!registry.source_generation(source));
+    const auto released=native_model_stats();
+    CHECK(write_native_model_recipe(recipe));auto recovered=snapshot();
+    CHECK(native_model_stats().fallback==released.fallback+1);
+    write_stable_data(list.data(),list.size());same(recovered,snapshot());
+    CHECK(registry.register_source(source,list.data(),list.size(),1)>generation);
+    end_frame();registry.clear();
+  }
+  // Fog fragment constants depend on viewport writes in the vertex domain.
+  CHECK(begin_frame());run_sync([](void*){auto& g=aurora::gx::g_gxState;
+    g.fog.type=GX_FOG_PERSP_LIN;g.fog.a=0.25f;g.fog.b=0.5f;g.fog.c=0.125f;
+    g.fog.color={0.2f,0.3f,0.4f,1};g.fogRange[0]=(1u<<10)|640u;
+    g.pipelineStateGeneration=aurora::gx::next_gx_state_epoch();g.mark_dirty(aurora::gx::StateDomain::Fragment);
+  },nullptr);
+  CHECK(write_native_model_recipe(recipe));auto fog=snapshot();
+  write_stable_data(list.data(),list.size());same(fog,snapshot());
+  const auto fogStats=native_model_stats();
+  CHECK(write_native_model_recipe(recipe));snapshot();const auto fogCounts=counters();
+  run_sync([](void*){auto& g=aurora::gx::g_gxState;
+    g.logicalViewport={30,0,600,480,0,1};g.renderViewport={45,0,800,544,0,1};
+    g.mark_dirty(aurora::gx::StateDomain::Vertex);
+  },nullptr);
+  CHECK(write_native_model_recipe(recipe));auto viewport=snapshot();
+  CHECK(native_model_stats().dispatched==fogStats.dispatched+2);
+  CHECK(viewport.packet.uniforms.fogParams!=fog.packet.uniforms.fogParams);
+  CHECK(viewport.packet.uniforms.renderViewportWidth==800);
+  CHECK(counters().fragmentTranslations==fogCounts.fragmentTranslations+1);
+  write_stable_data(list.data(),list.size());same(viewport,snapshot());end_frame();
   CHECK(begin_frame());const auto geometry=native_model_stats();positions[0]^=1;gfx::note_memory_write(positions.data(),positions.size());
   CHECK(write_native_model_recipe(recipe));snapshot(false);CHECK(native_model_stats().fallback==geometry.fallback+1);end_frame();
   // Host frontend uses vitaGL eligibility, so normal/indexed-PN GPU draws are

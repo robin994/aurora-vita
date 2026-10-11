@@ -436,6 +436,8 @@ bool initialize(const BackendConfig& c) noexcept {
   aurora::gx::fifo::set_xf_equal_position_writes(c.gxm_xf_equal_pos_writes);
   aurora::gx::fifo::set_xf_equal_matrix_writes(c.gxm_xf_equal_matrix_writes);
   aurora::gx::fifo::set_tev_decoded_write_gate(c.gxm_tev_decoded_write_gate);
+  aurora::gx::fifo::set_raster_uniform_reuse(c.gxm_raster_uniform_reuse);
+  aurora::gx::fifo::set_native_pn_palette_enabled(c.gxm_native_pn_palette, c.diagnostics_enabled);
   aurora::gx::fifo::set_display_list_shadow_enabled(c.display_list_shadow&&
       !gfx::gxm_disabled(gfx::GxmDisableDisplayListShadow));
 #endif
@@ -957,6 +959,8 @@ PerformanceSnapshot performance_snapshot_now(const gfx::MemoryBudgetSnapshot* su
   const auto models=aurora::gx::fifo::native_model_stats();
   out.nativeModelAttempts=models.attempted;out.nativeModelDraws=models.dispatched;
   out.nativeModelFallbacks=models.fallback;out.nativeModelCompiled=models.compiled;
+  const auto pn=aurora::gx::fifo::native_pn_palette_stats();
+  out.nativePnPalettesQueued=pn.queued;out.nativePnPalettesApplied=pn.applied;out.nativePnMatricesApplied=pn.matrices;
   out.nativeModelCensus=aurora::gx::fifo::native_model_census_snapshot();
   out.nativeModelCache=aurora::gx::fifo::native_model_cache_snapshot();
 #endif

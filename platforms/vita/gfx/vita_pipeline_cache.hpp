@@ -13,10 +13,20 @@ struct CompiledPipeline {
   uint64_t lastUsed=0;
   PipelineDesc desc{};
   unsigned program=0;
+#if !defined(AURORA_VITA_RENDERER_GXM)
+  bool cgShaders=false;
+#endif
   int uMvp=-1,uKColor=-1,uTevReg=-1,uFogColor=-1,uFogParams=-1,uFogRangeK=-1,uRenderViewportWidth=-1,uIndMtx=-1,uTexcoordScale=-1,uTextureSizeBias=-1;
   std::array<int,MaxTextures> uTex{};
   mutable GpuDrawUniforms cachedUniforms{};
   mutable uint16_t uniformValidMask=0;
+#if !defined(AURORA_VITA_RENDERER_GXM)
+  int uTextureTransform=-1;
+  mutable std::array<std::array<float,4>,MaxTextures> cachedTextureTransforms{};
+  std::array<uint8_t,11> cgVectorCounts{};
+  uint8_t cgPositionCount=0,cgMaterialCount=0;
+  std::array<uint8_t,MaxTextures> cgTextureCounts{},cgPostCounts{};
+#endif
   int uGxPosition=-1,uGxMaterial=-1;
   std::array<int,MaxTextures> uGxTexture{},uGxPost{};
   mutable FixedVertexUniforms cachedFixedVertex{};
@@ -42,8 +52,14 @@ public:
   ~PipelineCache();
   const CompiledPipeline* get_or_create(const PipelineDesc& desc,FrameStats* stats=nullptr) noexcept;
   const CompiledPipeline* find(uint64_t key) noexcept;
+#if defined(AURORA_VITA_RENDERER_GXM)
   void bind(const CompiledPipeline& p,const GpuDrawUniforms& u,FrameStats* stats=nullptr,
             const FixedVertexUniforms* fixedVertex=nullptr) noexcept;
+#else
+  void bind(const CompiledPipeline& p,const GpuDrawUniforms& u,FrameStats* stats=nullptr,
+            const FixedVertexUniforms* fixedVertex=nullptr,
+            const std::array<TextureBinding,MaxTextures>* textures=nullptr) noexcept;
+#endif
   void clear() noexcept;
   void invalidate_bound() noexcept{bound_=0;boundPipeline_=nullptr;fixedStateValid_=false;}
   void set_max_entries(size_t maxEntries) noexcept;

@@ -82,9 +82,10 @@ void configure_program_binary_cache(const char* path) noexcept {
 }
 
 GLuint compile_shader(GLenum type,const char* src,std::string* diagnostics) noexcept {
+  const char* stage=(type==GL_VERTEX_SHADER||type==GL_CG_VERTEX_SHADER_EXT)?"vertex":
+      (type==GL_FRAGMENT_SHADER||type==GL_CG_FRAGMENT_SHADER_EXT)?"fragment":"unknown";
   GLuint s=glCreateShader(type);
   if(!s){
-    const char* stage=type==GL_VERTEX_SHADER?"vertex":type==GL_FRAGMENT_SHADER?"fragment":"unknown";
     AURORA_VITA_LOG_ERROR("[aurora-vita] glCreateShader failed for %s shader\n",stage);
     if(diagnostics){diagnostics->append("glCreateShader failed for ");diagnostics->append(stage);diagnostics->append(" shader\n");}
     return 0;
@@ -97,7 +98,6 @@ GLuint compile_shader(GLenum type,const char* src,std::string* diagnostics) noex
     glGetShaderiv(s,GL_INFO_LOG_LENGTH,&n);
     std::vector<char> log(n>1?n:2);
     glGetShaderInfoLog(s,(GLsizei)log.size(),nullptr,log.data());
-    const char* stage=type==GL_VERTEX_SHADER?"vertex":type==GL_FRAGMENT_SHADER?"fragment":"unknown";
     AURORA_VITA_LOG_ERROR("[aurora-vita] %s shader compile failed: %s\n",stage,log.data());
     if(diagnostics){
       diagnostics->append(stage);
@@ -110,12 +110,15 @@ GLuint compile_shader(GLenum type,const char* src,std::string* diagnostics) noex
   }
   return s;
 }
-GLuint link_program(const char* vs,const char* fs,std::string* diagnostics) noexcept {
-  const uint64_t sourceHash=program_source_hash(vs,fs);
+GLuint link_program(const char* vs,const char* fs,std::string* diagnostics,ProgramShaderLanguage language) noexcept {
+  const uint64_t sourceHash=program_source_hash(vs,fs,language);
   const std::string cachePath=program_cache_path(sourceHash);
   if(const GLuint cached=load_cached_program(cachePath,sourceHash))return cached;
   if(!cachePath.empty())++programCacheMisses;
-  GLuint v=compile_shader(GL_VERTEX_SHADER,vs,diagnostics),f=compile_shader(GL_FRAGMENT_SHADER,fs,diagnostics);if(!v||!f){if(v)glDeleteShader(v);if(f)glDeleteShader(f);return 0;}
+  const bool cg=language==ProgramShaderLanguage::Cg;
+  GLuint v=compile_shader(cg?GL_CG_VERTEX_SHADER_EXT:GL_VERTEX_SHADER,vs,diagnostics);
+  GLuint f=compile_shader(cg?GL_CG_FRAGMENT_SHADER_EXT:GL_FRAGMENT_SHADER,fs,diagnostics);
+  if(!v||!f){if(v)glDeleteShader(v);if(f)glDeleteShader(f);return 0;}
   GLuint p=glCreateProgram();
   if(!p){
     AURORA_VITA_LOG_ERROR("[aurora-vita] glCreateProgram failed\n");

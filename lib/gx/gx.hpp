@@ -483,6 +483,11 @@ struct GXState {
   }
   // Bumped by the decoded register writes that feed populate_pipeline_config, and by nothing else.
   u32 pipelineStateGeneration = next_gx_state_epoch();
+  // Raster-only BP transitions may keep CPU uniform snapshots. Every other
+  // pipeline invalidation advances the dependency epoch as well. The raster
+  // epoch proves that the latest pipeline change used that explicit path.
+  u32 pipelineUniformGeneration = next_gx_state_epoch();
+  u32 pipelineRasterGeneration = 0;
   // Vita: bumped by indexed-array base/size/stride changes. Those feed only the
   // vertex decode layout, not the translated pipeline, so the Vita DrawSink
   // rebuilds the layout without retranslating the whole pipeline.

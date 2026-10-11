@@ -54,6 +54,15 @@ public:
     if(!replaced)++size_;
     s.value=T{};s.key=key;s.age=++clock_;return s.value;
   }
+  template<class Predicate> size_t erase_if(Predicate predicate) noexcept {
+    size_t removed=0;
+    for(auto& slot:slots_)if(slot.age&&predicate(slot.value)){
+      slot=Slot{};
+      --size_;
+      ++removed;
+    }
+    return removed;
+  }
   void clear() noexcept {for(auto& s:slots_)s=Slot{};size_=0;clock_=0;}
   void release() noexcept {clear();std::vector<Slot>{}.swap(slots_);ways_=0;}
   size_t size() const noexcept {return size_;}
@@ -62,6 +71,7 @@ public:
 
 enum class ModelCacheEvent : uint8_t {
   ProducerLookup,ProducerHit,ProducerMiss,ProducerInsert,ProducerReplace,
+  ProducerEarlyAttempt,ProducerEarlyAdmitted,ProducerEarlyRejected,ProducerEarlyQueueReject,
   CaptureAttempt,CaptureContextReject,CaptureSourceReject,CaptureBusyReject,CaptureLimitReject,
   CaptureAborted,TransportAttempt,TransportContractReject,TransportPinReject,TransportQueueReject,
   ConsumerAttempt,ConsumerHit,ConsumerDisabled,ConsumerMissing,ConsumerPin,ConsumerRuntime,
@@ -70,6 +80,7 @@ enum class ModelCacheEvent : uint8_t {
 };
 inline constexpr std::array<const char*,size_t(ModelCacheEvent::Count)> ModelCacheEventNames{
   "producer_lookup","producer_hit","producer_miss","producer_insert","producer_replace",
+  "producer_early_attempt","producer_early_admitted","producer_early_rejected","producer_early_queue_reject",
   "capture_attempt","capture_context_reject","capture_source_reject","capture_busy_reject","capture_limit_reject",
   "capture_aborted","transport_attempt","transport_contract_reject","transport_pin_reject","transport_queue_reject",
   "consumer_attempt","consumer_hit","consumer_disabled","consumer_missing","consumer_pin","consumer_runtime",
@@ -87,8 +98,14 @@ struct ModelCacheSnapshot {
   std::array<uint64_t,size_t(ModelCachePeak::Count)> peaks{};
 };
 inline bool native_model_cache_diagnostics() noexcept {
-  static const bool enabled=[] {const char* p=std::getenv("STRIKERS_GXM_NATIVE_MODEL_CENSUS");
-    return p&&std::strcmp(p,"1")==0;}();
+  // Cache accounting is independent of the admission census. Keep both
+  // optional: event recording uses a mutex and skews frontend timings.
+  static const bool enabled=[] {
+    const char* p=std::getenv("STRIKERS_GXM_NATIVE_MODEL_METRICS");
+    if(p&&std::strcmp(p,"1")==0)return true;
+    p=std::getenv("STRIKERS_GXM_NATIVE_MODEL_CENSUS");
+    return p&&std::strcmp(p,"1")==0;
+  }();
   return enabled;
 }
 class ModelCacheDiagnostics {

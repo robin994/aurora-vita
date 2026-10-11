@@ -88,6 +88,7 @@ struct PerformanceSnapshot {
   uint64_t preparedListHits=0,preparedListMisses=0,preparedListRejected=0;
   uint64_t nativeReplayAttempts=0,nativeReplayHits=0,nativeReplayFallbacks=0;
   uint64_t nativeModelAttempts=0,nativeModelDraws=0,nativeModelFallbacks=0,nativeModelCompiled=0;
+  uint64_t nativePnPalettesQueued=0,nativePnPalettesApplied=0,nativePnMatricesApplied=0;
   aurora::gx::fifo::ModelCensusSnapshot nativeModelCensus{};
   aurora::gx::fifo::ModelCacheSnapshot nativeModelCache{};
   gfx::VertexReuseProbe::Stats vertexReuse{};
@@ -230,6 +231,10 @@ struct BackendConfig {
   // A5 TEV: inactive or semantically equal decoded stage writes must not
   // invalidate live pipeline/vertex/fragment revisions.
   bool gxm_tev_decoded_write_gate=false;
+  // Isolated CPU preparation experiment for BP depth/blend-only transitions.
+  bool gxm_raster_uniform_reuse=false;
+  // Native per-instance position/normal parameters in the existing FIFO batch.
+  bool gxm_native_pn_palette=false;
   // Prepared fragment bytes only; each draw still reserves a fresh GXM buffer.
   bool gxm_fragment_prepare_cache=false;
   // A3 experimental: copy a CPU-owned GXP vertex buffer image and upload only

@@ -5,6 +5,8 @@ option(AURORA_VITA_DIRECT_STREAM_WRITE "Write frame streaming data directly into
 option(AURORA_VITA_RUNTIME_MIPMAP_GENERATION "Generate missing texture mip chains at runtime on Vita" OFF)
 option(AURORA_VITA_NATIVE_CMPR "Upload GameCube CMPR through vitaGL's native DXT1 path" ON)
 option(AURORA_VITA_NATIVE_GX_TEXTURES "Upload exact GX I/I+A/RGB565 formats through native vitaGL texture formats" ON)
+option(AURORA_VITA_CG_SHADERS "Experimental vitaGL Cg reference TEV shaders (GLSL remains the default)" OFF)
+option(AURORA_VITA_TEXTURE_FALLBACK_DIAGNOSTICS "Log at most 32 unique missing VitaGL texture sources" OFF)
 
 set(AURORA_VITA_BACKEND_SOURCES
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_gl_util.cpp
@@ -15,6 +17,11 @@ set(AURORA_VITA_BACKEND_SOURCES
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_efb.cpp
     ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_renderer.cpp
 )
+
+if(AURORA_VITA_CG_SHADERS)
+    list(APPEND AURORA_VITA_BACKEND_SOURCES
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp)
+endif()
 
 if (AURORA_VITA_WITH_UPSTREAM_GX)
     if (NOT AURORA_ENABLE_GX)
@@ -38,6 +45,12 @@ target_include_directories(aurora_vita_backend PUBLIC
 )
 target_compile_definitions(aurora_vita_backend PUBLIC
     AURORA_PLATFORM_VITA=1 AURORA_GFX_VITA=1 AURORA_VITA_RENDERER_VITAGL=1)
+if(AURORA_VITA_CG_SHADERS)
+    target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_CG_SHADERS=1)
+endif()
+if(AURORA_VITA_TEXTURE_FALLBACK_DIAGNOSTICS)
+    target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_TEXTURE_FALLBACK_DIAGNOSTICS=1)
+endif()
 
 if (AURORA_VITA_WITH_UPSTREAM_GX)
     target_compile_definitions(aurora_vita_backend PRIVATE AURORA_VITA_UPSTREAM=1)

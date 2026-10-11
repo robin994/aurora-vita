@@ -94,6 +94,61 @@ void local_batching() {
   CHECK(enqueue_streamed_draw(stream,paddedB.draw,123,uniforms,viewport,scissor,textures,nullptr,0,nullptr,&padded));
   CHECK(stream.size()==2&&paddedB.indices[0]==0);
 }
+void streamed_vertex_addressing() {
+  BufferPool pool;StreamingArenaConfig cfg{};cfg.vertexBytes=4*1024*1024;cfg.indexBytes=4096;cfg.slots=1;
+  StreamingArena arena(pool,cfg);CHECK(arena.initialize());arena.begin_frame(0);
+  VertexDecodeLayout layout{};layout.count=1;layout.streamStride=12;layout.streamLittleEndian=true;
+  layout.attributes[0]={VertexSemantic::Position,VertexSource::Direct,VertexComponent::F32,3};
+  compile_vertex_decode_layout(layout);
+  PipelineDesc pipeline{};VertexTransformState state{};DrawUniforms uniforms{};
+  const auto stride=build_draw_recipe(pipeline).gpuStride;
+  const std::array<float,9> raw{1,2,3,4,5,6,7,8,9};
+  // Reproduce a streamed draw after earlier GX work has crossed the 64 KiB
+  // GXM attribute-offset boundary. Compare each GL fetch address against its
+  // source vertex slice, including the first triangle before the boundary.
+  for(const size_t padding : {size_t(0),size_t(96*1024)}) {
+    void* unused=nullptr;
+    if(padding)CHECK(arena.reserve_vertices(padding,16,&unused).buffer);
+    StreamedDraw draw{};
+    CHECK(prepare_streamed_draw_into(draw,arena,reinterpret_cast<const uint8_t*>(raw.data()),sizeof raw,3,
+          SourcePrimitive::Triangles,nullptr,0,layout,pipeline,state,&uniforms));
+    void* probe=nullptr;const auto after=arena.reserve_indices(2,2,&probe);CHECK(probe);
+    const auto* indices=reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(probe)-
+                                                        (after.offset-draw.indices.offset));
+    CommandStream stream;Viewport viewport{};Scissor scissor{};std::array<TextureBinding,MaxTextures> textures{};
+    CHECK(enqueue_streamed_draw(stream,draw,123,uniforms,viewport,scissor,textures));
+    const auto& packet=*stream.tail_draw();
+    for(unsigned corner=0;corner<3;++corner) {
+      const size_t attributeOffset=packet.absoluteVertexIndices?0:draw.vertices.offset;
+      const size_t physicalBase=Renderer::uses_local_stream_indices()?attributeOffset:uint16_t(attributeOffset);
+      CHECK(physicalBase+size_t(indices[corner])*stride==draw.vertices.offset+corner*stride);
+    }
+  }
+  // Explicit source indices must retain order when their draw lies beyond the
+  // same boundary. The supplied order differs from the generated triangle.
+  const std::array<uint16_t,3> sourceIndices{2,0,1};StreamedDraw explicitDraw{};
+  CHECK(prepare_streamed_draw_into(explicitDraw,arena,reinterpret_cast<const uint8_t*>(raw.data()),sizeof raw,3,
+        SourcePrimitive::Triangles,sourceIndices.data(),3,layout,pipeline,state,&uniforms));
+  void* probe=nullptr;const auto after=arena.reserve_indices(2,2,&probe);CHECK(probe);
+  const auto* indices=reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(probe)-
+                                                      (after.offset-explicitDraw.indices.offset));
+  for(unsigned i=0;i<3;++i) {
+    const size_t base=explicitDraw.absoluteVertexIndices?0:explicitDraw.vertices.offset;
+    CHECK(base+size_t(indices[i])*stride==explicitDraw.vertices.offset+sourceIndices[i]*stride);
+  }
+  if(!Renderer::uses_local_stream_indices()) {
+    // Exactly the final three U16 vertices are legal; the following draw must
+    // fail before index conversion could wrap around to earlier geometry.
+    StreamingArena limit(pool,cfg);CHECK(limit.initialize());limit.begin_frame(0);void* unused=nullptr;
+    CHECK(limit.reserve_vertices((65536-3)*stride,stride,&unused).buffer);
+    StreamedDraw last{},overflow{};
+    CHECK(prepare_streamed_draw_into(last,limit,reinterpret_cast<const uint8_t*>(raw.data()),sizeof raw,3,
+          SourcePrimitive::Triangles,nullptr,0,layout,pipeline,state,&uniforms));
+    CHECK(!prepare_streamed_draw_into(overflow,limit,reinterpret_cast<const uint8_t*>(raw.data()),sizeof raw,3,
+          SourcePrimitive::Triangles,nullptr,0,layout,pipeline,state,&uniforms));
+    CHECK(overflow.error==PrepareDrawError::TooManyVertices);
+  }
+}
 void shared_lifetimes() {
   CommandStream stream;DrawUniforms uniforms{};std::array<TextureBinding,MaxTextures> textures{};
   auto& first=stream.emplace_geometry_draw();stream.share_draw_state(first,uniforms,textures,1);
@@ -280,6 +335,6 @@ void pipeline_bindings() {
   CHECK(pipeline_setter_count(pipeline_state_changes(previous,next,true))==7);
 }
 }
-int main(){local_batching();shared_lifetimes();revision_identity_skips_payload_comparison();published_copies();pipeline_bindings();
+int main(){local_batching();streamed_vertex_addressing();shared_lifetimes();revision_identity_skips_payload_comparison();published_copies();pipeline_bindings();
   fixed_snapshots();submission_views();composed_statistics();published_memory();
   std::printf("submission: %u checks, %u failures\n",checks,failures);return failures?1:0;}

@@ -45,6 +45,7 @@ bool sXfEqualMatrixWrites=false;
 XfEqualMatrixStats sXfEqualMatrixStats{};
 bool sTevDecodedWriteGate=false;
 TevDecodedWriteStats sTevDecodedWriteStats{};
+bool sRasterUniformReuse=false;
 }
 
 void set_xf_equal_position_writes(bool enabled) noexcept {
@@ -62,6 +63,32 @@ void set_tev_decoded_write_gate(bool enabled) noexcept {
   sTevDecodedWriteStats={};
 }
 TevDecodedWriteStats tev_decoded_write_stats() noexcept {return sTevDecodedWriteStats;}
+void set_raster_uniform_reuse(bool enabled) noexcept {sRasterUniformReuse=enabled;}
+bool raster_uniform_reuse_enabled() noexcept {return sRasterUniformReuse;}
+
+bool apply_native_pn_palette(const uint8_t* data, size_t bytes) noexcept {
+  static_assert(MaxPnMtx == NativePnPaletteCapacity);
+  if (!data || !bytes || bytes % sizeof(NativePnMatrix) ||
+      bytes / sizeof(NativePnMatrix) > NativePnPaletteCapacity) return false;
+  NativePnMatrix matrix;
+  // FIFO byte storage may be unaligned. Copy before reading native fields.
+  for (size_t offset = 0; offset < bytes; offset += sizeof(matrix)) {
+    std::memcpy(&matrix, data + offset, sizeof(matrix));
+    if (matrix.slot >= MaxPnMtx) return false;
+  }
+  for (size_t offset = 0; offset < bytes; offset += sizeof(matrix)) {
+    std::memcpy(&matrix, data + offset, sizeof(matrix));
+    auto& destination = g_gxState.pnMtx[matrix.slot];
+    std::memcpy(&destination.pos, matrix.position.data(), sizeof(destination.pos));
+    auto* normal = reinterpret_cast<float*>(&destination.nrm);
+    for (size_t row = 0; row < 3; ++row)
+      std::memcpy(normal + row * 4, matrix.normal.data() + row * 3, 3 * sizeof(float));
+  }
+  // All writes precede the next draw. One revision publishes the complete
+  // palette; no pipeline/layout/material/texture dependency was changed.
+  g_gxState.mark_dirty(StateDomain::Vertex);
+  return true;
+}
 
 using IndexBuffer = std::vector<u16>;
 
@@ -148,12 +175,12 @@ static constexpr u8 CP_PRIMITIVE_END = 0xBF;
 #if _MSC_VER
 template<typename T>
 __forceinline // Yes, this was necessary.
-inline T unaligned_load(const T* ptr) {
+inline T unaligned_load(const void* ptr) {
   return *static_cast<const __unaligned T*>(ptr);
 }
 #else
 template<typename T>
-inline T unaligned_load(const T* ptr) {
+inline T unaligned_load(const void* ptr) {
   T copy;
   memcpy(&copy, ptr, sizeof(T));
   return copy;
@@ -161,7 +188,7 @@ inline T unaligned_load(const T* ptr) {
 #endif
 
 static inline u16 read_u16(const u8* ptr, bool bigEndian) {
-  const u16 val = unaligned_load(reinterpret_cast<const u16*>(ptr));
+  const u16 val = unaligned_load<u16>(ptr);
   if (bigEndian) {
     return bswap(val);
   }
@@ -169,7 +196,7 @@ static inline u16 read_u16(const u8* ptr, bool bigEndian) {
 }
 
 static inline u32 read_u32(const u8* ptr, bool bigEndian) {
-  const u32 val = unaligned_load(reinterpret_cast<const u32*>(ptr));
+  const u32 val = unaligned_load<u32>(ptr);
   if (bigEndian) {
     return bswap(val);
   }
@@ -308,17 +335,21 @@ static inline f32 read_f32(const u8* ptr, bool bigEndian) {
 }
 
 // Marks draw state dirty *and* invalidates the resolved-pipeline memo.
-static inline void mark_pipeline_state_dirty_at(unsigned line) noexcept {
+static inline void mark_pipeline_state_dirty_at(unsigned line, bool rasterOnly = false) noexcept {
 #if defined(AURORA_VITA_FIFO_PROFILE)
   if (aurora::vita::gfx::g_fifoProfileEnabled || aurora::vita::gfx::gxm_disabled(aurora::vita::gfx::GxmDiagPhases))
     aurora::vita::gfx::note_pipeline_invalidation(line);
 #else
   (void)line;
 #endif
-  g_gxState.mark_dirty();
+  const bool narrow = rasterOnly && sRasterUniformReuse;
+  g_gxState.mark_dirty(narrow ? StateDomain::Raster : StateDomain::All);
   g_gxState.pipelineStateGeneration = next_gx_state_epoch();
+  g_gxState.pipelineRasterGeneration = narrow ? g_gxState.pipelineStateGeneration : 0;
+  if (!narrow) g_gxState.pipelineUniformGeneration = g_gxState.pipelineStateGeneration;
 }
 #define mark_pipeline_state_dirty() mark_pipeline_state_dirty_at(__LINE__)
+#define mark_raster_pipeline_state_dirty() mark_pipeline_state_dirty_at(__LINE__, true)
 
 // Byte snapshot of decoded state taken before a register write is applied.
 // Many writes re-store values that decode to the same pipeline fields, or
@@ -331,6 +362,25 @@ struct DecodedSnapshot {
   explicit DecodedSnapshot(const T& v) noexcept : live(v) { std::memcpy(before, &v, sizeof(T)); }
   bool changed() const noexcept { return std::memcmp(before, &live, sizeof(T)) != 0; }
 };
+
+struct MatrixIndexChanges {
+  bool any = false;
+  bool active = false;
+};
+
+// CP/XF matrix-index writes only touch four mtx selectors. Their previous
+// values are already needed for vertex-program revisions; comparing the whole
+// eight-element TcgConfig array would copy and scan unrelated texgen state.
+static inline MatrixIndexChanges matrix_index_changes(const std::array<GXTexMtx, 4>& previous,
+                                                       u32 first) noexcept {
+  MatrixIndexChanges result;
+  for (u32 i = 0; i < previous.size() && first + i < MaxTexCoord; ++i) {
+    const bool changed = previous[i] != g_gxState.tcgs[first + i].mtx;
+    result.any = result.any || changed;
+    result.active = result.active || (changed && first + i < g_gxState.numTexGens);
+  }
+  return result;
+}
 #define mark_pipeline_state_dirty_if(cond)                                                                           \
   do {                                                                                                               \
     if (cond) mark_pipeline_state_dirty_at(__LINE__);                                                                \
@@ -876,7 +926,9 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 stage = (regId - 0xC0) / 2;
     if (stage < MaxTevStages) {
       auto& s = g_gxState.tevStages[stage];
-      const DecodedSnapshot<std::remove_reference_t<decltype(s)>> snap(s);
+      // This register cannot modify alpha, order or indirect state.
+      const DecodedSnapshot pass(s.colorPass);
+      const DecodedSnapshot op(s.colorOp);
       s.colorPass.d = static_cast<GXTevColorArg>(bp_get(value, 4, 0));
       s.colorPass.c = static_cast<GXTevColorArg>(bp_get(value, 4, 4));
       s.colorPass.b = static_cast<GXTevColorArg>(bp_get(value, 4, 8));
@@ -897,7 +949,7 @@ static void handle_bp(u32 value, bool bigEndian) {
       }
       // Stages past numTevStages are not translated; a genMode change that
       // activates them bumps the generation itself.
-      mark_tev_pipeline_if_changed(stage < g_gxState.numTevStages && snap.changed());
+      mark_tev_pipeline_if_changed(stage < g_gxState.numTevStages && (pass.changed() || op.changed()));
     }
     return;
   }
@@ -907,7 +959,11 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 stage = (regId - 0xC1) / 2;
     if (stage < MaxTevStages) {
       auto& s = g_gxState.tevStages[stage];
-      const DecodedSnapshot<std::remove_reference_t<decltype(s)>> snap(s);
+      // Keep the exact decoded oracle, limited to the fields written below.
+      const DecodedSnapshot pass(s.alphaPass);
+      const DecodedSnapshot op(s.alphaOp);
+      const auto oldSwapRas = s.tevSwapRas;
+      const auto oldSwapTex = s.tevSwapTex;
       s.tevSwapRas = static_cast<GXTevSwapSel>(bp_get(value, 2, 0));
       s.tevSwapTex = static_cast<GXTevSwapSel>(bp_get(value, 2, 2));
       s.alphaPass.d = static_cast<GXTevAlphaArg>(bp_get(value, 3, 4));
@@ -926,7 +982,8 @@ static void handle_bp(u32 value, bool bigEndian) {
         s.alphaOp.bias = static_cast<GXTevBias>(bp_get(value, 2, 16));
         s.alphaOp.scale = static_cast<GXTevScale>(bp_get(value, 2, 20));
       }
-      mark_tev_pipeline_if_changed(stage < g_gxState.numTevStages && snap.changed());
+      mark_tev_pipeline_if_changed(stage < g_gxState.numTevStages &&
+          (pass.changed() || op.changed() || oldSwapRas != s.tevSwapRas || oldSwapTex != s.tevSwapTex));
     }
     return;
   }
@@ -1088,9 +1145,11 @@ static void handle_bp(u32 value, bool bigEndian) {
     u32 stage1 = idx * 2 + 1;
     // Only the two stages this TEV-order register addresses can change.
     static_assert(MaxTevStages % 2 == 0);
-    using TevStageT = std::remove_reference_t<decltype(g_gxState.tevStages[0])>;
-    const DecodedSnapshot<TevStageT> snap0(g_gxState.tevStages[stage0 % MaxTevStages]);
-    const DecodedSnapshot<TevStageT> snap1(g_gxState.tevStages[stage1 % MaxTevStages]);
+    const auto& first = g_gxState.tevStages[stage0 % MaxTevStages];
+    const auto& second = g_gxState.tevStages[stage1 % MaxTevStages];
+    const auto oldMap0 = first.texMapId, oldMap1 = second.texMapId;
+    const auto oldCoord0 = first.texCoordId, oldCoord1 = second.texCoordId;
+    const auto oldChannel0 = first.channelId, oldChannel1 = second.channelId;
 
     // Channel ID reverse mapping from hardware to GX
     static const GXChannelID r2c[] = {GX_COLOR0A0, GX_COLOR1A1,   GX_COLOR0A0,    GX_COLOR1A1,
@@ -1117,8 +1176,11 @@ static void handle_bp(u32 value, bool bigEndian) {
       u32 chanHw = bp_get(value, 3, 19);
       s.channelId = (chanHw < 8) ? r2c[chanHw] : GX_COLOR_NULL;
     }
-    mark_tev_pipeline_if_changed((stage0 < g_gxState.numTevStages && snap0.changed()) ||
-                                 (stage1 < g_gxState.numTevStages && snap1.changed()));
+    mark_tev_pipeline_if_changed(
+        (stage0 < g_gxState.numTevStages &&
+         (oldMap0 != first.texMapId || oldCoord0 != first.texCoordId || oldChannel0 != first.channelId)) ||
+        (stage1 < g_gxState.numTevStages &&
+         (oldMap1 != second.texMapId || oldCoord1 != second.texCoordId || oldChannel1 != second.channelId)));
     break;
   }
 
@@ -1127,7 +1189,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     g_gxState.depthCompare = bp_get(value, 1, 0) != 0;
     g_gxState.depthFunc = static_cast<GXCompare>(bp_get(value, 3, 1));
     g_gxState.depthUpdate = bp_get(value, 1, 4) != 0;
-    mark_pipeline_state_dirty();
+    mark_raster_pipeline_state_dirty();
     break;
   }
 
@@ -1152,7 +1214,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     } else {
       g_gxState.blendMode = GX_BM_NONE;
     }
-    mark_pipeline_state_dirty();
+    mark_raster_pipeline_state_dirty();
     break;
   }
 
@@ -1694,7 +1756,6 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
 
   // Matrix index A (0x30)
   case 0x30: {
-    const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
     const u32 oldPnMtx = g_gxState.currentPnMtx;
     std::array<GXTexMtx, 4> oldTexMtx{};
     for (u32 i = 0; i < 4 && i < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i].mtx;
@@ -1707,22 +1768,19 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     // Same matrix indices as XF 0x18, written from a different bank.
     g_gxState.invalidateXfReg(0x18);
     // currentPnMtx is vertex state, not pipeline state.
-    bool activeTexgenChanged = false;
-    for (u32 i = 0; i < 4 && i < MaxTexCoord && i < g_gxState.numTexGens; ++i)
-      activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i].mtx;
-    if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+    const auto changes = matrix_index_changes(oldTexMtx, 0);
+    if (changes.active) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-    if (oldPnMtx != g_gxState.currentPnMtx || snap.changed())
+    if (oldPnMtx != g_gxState.currentPnMtx || changes.any)
       g_gxState.mark_dirty(StateDomain::Vertex);
 #else
-    mark_pipeline_state_dirty_if(snap.changed());
+    mark_pipeline_state_dirty_if(changes.any);
 #endif
     break;
   }
 
   // Matrix index B (0x40)
   case 0x40: {
-    const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
     std::array<GXTexMtx, 4> oldTexMtx{};
     for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i + 4].mtx;
     for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
@@ -1732,14 +1790,12 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     }
     // Same matrix indices as XF 0x19, written from a different bank.
     g_gxState.invalidateXfReg(0x19);
-    bool activeTexgenChanged = false;
-    for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord && (i + 4) < g_gxState.numTexGens; ++i)
-      activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i + 4].mtx;
-    if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+    const auto changes = matrix_index_changes(oldTexMtx, 4);
+    if (changes.active) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-    if (snap.changed()) g_gxState.mark_dirty(StateDomain::Vertex);
+    if (changes.any) g_gxState.mark_dirty(StateDomain::Vertex);
 #else
-    mark_pipeline_state_dirty_if(snap.changed());
+    mark_pipeline_state_dirty_if(changes.any);
 #endif
     break;
   }
@@ -1955,7 +2011,6 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
         break;
       case 0x18: {
         // Matrix index A: PnMtx + TexCoord0-3 matrix indices
-        const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
         const u32 oldPnMtx = g_gxState.currentPnMtx;
         std::array<GXTexMtx, 4> oldTexMtx{};
         for (u32 i = 0; i < 4 && i < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i].mtx;
@@ -1965,34 +2020,29 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
           g_gxState.tcgs[i].mtx = texMtx;
         }
-        bool activeTexgenChanged = false;
-        for (u32 i = 0; i < 4 && i < MaxTexCoord && i < g_gxState.numTexGens; ++i)
-          activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i].mtx;
-        if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+        const auto changes = matrix_index_changes(oldTexMtx, 0);
+        if (changes.active) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-        if (oldPnMtx != g_gxState.currentPnMtx || snap.changed())
+        if (oldPnMtx != g_gxState.currentPnMtx || changes.any)
           g_gxState.mark_dirty(StateDomain::Vertex);
 #else
-        mark_pipeline_state_dirty_if(snap.changed());
+        mark_pipeline_state_dirty_if(changes.any);
 #endif
         break;
       }
       case 0x19: {
         // Matrix index B: TexCoord4-7 matrix indices
-        const DecodedSnapshot<decltype(g_gxState.tcgs)> snap(g_gxState.tcgs);
         std::array<GXTexMtx, 4> oldTexMtx{};
         for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; ++i) oldTexMtx[i] = g_gxState.tcgs[i + 4].mtx;
         for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord; i++) {
           g_gxState.tcgs[i + 4].mtx = static_cast<GXTexMtx>(bp_get(val, 6, i * 6));
         }
-        bool activeTexgenChanged = false;
-        for (u32 i = 0; i < 4 && (i + 4) < MaxTexCoord && (i + 4) < g_gxState.numTexGens; ++i)
-          activeTexgenChanged = activeTexgenChanged || oldTexMtx[i] != g_gxState.tcgs[i + 4].mtx;
-        if (activeTexgenChanged) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
+        const auto changes = matrix_index_changes(oldTexMtx, 4);
+        if (changes.active) g_gxState.vertexProgramStateGeneration = next_gx_state_epoch();
 #if defined(MKW_TARGET_VITA)
-        if (snap.changed()) g_gxState.mark_dirty(StateDomain::Vertex);
+        if (changes.any) g_gxState.mark_dirty(StateDomain::Vertex);
 #else
-        mark_pipeline_state_dirty_if(snap.changed());
+        mark_pipeline_state_dirty_if(changes.any);
 #endif
         break;
       }

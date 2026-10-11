@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 #include "native_model_cache.hpp"
+#include "native_model_sources.hpp"
 
 namespace aurora::gx::fifo {
 // CPU-owned material commands only. Geometry is pinned independently on each
@@ -35,6 +36,9 @@ bool write_native_model_recipe(const NativeModelRecipeRef& recipe,const float* p
 uint64_t active_native_model_identity() noexcept;
 bool active_native_model_single_draw(uint8_t primitive,uint8_t fmt,uint16_t stride,const uint8_t* source) noexcept;
 NativeModelStats native_model_stats() noexcept;
+// Drain preceding GX work, then retire only assets owned above this loader
+// scope before the application reuses their memory. Producer-thread only.
+void release_native_model_sources(uint32_t ownerLevel) noexcept;
 
 // A failed capture is replayed before the original writer continues. Bounds
 // never truncate a GX command, and compound DLs retain the ordinary FIFO path.

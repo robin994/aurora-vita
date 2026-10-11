@@ -49,6 +49,14 @@ target_link_libraries(aurora_vita_gxm_backend PUBLIC aurora::vita_common
     vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
     SceGxm_stub SceDisplay_stub SceSysmodule_stub SceLibKernel_stub SceCtrl_stub
     SceAppMgr_stub SceCommonDialog_stub SceKernelDmacMgr_stub mathneon m)
+if (AURORA_VITA_ASYNC_GX)
+    # VitaSDK's non-glibc libstdc++ probes weak pthread_cancel to decide
+    # whether shared_ptr reference counts need atomics. Vita pthread provides
+    # pthread_create but not pthread_cancel, so the probe falsely reports one
+    # thread. The GX producer and FIFO consumer must never use that fast path.
+    # PUBLIC propagates through aurora::vita_backend to native port consumers.
+    target_compile_definitions(aurora_vita_common PUBLIC _GLIBCXX_GTHREAD_USE_WEAK=0)
+endif ()
 if (AURORA_VITA_BUILD_PROBE)
     include("${VITASDK}/share/vita.cmake")
     add_executable(aurora_vita_gxm_probe ${AURORA_VITA_SOURCE_DIR}/platforms/vita/probe/gxm_main.cpp)

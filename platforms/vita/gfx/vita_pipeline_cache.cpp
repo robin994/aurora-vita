@@ -2,6 +2,9 @@
 #include "vita_gl_util.hpp"
 #include "vita_pipeline_key.hpp"
 #include "vita_shader_gen.hpp"
+#if defined(AURORA_VITA_CG_SHADERS)
+#include "vita_vitagl_cg.hpp"
+#endif
 #include "../vita_data_paths.hpp"
 #include "../vita_log.hpp"
 #include <cstring>
@@ -20,7 +23,7 @@ void write_failure_blob(const char* path,const void* data,size_t size) noexcept 
   std::fclose(fp);
 }
 
-void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSources& src,const std::string& diagnostics) noexcept {
+void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSources& src,const std::string& diagnostics,bool cg) noexcept {
   if(!runtime_log_enabled(RuntimeLogLevel::Error))return;
   // Failure artifacts are intentionally overwrite-by-key: a recurring broken
   // pipeline must not grow storage without bound during a long Mario Kart run.
@@ -30,8 +33,8 @@ void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSource
   char base[192];
   std::snprintf(base,sizeof(base),"%s/shader_fail_%016llx",root.c_str(),(unsigned long long)key);
   char path[224];
-  std::snprintf(path,sizeof(path),"%s.vert.glsl",base);write_failure_blob(path,src.vertex.data(),src.vertex.size());
-  std::snprintf(path,sizeof(path),"%s.frag.glsl",base);write_failure_blob(path,src.fragment.data(),src.fragment.size());
+  std::snprintf(path,sizeof(path),"%s.vert.%s",base,cg?"cg":"glsl");write_failure_blob(path,src.vertex.data(),src.vertex.size());
+  std::snprintf(path,sizeof(path),"%s.frag.%s",base,cg?"cg":"glsl");write_failure_blob(path,src.fragment.data(),src.fragment.size());
   std::snprintf(path,sizeof(path),"%s.compiler.log",base);write_failure_blob(path,diagnostics.data(),diagnostics.size());
 
   std::snprintf(path,sizeof(path),"%s.desc.txt",base);
@@ -94,6 +97,27 @@ void dump_pipeline_failure(uint64_t key,const PipelineDesc& d,const ShaderSource
                (unsigned)d.tev.alphaCompare.op,(unsigned)d.tev.alphaCompare.comp1,(unsigned)d.tev.alphaCompare.ref1);
   std::fclose(fp);
   AURORA_VITA_LOG_ERROR("[aurora-vita] shader failure artifacts: %s.*\n",base);
+}
+
+GLint uniform_location(GLuint program,const char* name) noexcept {
+  GLint location=glGetUniformLocation(program,name);
+  if(location<0){
+    char first[64];std::snprintf(first,sizeof(first),"%s[0]",name);
+    location=glGetUniformLocation(program,first);
+  }
+  return location;
+}
+
+uint8_t uniform_vector_capacity(GLuint program,GLint location,unsigned expected) noexcept {
+  if(location<0)return 0;
+  GLint count=0;glGetProgramiv(program,GL_ACTIVE_UNIFORMS,&count);
+  for(GLint i=0;i<count;++i){
+    char name[96]{};GLint size=0;GLenum type=0;
+    glGetActiveUniform(program,i,sizeof(name),nullptr,&size,&type,name);
+    if(uniform_location(program,name)==location)
+      return static_cast<uint8_t>(std::min(expected,unsigned(std::max(size,0))));
+  }
+  return 0;
 }
 
 GLenum compare(Compare c){switch(c){case Compare::Never:return GL_NEVER;case Compare::Less:return GL_LESS;case Compare::Equal:return GL_EQUAL;case Compare::LessEqual:return GL_LEQUAL;case Compare::Greater:return GL_GREATER;case Compare::NotEqual:return GL_NOTEQUAL;case Compare::GreaterEqual:return GL_GEQUAL;case Compare::Always:return GL_ALWAYS;}return GL_ALWAYS;}
@@ -190,34 +214,73 @@ const CompiledPipeline* PipelineCache::get_or_create(const PipelineDesc& d,Frame
   p.uTex.fill(-1);
   p.uGxTexture.fill(-1);p.uGxPost.fill(-1);
 #if defined(__vita__)
-  auto src=build_tev_glsl(d);
   std::string shaderDiagnostics;
+  ShaderSources src;
+#if defined(AURORA_VITA_CG_SHADERS)
+  p.cgShaders=true;
+  auto cg=build_vitagl_cg(d);
+  shaderDiagnostics=cg.error;
+  src.vertex=std::move(cg.vertex);src.fragment=std::move(cg.fragment);
+  if(shaderDiagnostics.empty())
+    p.program=link_program(src.vertex.c_str(),src.fragment.c_str(),&shaderDiagnostics,ProgramShaderLanguage::Cg);
+#else
+  src=build_tev_glsl(d);
   p.program=link_program(src.vertex.c_str(),src.fragment.c_str(),&shaderDiagnostics);
-  if(!p.program){++compileFailures_;failedKeys_.insert(k);AURORA_VITA_LOG_ERROR("[aurora-vita] pipeline compile failed key=%llx\n",(unsigned long long)k);dump_pipeline_failure(k,d,src,shaderDiagnostics);return nullptr;}
-  p.uMvp=glGetUniformLocation(p.program,"u_mvp");
-  p.uKColor=glGetUniformLocation(p.program,"u_kcolor");
-  p.uTevReg=glGetUniformLocation(p.program,"u_tevreg");
-  p.uFogColor=glGetUniformLocation(p.program,"u_fog_color");
-  p.uFogParams=glGetUniformLocation(p.program,"u_fog_params");
-  p.uFogRangeK=glGetUniformLocation(p.program,"u_fog_range_k");
-  p.uRenderViewportWidth=glGetUniformLocation(p.program,"u_render_viewport_width");
-  p.uIndMtx=glGetUniformLocation(p.program,"u_ind_mtx");
-  p.uTexcoordScale=glGetUniformLocation(p.program,"u_texcoord_scale");
-  p.uTextureSizeBias=glGetUniformLocation(p.program,"u_texture_size_bias");
+#endif
+  if(!p.program){++compileFailures_;failedKeys_.insert(k);AURORA_VITA_LOG_ERROR("[aurora-vita] pipeline compile failed key=%llx: %s\n",(unsigned long long)k,shaderDiagnostics.c_str());dump_pipeline_failure(k,d,src,shaderDiagnostics,p.cgShaders);return nullptr;}
+  p.uMvp=uniform_location(p.program,"u_mvp");
+  p.uKColor=uniform_location(p.program,"u_kcolor");
+  p.uTevReg=uniform_location(p.program,"u_tevreg");
+  p.uFogColor=uniform_location(p.program,"u_fog_color");
+  p.uFogParams=uniform_location(p.program,"u_fog_params");
+  p.uFogRangeK=uniform_location(p.program,"u_fog_range_k");
+  p.uRenderViewportWidth=uniform_location(p.program,"u_render_viewport_width");
+  p.uIndMtx=uniform_location(p.program,"u_ind_mtx");
+  p.uTexcoordScale=uniform_location(p.program,"u_texcoord_scale");
+  p.uTextureSizeBias=uniform_location(p.program,"u_texture_size_bias");
+  if(p.cgShaders)p.uTextureTransform=uniform_location(p.program,"u_tex_transform");
   if(d.fixedVertexOnGpu){
-    p.uGxPosition=glGetUniformLocation(p.program,"u_gx_position");
-    p.uGxMaterial=glGetUniformLocation(p.program,"u_gx_material");
+    p.uGxPosition=uniform_location(p.program,"u_gx_position");
+    p.uGxMaterial=uniform_location(p.program,"u_gx_material");
     for(unsigned i=0;i<MaxTextures;++i){
       char name[32];std::snprintf(name,sizeof(name),"u_gx_texture%u",i);
-      p.uGxTexture[i]=glGetUniformLocation(p.program,name);
+      p.uGxTexture[i]=uniform_location(p.program,name);
       std::snprintf(name,sizeof(name),"u_gx_post%u",i);
-      p.uGxPost[i]=glGetUniformLocation(p.program,name);
+      p.uGxPost[i]=uniform_location(p.program,name);
     }
   }
+  if(p.cgShaders){
+    const int locations[]{p.uMvp,p.uKColor,p.uTevReg,p.uFogColor,p.uFogParams,p.uFogRangeK,
+        p.uRenderViewportWidth,p.uIndMtx,p.uTexcoordScale,p.uTextureSizeBias,p.uTextureTransform};
+    const unsigned counts[]{4,4,4,1,1,3,1,MaxIndMatrices*2,MaxTextures,MaxTextures,MaxTextures};
+    bool reflectionValid=true;
+    for(unsigned i=0;i<p.cgVectorCounts.size();++i){
+      p.cgVectorCounts[i]=uniform_vector_capacity(p.program,locations[i],counts[i]);
+      if(locations[i]>=0&&!p.cgVectorCounts[i])reflectionValid=false;
+    }
+    p.cgPositionCount=uniform_vector_capacity(p.program,p.uGxPosition,3);
+    p.cgMaterialCount=uniform_vector_capacity(p.program,p.uGxMaterial,4);
+    for(unsigned i=0;i<MaxTextures;++i){
+      p.cgTextureCounts[i]=uniform_vector_capacity(p.program,p.uGxTexture[i],3);
+      p.cgPostCounts[i]=uniform_vector_capacity(p.program,p.uGxPost[i],3);
+      if((p.uGxTexture[i]>=0&&!p.cgTextureCounts[i])||(p.uGxPost[i]>=0&&!p.cgPostCounts[i]))reflectionValid=false;
+    }
+    if((p.uGxPosition>=0&&!p.cgPositionCount)||(p.uGxMaterial>=0&&!p.cgMaterialCount))reflectionValid=false;
+    if(!reflectionValid){
+      shaderDiagnostics="Cg uniform reflection failed; refusing an unbounded upload";
+      ++compileFailures_;failedKeys_.insert(k);
+      AURORA_VITA_LOG_ERROR("[aurora-vita] pipeline compile failed key=%llx: %s\n",(unsigned long long)k,shaderDiagnostics.c_str());
+      dump_pipeline_failure(k,d,src,shaderDiagnostics,true);
+      glDeleteProgram(p.program);return nullptr;
+    }
+    if(useSequence_<=4)AURORA_VITA_LOG_DEBUG("[aurora-vita] Cg vectors mvp=%u konst=%u regs=%u transform=%u\n",
+        unsigned(p.cgVectorCounts[0]),unsigned(p.cgVectorCounts[1]),unsigned(p.cgVectorCounts[2]),unsigned(p.cgVectorCounts[10]));
+  }
+  if(useSequence_==1)AURORA_VITA_LOG_INFO("[aurora-vita] shader_language=%s\n",p.cgShaders?"Cg":"GLSL");
   glUseProgram(p.program);
   for(unsigned i=0;i<MaxTextures;i++){
     char n[16];std::snprintf(n,sizeof(n),"u_tex%u",i);
-    p.uTex[i]=glGetUniformLocation(p.program,n);
+    p.uTex[i]=uniform_location(p.program,n);
     if(p.uTex[i]>=0)glUniform1i(p.uTex[i],i);
   }
   // Uniform sampler initialization changes the process-global GL program. Do not
@@ -240,7 +303,8 @@ const CompiledPipeline* PipelineCache::find(uint64_t key) noexcept {
   return &it->second;
 }
 
-void PipelineCache::bind(const CompiledPipeline&p,const GpuDrawUniforms&u,FrameStats*st,const FixedVertexUniforms*fv) noexcept {
+void PipelineCache::bind(const CompiledPipeline&p,const GpuDrawUniforms&u,FrameStats*st,const FixedVertexUniforms*fv,
+                         const std::array<TextureBinding,MaxTextures>*textures) noexcept {
 #if defined(__vita__)
   if(bound_!=p.key){glUseProgram(p.program);fixed(p.desc,fixedStateValid_?&fixedState_:nullptr);fixedState_=snapshot_fixed(p.desc);fixedStateValid_=true;bound_=p.key;boundPipeline_=const_cast<CompiledPipeline*>(&p);if(st)st->stateChanges++;}
   auto changed=[&](uint16_t bit,const void* a,const void* b,size_t n) noexcept {
@@ -251,34 +315,56 @@ void PipelineCache::bind(const CompiledPipeline&p,const GpuDrawUniforms&u,FrameS
     p.uniformValidMask|=bit;
   };
   if(fv&&p.desc.fixedVertexOnGpu){
-    auto upload=[&](int location,const float* src,float* cached,size_t floats){
+    auto upload=[&](int location,const float* src,float* cached,size_t floats,unsigned cgCount){
       if(location<0)return;
       if(!p.fixedVertexValid||std::memcmp(src,cached,floats*sizeof(float))!=0){
-        glUniform4fv(location,static_cast<GLsizei>(floats/4),src);
+        glUniform4fv(location,static_cast<GLsizei>(p.cgShaders?cgCount:floats/4),src);
         std::memcpy(cached,src,floats*sizeof(float));
       }
     };
-    upload(p.uGxPosition,fv->position.data(),p.cachedFixedVertex.position.data(),12);
-    upload(p.uGxMaterial,fv->material[0].data(),p.cachedFixedVertex.material[0].data(),16);
+    upload(p.uGxPosition,fv->position.data(),p.cachedFixedVertex.position.data(),12,p.cgPositionCount);
+    upload(p.uGxMaterial,fv->material[0].data(),p.cachedFixedVertex.material[0].data(),16,p.cgMaterialCount);
     for(unsigned i=0;i<MaxTextures;++i){
-      upload(p.uGxTexture[i],fv->texture[i].data(),p.cachedFixedVertex.texture[i].data(),12);
-      upload(p.uGxPost[i],fv->post[i].data(),p.cachedFixedVertex.post[i].data(),12);
+      upload(p.uGxTexture[i],fv->texture[i].data(),p.cachedFixedVertex.texture[i].data(),12,p.cgTextureCounts[i]);
+      upload(p.uGxPost[i],fv->post[i].data(),p.cachedFixedVertex.post[i].data(),12,p.cgPostCounts[i]);
     }
     p.fixedVertexValid=true;
   }
-  if(p.uMvp>=0 && changed(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp))){glUniformMatrix4fv(p.uMvp,1,GL_FALSE,u.mvp.data());uploaded(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp));}
-  if(p.uKColor>=0 && changed(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor))){glUniform4fv(p.uKColor,4,u.kcolor[0].data());uploaded(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor));}
-  if(p.uTevReg>=0 && changed(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg))){glUniform4fv(p.uTevReg,4,u.tevreg[0].data());uploaded(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg));}
-  if(p.uFogColor>=0 && changed(1u<<3,u.fogColor.data(),p.cachedUniforms.fogColor.data(),sizeof(u.fogColor))){glUniform4fv(p.uFogColor,1,u.fogColor.data());uploaded(1u<<3,u.fogColor.data(),p.cachedUniforms.fogColor.data(),sizeof(u.fogColor));}
-  if(p.uFogParams>=0 && changed(1u<<4,u.fogParams.data(),p.cachedUniforms.fogParams.data(),sizeof(u.fogParams))){glUniform4fv(p.uFogParams,1,u.fogParams.data());uploaded(1u<<4,u.fogParams.data(),p.cachedUniforms.fogParams.data(),sizeof(u.fogParams));}
-  if(p.uFogRangeK>=0 && changed(1u<<5,u.fogRangeK.data(),p.cachedUniforms.fogRangeK.data(),sizeof(u.fogRangeK))){glUniform1fv(p.uFogRangeK,10,u.fogRangeK.data());uploaded(1u<<5,u.fogRangeK.data(),p.cachedUniforms.fogRangeK.data(),sizeof(u.fogRangeK));}
+  if(p.uMvp>=0 && changed(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp))){
+    if(p.cgShaders)glUniform4fv(p.uMvp,p.cgVectorCounts[0],u.mvp.data());else glUniformMatrix4fv(p.uMvp,1,GL_FALSE,u.mvp.data());
+    uploaded(1u<<0,u.mvp.data(),p.cachedUniforms.mvp.data(),sizeof(u.mvp));
+  }
+  if(p.uKColor>=0 && changed(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor))){glUniform4fv(p.uKColor,p.cgShaders?p.cgVectorCounts[1]:4,u.kcolor[0].data());uploaded(1u<<1,u.kcolor.data(),p.cachedUniforms.kcolor.data(),sizeof(u.kcolor));}
+  if(p.uTevReg>=0 && changed(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg))){glUniform4fv(p.uTevReg,p.cgShaders?p.cgVectorCounts[2]:4,u.tevreg[0].data());uploaded(1u<<2,u.tevreg.data(),p.cachedUniforms.tevreg.data(),sizeof(u.tevreg));}
+  if(p.uFogColor>=0 && changed(1u<<3,u.fogColor.data(),p.cachedUniforms.fogColor.data(),sizeof(u.fogColor))){glUniform4fv(p.uFogColor,p.cgShaders?p.cgVectorCounts[3]:1,u.fogColor.data());uploaded(1u<<3,u.fogColor.data(),p.cachedUniforms.fogColor.data(),sizeof(u.fogColor));}
+  if(p.uFogParams>=0 && changed(1u<<4,u.fogParams.data(),p.cachedUniforms.fogParams.data(),sizeof(u.fogParams))){glUniform4fv(p.uFogParams,p.cgShaders?p.cgVectorCounts[4]:1,u.fogParams.data());uploaded(1u<<4,u.fogParams.data(),p.cachedUniforms.fogParams.data(),sizeof(u.fogParams));}
+  if(p.uFogRangeK>=0 && changed(1u<<5,u.fogRangeK.data(),p.cachedUniforms.fogRangeK.data(),sizeof(u.fogRangeK))){
+#if defined(AURORA_VITA_CG_SHADERS)
+    if(p.cgShaders){const auto packed=vitagl_cg_fog_knots(u.fogRangeK);glUniform4fv(p.uFogRangeK,p.cgVectorCounts[5],packed.data());}
+    else
+#endif
+    glUniform1fv(p.uFogRangeK,10,u.fogRangeK.data());
+    uploaded(1u<<5,u.fogRangeK.data(),p.cachedUniforms.fogRangeK.data(),sizeof(u.fogRangeK));
+  }
   if(p.uRenderViewportWidth>=0 && changed(1u<<6,&u.renderViewportWidth,&p.cachedUniforms.renderViewportWidth,sizeof(u.renderViewportWidth))){glUniform1f(p.uRenderViewportWidth,u.renderViewportWidth);uploaded(1u<<6,&u.renderViewportWidth,&p.cachedUniforms.renderViewportWidth,sizeof(u.renderViewportWidth));}
-  if(p.uIndMtx>=0 && changed(1u<<7,u.indirectMatrices.data(),p.cachedUniforms.indirectMatrices.data(),sizeof(u.indirectMatrices))){glUniform4fv(p.uIndMtx,MaxIndMatrices*2,u.indirectMatrices[0].data());uploaded(1u<<7,u.indirectMatrices.data(),p.cachedUniforms.indirectMatrices.data(),sizeof(u.indirectMatrices));}
-  if(p.uTexcoordScale>=0 && changed(1u<<8,u.texcoordScale.data(),p.cachedUniforms.texcoordScale.data(),sizeof(u.texcoordScale))){glUniform4fv(p.uTexcoordScale,MaxTextures,u.texcoordScale[0].data());uploaded(1u<<8,u.texcoordScale.data(),p.cachedUniforms.texcoordScale.data(),sizeof(u.texcoordScale));}
-  if(p.uTextureSizeBias>=0 && changed(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias))){glUniform4fv(p.uTextureSizeBias,MaxTextures,u.textureSizeBias[0].data());uploaded(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias));}
+  if(p.uIndMtx>=0 && changed(1u<<7,u.indirectMatrices.data(),p.cachedUniforms.indirectMatrices.data(),sizeof(u.indirectMatrices))){glUniform4fv(p.uIndMtx,p.cgShaders?p.cgVectorCounts[7]:MaxIndMatrices*2,u.indirectMatrices[0].data());uploaded(1u<<7,u.indirectMatrices.data(),p.cachedUniforms.indirectMatrices.data(),sizeof(u.indirectMatrices));}
+  if(p.uTexcoordScale>=0 && changed(1u<<8,u.texcoordScale.data(),p.cachedUniforms.texcoordScale.data(),sizeof(u.texcoordScale))){glUniform4fv(p.uTexcoordScale,p.cgShaders?p.cgVectorCounts[8]:MaxTextures,u.texcoordScale[0].data());uploaded(1u<<8,u.texcoordScale.data(),p.cachedUniforms.texcoordScale.data(),sizeof(u.texcoordScale));}
+  if(p.uTextureSizeBias>=0 && changed(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias))){glUniform4fv(p.uTextureSizeBias,p.cgShaders?p.cgVectorCounts[9]:MaxTextures,u.textureSizeBias[0].data());uploaded(1u<<9,u.textureSizeBias.data(),p.cachedUniforms.textureSizeBias.data(),sizeof(u.textureSizeBias));}
+#if defined(AURORA_VITA_CG_SHADERS)
+  if(p.cgShaders&&p.uTextureTransform>=0){
+    const auto transforms=vitagl_cg_texture_transforms(textures);
+    if(changed(1u<<10,transforms.data(),p.cachedTextureTransforms.data(),sizeof(transforms))){
+      glUniform4fv(p.uTextureTransform,p.cgVectorCounts[10],transforms[0].data());
+      uploaded(1u<<10,transforms.data(),p.cachedTextureTransforms.data(),sizeof(transforms));
+    }
+  }
+#else
+  (void)textures;
+#endif
 #else
   (void)u;
   (void)fv;
+  (void)textures;
   if(bound_!=p.key){bound_=p.key;boundPipeline_=const_cast<CompiledPipeline*>(&p);if(st)st->stateChanges++;}
 #endif
 }

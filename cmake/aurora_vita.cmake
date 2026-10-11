@@ -48,6 +48,11 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp)
     target_link_libraries(aurora_vita_backend_contract_test PRIVATE aurora::vita_common)
     add_test(NAME vita_backend_contract COMMAND aurora_vita_backend_contract_test)
+    add_executable(aurora_vita_vitagl_cg_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_vitagl_cg_test.cpp
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp)
+    target_link_libraries(aurora_vita_vitagl_cg_test PRIVATE aurora::vita_common)
+    add_test(NAME vita_vitagl_cg COMMAND aurora_vita_vitagl_cg_test)
     add_executable(aurora_vita_native_material_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_material_test.cpp
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_shader_gen.cpp)
@@ -135,6 +140,10 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
             ${AURORA_VITA_SOURCE_DIR}/tests/vita_frontend_translation_test.cpp)
         target_link_libraries(aurora_vita_frontend_translation_test PRIVATE aurora::vita_backend)
         add_test(NAME vita_frontend_translation COMMAND aurora_vita_frontend_translation_test)
+        add_executable(aurora_vita_native_pn_palette_test
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_pn_palette_test.cpp)
+        target_link_libraries(aurora_vita_native_pn_palette_test PRIVATE aurora::vita_backend)
+        add_test(NAME vita_native_pn_palette COMMAND aurora_vita_native_pn_palette_test)
         add_executable(aurora_vita_native_model_recipe_test
             ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_recipe_test.cpp)
         target_link_libraries(aurora_vita_native_model_recipe_test PRIVATE aurora::vita_backend)
@@ -150,10 +159,27 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         add_test(NAME vita_native_model_textured_uniforms COMMAND aurora_vita_native_model_textured_test)
         set_tests_properties(vita_native_model_textured_uniforms PROPERTIES
             ENVIRONMENT "STRIKERS_GXM_NATIVE_MODEL_CACHE=1;STRIKERS_GXM_NATIVE_MODEL_CENSUS=1;STRIKERS_GXM_NATIVE_MODEL_UNIFORM_BUILD=1")
+        add_test(NAME vita_native_model_textured_prepared COMMAND aurora_vita_native_model_textured_test)
+        set_tests_properties(vita_native_model_textured_prepared PROPERTIES
+            ENVIRONMENT "STRIKERS_GXM_NATIVE_MODEL_CACHE=1;STRIKERS_GXM_NATIVE_MODEL_UNIFORM_BUILD=1;STRIKERS_GXM_NATIVE_MODEL_PREPARED=1")
+        add_executable(aurora_vita_native_model_prepared_test
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_prepared_test.cpp)
+        target_link_libraries(aurora_vita_native_model_prepared_test PRIVATE aurora::vita_backend)
+        add_test(NAME vita_native_model_prepared COMMAND aurora_vita_native_model_prepared_test)
         add_executable(aurora_vita_native_model_cache_test
             ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_cache_test.cpp)
         target_link_libraries(aurora_vita_native_model_cache_test PRIVATE aurora::vita_backend)
         add_test(NAME vita_native_model_cache COMMAND aurora_vita_native_model_cache_test)
+        add_test(NAME vita_native_model_registry_cache COMMAND aurora_vita_native_model_cache_test)
+        set_tests_properties(vita_native_model_registry_cache PROPERTIES
+            ENVIRONMENT "STRIKERS_GXM_NATIVE_MODEL_CACHE=1;STRIKERS_GXM_NATIVE_MODEL_CENSUS=1")
+        add_executable(aurora_vita_native_model_registry_dispatch_test
+            ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_registry_dispatch_test.cpp)
+        target_link_libraries(aurora_vita_native_model_registry_dispatch_test PRIVATE aurora::vita_backend)
+        add_test(NAME vita_native_model_registry_dispatch COMMAND aurora_vita_native_model_registry_dispatch_test)
+        add_test(NAME vita_native_model_registry_dispatch_cache COMMAND aurora_vita_native_model_registry_dispatch_test)
+        set_tests_properties(vita_native_model_registry_dispatch_cache PROPERTIES
+            ENVIRONMENT "STRIKERS_GXM_NATIVE_MODEL_CACHE=1;STRIKERS_GXM_NATIVE_MODEL_CENSUS=1")
         add_executable(aurora_vita_native_model_census_test
             ${AURORA_VITA_SOURCE_DIR}/tests/vita_native_model_census_test.cpp)
         target_link_libraries(aurora_vita_native_model_census_test PRIVATE aurora::vita_backend)

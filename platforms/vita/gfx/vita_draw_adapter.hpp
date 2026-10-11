@@ -65,6 +65,7 @@ struct StreamedDraw {
   uint32_t indexCount = 0;
   Primitive primitive = Primitive::Triangles;
   bool positionIsClipSpace = false;
+  bool absoluteVertexIndices = false;
   bool ok() const noexcept { return error == PrepareDrawError::None; }
 };
 

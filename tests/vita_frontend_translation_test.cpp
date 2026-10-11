@@ -12,8 +12,10 @@
 #include <cstdio>
 #include "../lib/gx/display_list_shadow.hpp"
 #include "gfx/vita_view_draw_capture.hpp"
+#include "gfx/vita_fixed_vertex.hpp"
 #include <cstring>
 #include <vector>
+#include <dolphin/vi.h>
 
 extern "C" void aurora_vita_notify_memory_write(const void* address,size_t bytes) noexcept;
 extern "C" void aurora_vita_prepare_memory_write(const void* address,size_t bytes) noexcept;
@@ -337,6 +339,102 @@ void tev_decoded_write_gate_oracle() {
   set_tev_decoded_write_gate(false);
   CHECK(tev_decoded_write_stats().inspected==0);
 }
+// Compare dirty decisions against an independent, full decoded-state snapshot.
+// This guards field-sized comparisons: inactive stages/texgens, redundant
+// writes, BP masks and CP/XF aliases must retain the original decisions.
+void decoded_snapshot_field_oracle() {
+  using namespace aurora::gx;
+  using namespace aurora::gx::fifo;
+  auto& g=g_gxState;
+  uint32_t random=0x53545249u;
+  const auto next=[&]() {random^=random<<13;random^=random>>17;random^=random<<5;return random;};
+  uint64_t digest=1469598103934665603ull;
+  const auto hash=[&](const void* p,size_t n) {
+    const auto* bytes=static_cast<const uint8_t*>(p);
+    for(size_t i=0;i<n;++i){digest^=bytes[i];digest*=1099511628211ull;}
+  };
+  const auto emitBp=[](uint32_t word) {
+    const uint8_t bytes[]={0x61,uint8_t(word>>24),uint8_t(word>>16),uint8_t(word>>8),uint8_t(word)};
+    process_sync(bytes,sizeof(bytes),true);
+  };
+  for(bool gate:{false,true}) {
+    set_tev_decoded_write_gate(gate);
+    for(unsigned count=1;count<=16;++count) {
+      g=GXState{};g.numTevStages=count;
+      for(unsigned iteration=0;iteration<512;++iteration) {
+        const unsigned kind=iteration%3;
+        const unsigned stage=next()%16;
+        const unsigned reg=kind==2?0x28+stage/2:0xc0+stage*2+kind;
+        // Alternating mask writes exercise cached-register merging as well.
+        if(iteration%17==0)emitBp(0xfe00ffffu);
+        const auto before=g.tevStages;
+        const auto generation=g.pipelineStateGeneration;
+        const uint32_t word=(reg<<24)|(next()&0x00ffffffu);
+        const uint32_t mask=g.bpRegCache[0xfe];
+        const uint32_t merged=(g.bpRegCache[reg]&~mask)|(word&mask);
+        const bool decoded=g.bpRegCache[reg]!=((reg<<24)|(merged&0x00ffffffu));
+        g.stateDirty=false;
+        emitBp(word);
+        bool activeChanged=false;
+        for(unsigned i=0;i<count;++i)
+          activeChanged=activeChanged||std::memcmp(&before[i],&g.tevStages[i],sizeof(before[i]))!=0;
+        CHECK((g.pipelineStateGeneration!=generation)==activeChanged);
+        CHECK(g.stateDirty==(gate?activeChanged:decoded));
+        hash(g.tevStages.data(),sizeof(g.tevStages));
+        hash(&activeChanged,sizeof(activeChanged));
+        // Exact repeated register payload must retain its cache no-op.
+        const auto repeatedGeneration=g.pipelineStateGeneration;
+        g.stateDirty=false;emitBp(word);
+        // A preceding partial mask is single-use, so the second write may
+        // still change the remaining bits; only unmasked repeats are no-ops.
+        if(mask==0x00ffffffu) {
+          CHECK(g.pipelineStateGeneration==repeatedGeneration&&!g.stateDirty);
+        }
+      }
+    }
+  }
+  set_tev_decoded_write_gate(false);
+  for(unsigned active=0;active<=8;++active) {
+    g=GXState{};g.numTexGens=active;
+    for(unsigned iteration=0;iteration<512;++iteration) {
+      const unsigned bank=iteration%4;
+      const unsigned first=(bank&1)?4:0;
+      const bool cp=bank<2;
+      // Keep unrelated fields and padding nonzero: a narrow comparison must
+      // not depend on how the rest of TcgConfig was initialized.
+      for(unsigned i=0;i<8;++i){g.tcgs[i].postMtx=GX_PTTEXMTX0;g.tcgs[i]._p2=uint8_t(i+1);}
+      const auto before=g.tcgs;
+      const uint32_t oldPn=g.currentPnMtx;
+      const auto generation=g.vertexProgramStateGeneration;
+      const auto pipelineGeneration=g.pipelineStateGeneration;
+      const uint64_t vertex=g.stateRevisions.vertex;
+      uint32_t value=(bank&1)?0u:(next()%10)*3;
+      for(unsigned i=0;i<4;++i)value|=(next()%61)<<((bank&1)?i*6:6+i*6);
+      const uint16_t addr=(bank&1)?0x19:0x18;
+      std::vector<uint8_t> bytes;
+      const auto write32=[&](uint32_t v){for(int shift:{24,16,8,0})bytes.push_back(uint8_t(v>>shift));};
+      if(cp){bytes={0x08,uint8_t((bank&1)?0x40:0x30)};write32(value);}
+      else{bytes={0x10};write32(0x1000+addr);write32(value);g.invalidateXfReg(addr);}
+      g.stateDirty=false;process_sync(bytes.data(),uint32_t(bytes.size()),true);
+      bool activeChanged=false;
+      for(unsigned i=first;i<first+4&&i<active;++i)activeChanged|=before[i].mtx!=g.tcgs[i].mtx;
+      const bool changed=std::memcmp(before.data(),g.tcgs.data(),sizeof(before))!=0;
+      CHECK((g.vertexProgramStateGeneration!=generation)==activeChanged);
+      CHECK(g.pipelineStateGeneration==pipelineGeneration);
+      CHECK((g.stateRevisions.vertex!=vertex)==(changed||oldPn!=g.currentPnMtx));
+      for(unsigned i=0;i<8;++i) {
+        auto expected=before[i];
+        if(i>=first&&i<first+4)expected.mtx=g.tcgs[i].mtx;
+        CHECK(std::memcmp(&expected,&g.tcgs[i],sizeof(expected))==0);
+      }
+      hash(g.tcgs.data(),sizeof(g.tcgs));hash(&g.currentPnMtx,sizeof(g.currentPnMtx));
+      hash(&activeChanged,sizeof(activeChanged));
+    }
+  }
+  // Frozen from the original full-snapshot decoder before the narrow patch.
+  CHECK(digest==0xab552d3a579e1db2ull);
+  std::printf("decoded snapshot corpus: digest=%016llx\n",static_cast<unsigned long long>(digest));
+}
 void state_transitions() {
   using aurora::gx::StateDomain;
   auto& g=aurora::gx::g_gxState;
@@ -419,6 +517,126 @@ void state_transitions() {
   }
   sink.flush();sink.shutdown();renderer.shutdown();
 }
+// Real BP commands, including masked writes, versus a full uniform translation.
+// Cover lit/indexed-PN CPU and the host backend's unlit resident/streamed GPU
+// contracts independently (lit GPU rendering itself requires Vita GXM).
+void raster_pipeline_uniform_reuse_oracle() {
+  using namespace aurora::gx;
+  using namespace aurora::gx::fifo;
+  for(bool enabled:{false,true})for(unsigned mode=0;mode<3;++mode) {
+    auto& g=g_gxState;g=GXState{};
+    g.proj.m0={1,0,0,0};g.proj.m1={0,1,0,0};g.proj.m2={0,0,1,0};g.proj.m3={0,0,0,1};
+    g.logicalViewport=g.renderViewport={0,0,960,544,0,1};
+    g.logicalScissor=g.renderScissor={0,0,960,544};
+    g.numChans=1;g.numTevStages=1;
+    g.tevStages[0].channelId=GX_COLOR0A0;
+    g.tevStages[0].colorPass.d=GX_CC_RASC;g.tevStages[0].alphaPass.d=GX_CA_RASA;
+    g.colorChannelConfig[GX_COLOR0].lightingEnabled=mode==0;
+    g.colorChannelState[GX_COLOR0].lightMask=1;
+    g.colorChannelState[GX_COLOR0].matColor={1,0.5f,0.25f,1};
+    g.lights[0].color={0.5f,1,0.25f,1};g.lights[0].pos={1,2,3,1};
+    g.vtxDesc[GX_VA_PNMTXIDX]=mode==0?GX_DIRECT:GX_NONE;
+    g.vtxDesc[GX_VA_POS]=GX_DIRECT;g.vtxDesc[GX_VA_NRM]=GX_DIRECT;
+    g.vtxFmts[0].attrs[GX_VA_POS]={GX_POS_XYZ,GX_F32,0};
+    g.vtxFmts[0].attrs[GX_VA_NRM]={GX_NRM_XYZ,GX_F32,0};g.vtxFmts[1]=g.vtxFmts[0];
+    std::array<uint8_t,75> raw{};
+    const unsigned stride=mode==0?25:24,positionOffset=mode==0?1:0;
+    for(unsigned v=0;v<3;++v) {
+      if(mode==0)raw[v*stride]=uint8_t(v*3);
+      const std::array<float,6> values{float(v==1),float(v==2),0,0,0,1};
+      for(unsigned i=0;i<values.size();++i) {
+        const auto bits=std::bit_cast<uint32_t>(values[i]);
+        for(unsigned b=0;b<4;++b)raw[v*stride+positionOffset+i*4+b]=uint8_t(bits>>(24-8*b));
+      }
+    }
+    gfx::note_memory_write(raw.data(),raw.size());set_raster_uniform_reuse(enabled);
+    gfx::Renderer renderer;CHECK(renderer.initialize());renderer.begin_frame();
+    gfx::Telemetry telemetry;telemetry.begin_frame(0);
+    gxbridge::DrawSink sink;gxbridge::DrawSinkConfig config{};config.telemetry=&telemetry;
+    config.staticGeometryBudget=mode?1024*1024:0;config.staticGeometryMinVertices=3;
+    config.staticGeometryStableOnly=mode==2;config.allowStreamedFixedVertexGpu=mode==2;
+    config.allowLitFixedVertexGpu=true;config.fixedUniformPoolBytes=gfx::FixedUniformPool::MaxRetainedBytes;
+    CHECK(sink.initialize(renderer,config));sink.begin_frame(0);
+    const auto bp=[&](uint8_t reg,uint32_t value) {
+      const std::array<uint8_t,5> command{0x61,reg,uint8_t(value>>16),uint8_t(value>>8),uint8_t(value)};
+      process(command.data(),command.size(),true);
+    };
+    const auto submit=[&](uint8_t fmt=0) {
+      const auto before=telemetry.frame().counters.draws;
+      CHECK(sink.submit(GX_TRIANGLES,fmt,raw.data(),3*stride,3,nullptr,0,mode==1?raw.data():nullptr).ok);
+      g.stateDirty=false;CHECK(telemetry.frame().counters.draws==before+1);
+      const auto* draw=sink.stream().tail_draw();CHECK(draw);if(!draw)return;
+      const auto* compiled=renderer.pipelines().find(draw->pipelineKey);CHECK(compiled);if(!compiled)return;
+      CHECK(compiled->desc.depthTest==g.depthCompare);
+      CHECK(compiled->desc.depthWrite==(g.depthCompare&&g.depthUpdate));
+      CHECK(compiled->desc.colorWrite==g.colorUpdate&&compiled->desc.alphaWrite==g.alphaUpdate);
+      CHECK(bool(draw->fixedVertexUniforms)==bool(mode));
+      gfx::VertexTransformState vertex{};gfx::DrawUniforms uniforms{};
+      if(mode)gxbridge::translate_fixed_vertex_state(vertex,uniforms,compiled->desc,true);
+      else gxbridge::translate_vertex_state(vertex,uniforms,compiled->desc,
+                                            gxbridge::translate_current_vertex_layout(fmt),true);
+      const gfx::GpuDrawUniforms expected(uniforms);
+      CHECK(!std::memcmp(&draw->gpu_uniforms(),&expected,sizeof(expected)));
+      if(draw->fixedVertexUniforms) {
+        auto expectedFixed=gfx::fixed_vertex_uniforms(compiled->desc,vertex);auto actual=*draw->fixedVertexUniforms;
+        actual.revision=expectedFixed.revision=0;
+        CHECK(!std::memcmp(&actual,&expectedFixed,sizeof(actual)));
+      }
+    };
+    submit();const auto before=telemetry.frame().counters;
+    const auto* frozen=sink.stream().tail_draw();const auto firstUniforms=frozen->gpu_uniforms();
+    uint32_t random=0x31415926;
+    for(unsigned i=0;i<128;++i) {
+      random=random*1664525u+1013904223u;
+      const auto revisions=g.stateRevisions;const auto contract=g.pipelineUniformGeneration;
+      if(i%5==0)bp(0xfe,0x00000f);
+      bp(i&1?0x40:0x41,random&0x00ffff);
+      CHECK(g.stateRevisions.raster>revisions.raster);
+      if(enabled) {
+        CHECK(g.stateRevisions.vertex==revisions.vertex&&g.stateRevisions.fragment==revisions.fragment);
+        CHECK(g.stateRevisions.textures==revisions.textures);CHECK(g.pipelineUniformGeneration==contract);
+      }else CHECK(g.pipelineUniformGeneration!=contract);
+      submit();
+    }
+    CHECK(telemetry.frame().counters.vertexTranslations==before.vertexTranslations+(enabled?0:128));
+    CHECK(telemetry.frame().counters.fragmentTranslations==before.fragmentTranslations+(enabled?0:128));
+    CHECK(!std::memcmp(&frozen->gpu_uniforms(),&firstUniforms,sizeof(firstUniforms)));
+    const auto rebuild=[&](auto&& change,uint8_t fmt=0) {
+      const auto counters=telemetry.frame().counters;change();submit(fmt);
+      CHECK(telemetry.frame().counters.vertexTranslations==counters.vertexTranslations+1);
+    };
+    // Interposed full changes cannot be hidden by a later raster write.
+    rebuild([&]{const auto epoch=g.pipelineUniformGeneration;bp(0x42,0x180);bp(0x41,0x0318);
+      CHECK(g.pipelineUniformGeneration!=epoch);});
+    rebuild([&]{g.pnMtx[1].pos.m0[3]=9;g.mark_dirty(StateDomain::Vertex);bp(0x40,0x17);});
+    auto counters=telemetry.frame().counters;
+    g.colorRegs[0]={0.2f,0.4f,0.6f,0.8f};g.mark_dirty(StateDomain::Fragment);bp(0x41,0x0319);submit();
+    CHECK(telemetry.frame().counters.fragmentTranslations==counters.fragmentTranslations+1);
+    rebuild([&]{g.layoutStateGeneration=next_gx_state_epoch();g.mark_dirty(StateDomain::Layout);bp(0x40,0x03);});
+    rebuild([&]{g.vertexProgramStateGeneration=next_gx_state_epoch();g.mark_dirty(StateDomain::Vertex);bp(0x41,0x0318);});
+    rebuild([&]{bp(0x40,0x17);},1);
+    rebuild([&]{g.proj.m0[0]=2;g.stateDirty=true;},1); // Untracked legacy write.
+    rebuild([&]{gfx::gxm_disable_mask()=gfx::GxmDisableStateDomains;bp(0x41,0x0319);});
+    gfx::gxm_disable_mask()=0;
+    rebuild([&]{g.stateIdentity=next_gx_state_epoch();bp(0x40,0x03);});
+    // Fog reads the vertex-domain viewport; indirect TEV reads texture size.
+    // Narrow raster writes must not mask those cross-domain dependencies.
+    g.fog.type=GX_FOG_PERSP_LIN;g.fog.a=0.125f;g.fogRange[0]=1u<<10;
+    g.numIndStages=1;g.pipelineStateGeneration=next_gx_state_epoch();g.mark_dirty();submit();
+    counters=telemetry.frame().counters;
+    g.logicalViewport.left=30;g.renderViewport.width=800;g.mark_dirty(StateDomain::Vertex);
+    bp(0x41,0x0318);submit();
+    CHECK(telemetry.frame().counters.fragmentTranslations==counters.fragmentTranslations+1);
+    counters=telemetry.frame().counters;
+    g.loadedTextures[0].image0=15u|(7u<<10);g.mark_dirty(StateDomain::Textures);
+    bp(0x40,0x17);submit();
+    CHECK(telemetry.frame().counters.fragmentTranslations==counters.fragmentTranslations+1);
+    // An unclassified direct pipeline invalidation must remain conservative.
+    rebuild([&]{g.pipelineStateGeneration=next_gx_state_epoch();g.mark_dirty(StateDomain::Fragment);});
+    sink.flush();sink.shutdown();renderer.shutdown();set_raster_uniform_reuse(false);
+  }
+}
+
 void fixed_geometry_vertex_program_transitions(bool streamed = false) {
   using aurora::gx::StateDomain;
   auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
@@ -477,6 +695,41 @@ void fixed_geometry_vertex_program_transitions(bool streamed = false) {
   }
   sink.flush();sink.shutdown();renderer.shutdown();
 }
+void resident_geometry_has_one_draw_per_submission() {
+  for(const bool cached:{false,true}) {
+    auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+    g.proj.m0={1,0,0,0};g.proj.m1={0,1,0,0};g.proj.m2={0,0,1,0};g.proj.m3={0,0,0,1};
+    g.pnMtx[0].pos.m0={1,0,0,0};g.pnMtx[0].pos.m1={0,1,0,0};g.pnMtx[0].pos.m2={0,0,1,0};
+    g.renderViewport={0,0,960,544,0,1};g.renderScissor={0,0,960,544};
+    g.numChans=1;g.numTevStages=1;g.tevStages[0].channelId=GX_COLOR0A0;
+    g.tevStages[0].colorPass.d=GX_CC_RASC;g.tevStages[0].alphaPass.d=GX_CA_RASA;
+    g.vtxDesc[GX_VA_POS]=GX_DIRECT;g.vtxFmts[0].attrs[GX_VA_POS]={GX_POS_XYZ,GX_F32,0};
+    std::array<uint8_t,36> raw{};gfx::note_memory_write(raw.data(),raw.size());
+    gfx::Renderer renderer;CHECK(renderer.initialize());renderer.begin_frame();
+    gxbridge::DrawSink sink;gxbridge::DrawSinkConfig config{};
+    config.staticGeometryBudget=cached?1024*1024:0;config.staticGeometryMinVertices=3;
+    config.staticGeometryStableOnly=true;config.localDrawBatching=false;
+    CHECK(sink.initialize(renderer,config));sink.begin_frame(0);
+    for(unsigned draw=0;draw<32;++draw){
+      CHECK(sink.submit(GX_TRIANGLES,0,raw.data(),raw.size(),3,nullptr,0,raw.data()).ok);
+      CHECK(sink.stream().tail_draw()->instanceCount==1);
+      CHECK(bool(sink.stream().tail_draw()->fixedVertexUniforms)==cached);
+      g.stateDirty=false;
+    }
+    CHECK(sink.submitted_draws()==32);CHECK(renderer.stats().drawCalls==0);
+    CHECK(sink.memory_budget().staticGeometryHits==(cached?31u:0u));
+    // A tracked mutation must fall back exactly once, without also drawing
+    // the previously cached mesh. Keep all older queued snapshots alive.
+    raw[3]=1;gfx::note_memory_write(raw.data(),raw.size());
+    CHECK(sink.submit(GX_TRIANGLES,0,raw.data(),raw.size(),3,nullptr,0,raw.data()).ok);
+    CHECK(!sink.stream().tail_draw()->fixedVertexUniforms);
+    size_t packets=0;
+    for(const auto& command:sink.stream().commands())if(command.type==gfx::CommandType::Draw)++packets;
+    CHECK(packets==33);CHECK(sink.submitted_draws()==33);
+    sink.flush();CHECK(renderer.stats().drawCalls==33);CHECK(renderer.stats().triangles==33);
+    sink.shutdown();renderer.shutdown();
+  }
+}
 void completed_frame_does_not_fence() {
   BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
   config.log_level=RuntimeLogLevel::Silent;
@@ -509,6 +762,52 @@ void completed_frame_does_not_fence() {
   CHECK(initialize(config));CHECK(!completed_memory_snapshot().completedFrame);
   CHECK(begin_frame());end_frame();CHECK(completed_memory_snapshot().frameIndex==1);
   shutdown();CHECK(!completed_memory_snapshot().completedFrame);
+}
+
+void internal_resolution_restart_and_efb_mapping() {
+  GXRenderModeObj mode{};mode.fbWidth=640;mode.efbHeight=480;
+  mode.viWidth=640;mode.viHeight=480;VIConfigure(&mode);
+  for(const bool reduced:{false,true,false}) {
+    BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+    config.log_level=RuntimeLogLevel::Silent;
+    if(reduced){config.render_width=640;config.render_height=480;}
+    CHECK(initialize(config));CHECK(begin_frame());
+    auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+    const auto size=aurora::gfx::get_render_target_size();
+    const auto display=aurora::gfx::get_frame_buffer_size();
+    CHECK(size.x==(reduced?640u:960u)&&size.y==(reduced?480u:544u));
+    CHECK(display.x==960&&display.y==544);
+    aurora::gx::set_logical_viewport({0,0,640,480,0.2f,0.8f});
+    CHECK(g.renderViewport.width==float(size.x)&&g.renderViewport.height==float(size.y));
+    CHECK(g.renderViewport.znear==0.2f&&g.renderViewport.zfar==0.8f);
+    aurora::gx::set_logical_scissor({1,3,5,7});
+    CHECK(g.renderScissor.x==1&&g.renderScissor.y==3);
+    CHECK(g.renderScissor.width==(reduced?5:8)&&g.renderScissor.height==(reduced?7:9));
+    const auto clipped=aurora::gx::map_logical_scissor({-5,-5,650,490});
+    CHECK(clipped.x==0&&clipped.y==0&&clipped.width==int(size.x)&&clipped.height==int(size.y));
+    // Exercise the real GXCopyTex mapping and live EFB texture resolver. The
+    // shadow atlas's 2:1 copy must scale against the raster target, not scanout.
+    std::array<uint8_t,32> destination{};
+    g.texCopySrc={0,0,256,256};g.texCopyDstWidth=g.texCopyDstHeight=128;
+    g.texCopyFmt=GX_TF_RGBA8;
+    CHECK(draw_sink().copy_tex(destination.data(),false));
+    g.copyTextures[destination.data()]={};
+    auto& texture=g.loadedTextures[0];texture.data=destination.data();
+    texture.mWidth=texture.mHeight=128;texture.mFormat=GX_TF_RGBA8;
+    g.numTevStages=1;g.numTexGens=1;
+    g.tevStages[0].texMapId=GX_TEXMAP0;g.tevStages[0].texCoordId=GX_TEXCOORD0;
+    g.tevStages[0].colorPass.d=GX_CC_TEXC;g.tevStages[0].alphaPass.d=GX_CA_TEXA;
+    g.vtxDesc[GX_VA_POS]=GX_DIRECT;g.vtxFmts[0].attrs[GX_VA_POS]={GX_POS_XYZ,GX_F32,0};
+    g.mark_dirty();std::array<uint8_t,36> vertices{};
+    CHECK(draw_sink().submit(GX_TRIANGLES,0,vertices.data(),vertices.size(),3).ok);
+    const auto* packet=draw_sink().stream().tail_draw();CHECK(packet);
+    if(packet){const auto& binding=packet->texture_bindings()[0];
+      CHECK(binding.source==gfx::TextureSource::Efb);
+      uint32_t width=0,height=0;CHECK(renderer().efb().dimensions(binding.texture,width,height));
+      CHECK(width==(reduced?128u:192u)&&height==(reduced?128u:145u));}
+    end_frame();shutdown();
+  }
+  VIConfigure(nullptr);
 }
 
 void guest_memory_prepare_fences_async_gx() {
@@ -804,5 +1103,5 @@ void async_view_markers_preserve_fifo_order() {
 }
 
 }
-int main(){pooled_snapshot_transitions();layouts();fragment_updates();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();xf_equal_matrix_writes_oracle();tev_decoded_write_gate_oracle();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();native_replay_exact_slot_gx_fallback_and_producer_epoch();async_view_markers_preserve_fifo_order();
+int main(){pooled_snapshot_transitions();layouts();fragment_updates();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();xf_equal_matrix_writes_oracle();tev_decoded_write_gate_oracle();decoded_snapshot_field_oracle();state_transitions();raster_pipeline_uniform_reuse_oracle();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);resident_geometry_has_one_draw_per_submission();completed_frame_does_not_fence();internal_resolution_restart_and_efb_mapping();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();native_replay_exact_slot_gx_fallback_and_producer_epoch();async_view_markers_preserve_fifo_order();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

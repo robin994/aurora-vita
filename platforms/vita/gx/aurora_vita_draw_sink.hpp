@@ -8,6 +8,7 @@
 #include "../gfx/vita_static_geometry.hpp"
 #include "../gfx/vita_fixed_uniform_pool.hpp"
 #include "../gfx/vita_fixed_vertex.hpp"
+#include "../gfx/vita_native_model_uniform_cache.hpp"
 #include "../gfx/vita_vertex_reuse_probe.hpp"
 #include "../integration/vita_feature_coverage.hpp"
 #include "../integration/vita_frame_trace.hpp"
@@ -15,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include "../../../lib/gx/native_model_cache.hpp"
+#include "../../../lib/gx/native_model_sources.hpp"
 #include "../gfx/vita_hash_map.hpp"
 #if defined(AURORA_VITA_UPSTREAM) && !defined(AURORA_VITA_UPSTREAM_STUB)
 #include "../../../lib/gx/pipeline.hpp"
@@ -127,6 +129,8 @@ public:
   // translation. Owner-thread only; returns false for exact-slot GX fallback.
   bool replay_last_native_draw(const uint8_t* pinnedDisplayList,uint64_t immutableIdentity) noexcept;
   bool submit_native_model_recipe(uint64_t identity,uint64_t pinnedIdentity) noexcept;
+  void invalidate_native_model_sources(const aurora::gx::fifo::NativeModelSourceSpan* sources,
+                                      size_t count) noexcept;
 #endif
   gfx::FixedUniformPool::Stats fixed_uniform_pool_stats() const noexcept { return fixedVertexUniforms_.stats(); }
   gfx::VertexReuseProbe::Stats vertex_reuse_stats() const noexcept {
@@ -154,6 +158,7 @@ private:
   };
   gfx::FlatHashMap<uint64_t,NativeModelPrepared> nativeModels_{};
   aurora::gx::fifo::NativeModelCache<NativeModelPrepared> nativeModelCache_{};
+  gfx::NativeModelUniformCache nativeModelUniforms_{};
 #endif
   std::array<gfx::TextureBinding,gfx::MaxTextures> resolve_textures(
       uint8_t textureMask,bool broadDirty,uint8_t& nativeWrapMask,SubmitResult& result) noexcept;
@@ -187,6 +192,12 @@ private:
   gfx::Handle whiteTexture_ = gfx::InvalidHandle;
 #if defined(AURORA_VITA_UPSTREAM)
   uint64_t translatedVertexRevision_ = 0, translatedFragmentRevision_ = 0;
+  struct UniformContract {
+    uint32_t stateIdentity = 0, pipeline = 0, layout = 0, vertexProgram = 0;
+    uint8_t primitive = 0, fmt = 0;
+    bool operator==(const UniformContract&) const = default;
+  };
+  UniformContract translatedUniformContract_{};
   uint64_t resolvedTextureRevision_ = 0, consumedStateSerial_ = 0;
   uint32_t resolvedTextureStateIdentity_ = 0;
   uint32_t translatedStateGeneration_ = 0;

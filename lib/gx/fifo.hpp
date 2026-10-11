@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstring>
 #include "native_model_recipe.hpp"
+#include "native_pn_palette.hpp"
 
 namespace aurora::gx::fifo {
 
