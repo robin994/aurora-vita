@@ -490,6 +490,11 @@ static bool cpu_parallel_for_min_lanes_impl(size_t count, size_t minItems, uint3
     return runCaller(0,count);
   }
 
+  // Thousands of tiny GX jobs cannot use a second lane. Avoid pool atomics,
+  // affinity scans and semaphore preparation before running them on the owner.
+  minItems=std::max<size_t>(1,minItems);
+  if(count/minItems<2u)return runCaller(0,count);
+
   // Renderer and game phases intentionally share one persistent producer. If
   // a callback ever recurses into another parallel-for, keep the inner call on
   // the caller instead of deadlocking on this pool's completion semaphores.
@@ -500,8 +505,6 @@ static bool cpu_parallel_for_min_lanes_impl(size_t count, size_t minItems, uint3
   struct BusyGuard {
     ~BusyGuard() { g_workers.busy.clear(std::memory_order_release); }
   } busyGuard;
-
-  minItems = std::max<size_t>(1, minItems);
 
   // `minItems` is the minimum useful amount of work per execution lane, not
   // merely the threshold for waking every worker.  Waking two Vita pthreads for

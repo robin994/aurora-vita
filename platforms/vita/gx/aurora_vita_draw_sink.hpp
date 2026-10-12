@@ -64,6 +64,7 @@ struct DrawSinkConfig {
   bool localDrawBatching = false;
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
   bool renderBudgetProbe = false;
+  bool efbCopySnap1to1 = false;
 #endif
   bool immediateDrawView = false;
   bool allowStreamedFixedVertexGpu = false;
@@ -182,6 +183,8 @@ private:
   std::array<gfx::TextureBinding,gfx::MaxTextures> resolvedTextureBindings_{};
   uint64_t resolvedTextureBindingVersion_ = 1;
   uint8_t resolvedTextureMask_ = 0;
+  uint8_t resolvedBpTextureSourceMask_ = 0;
+  uint8_t resolvedBpTextureSourceInvalidMask_ = 0;
   uint8_t resolvedVolatileTextureMask_ = 0;
   uint8_t resolvedFallbackTextureMask_ = 0;
   uint8_t resolvedNativeWrapMask_ = 0;
@@ -219,8 +222,11 @@ private:
   uint32_t frameBatchedDraws_ = 0;
   uint64_t frameStartSubmittedDraws_ = 0;
   bool renderBudgetProbe_ = false;
+  bool efbCopySnap1to1_ = false;
   bool renderBudgetFrame_ = false;
   uint32_t frameEfbCopyCalls_ = 0;
+  uint32_t frameEfbCopySnaps_ = 0;
+  uint32_t frameEfbSnapRetries_ = 0;
   uint64_t frameEfbFlushUs_ = 0;
   uint64_t frameEfbCaptureUs_ = 0;
   uint64_t frameEfbClearUs_ = 0;

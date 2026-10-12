@@ -27,6 +27,8 @@ struct RendererConfig {
   size_t nativeCdramReserveBytes=8*1024*1024;
   bool nativeD16Depth=false;
   bool nativeFragmentPrepareCache=false;
+  bool nativePrecomputedGeometry=false;
+  bool nativeDeferProgramCacheWrites=false;
 #if defined(MKW_TARGET_VITA)
   bool nativeSampleDrawTimings=false;
 #endif

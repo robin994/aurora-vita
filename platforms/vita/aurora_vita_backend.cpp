@@ -239,12 +239,14 @@ void emit_periodic_diagnostics() noexcept {
   char nativeStateLine[2048];
   int used=std::snprintf(nativeStateLine,sizeof nativeStateLine,
       "[AURORA-VITA][NATIVE_STATE] frame=%llu pipeline_setters=%u pipeline_setters_skipped=%u "
-      "uniform_upload_calls=%u uniform_upload_bytes=%llu local_batch=%u shared_state_copies=%llu",
+      "uniform_upload_calls=%u uniform_upload_bytes=%llu local_batch=%u shared_state_copies=%llu "
+      "precomputed_draws=%u precomputed_hits=%u precomputed_misses=%u precomputed_fallbacks=%u",
       static_cast<unsigned long long>(g_telemetry.frame().frame),rs.nativePipelineSetters,
       rs.nativePipelineSettersSkipped,rs.nativeUniformUploadCalls,
       static_cast<unsigned long long>(rs.nativeUniformUploadBytes),
       (g_drawSink->runtime_feature_flags()&gxbridge::RuntimeLocalDrawBatching)?1u:0u,
-      static_cast<unsigned long long>(g_telemetry.frame().counters.sharedStateCopies));
+      static_cast<unsigned long long>(g_telemetry.frame().counters.sharedStateCopies),
+      rs.nativePrecomputedDraws,rs.nativePrecomputedHits,rs.nativePrecomputedMisses,rs.nativePrecomputedFallbacks);
   constexpr const char* reasons[]{"explicit","buffer_mutation","texture_mutation","resource_destroy",
       "readback","target_mutation","stream_reuse","frame_discard"};
   static_assert(std::size(reasons)==gfx::FinishReasonCount);
@@ -354,6 +356,13 @@ extern "C" int aurora_vita_view_draw_start(size_t capacity) {
 extern "C" int aurora_vita_view_draw_start_ex(size_t capacity, int capturePayloads) {
   return gfx::view_draw_capture().start(capacity,capturePayloads!=0) ? 1 : 0;
 }
+extern "C" int aurora_vita_view_draw_start_ex_range(size_t capacity,int payloads,
+                                                     uint32_t first,uint32_t last) {
+  return gfx::view_draw_capture().start_filtered(capacity,payloads!=0,first,last,0)?1:0;
+}
+extern "C" int aurora_vita_view_draw_start_ex_hash(size_t capacity,int payloads,uint64_t hash) {
+  return gfx::view_draw_capture().start_filtered(capacity,payloads!=0,0,0,hash)?1:0;
+}
 extern "C" void aurora_vita_view_draw_stop(void) {
   gfx::view_draw_capture().stop();
 }
@@ -368,6 +377,15 @@ extern "C" uint64_t aurora_vita_view_draw_lost(void) {
 }
 extern "C" size_t aurora_vita_view_draw_read(size_t first, AuroraViewDrawRecord* out, size_t maximum) {
   return gfx::view_draw_capture().read(first,out,maximum);
+}
+extern "C" size_t aurora_vita_view_texture_count(void) {
+  return gfx::view_draw_capture().texture_count();
+}
+extern "C" size_t aurora_vita_view_texture_read(size_t first,AuroraViewTextureRecord* out,size_t maximum) {
+  return gfx::view_draw_capture().read_texture(first,out,maximum);
+}
+extern "C" void aurora_vita_view_draw_set_texture_probe(int enabled) {
+  gfx::view_draw_capture().set_texture_probe(enabled!=0);
 }
 extern "C" void aurora_vita_view_draw_mark(uint32_t view, uint64_t producerFrame) {
 #if defined(MKW_TARGET_VITA)
@@ -548,6 +566,8 @@ bool initialize(const BackendConfig& c) noexcept {
   rc.waitVblank=c.wait_vblank;
   rc.nativeD16Depth=c.gxm_d16_depth;
   rc.nativeFragmentPrepareCache=c.gxm_fragment_prepare_cache;
+  rc.nativePrecomputedGeometry=c.gxm_precomputed_geometry;
+  rc.nativeDeferProgramCacheWrites=c.gxm_defer_program_cache_writes;
 #if defined(MKW_TARGET_VITA)
   rc.nativeSampleDrawTimings=c.gxm_render_budget_probe;
 #endif
@@ -714,6 +734,7 @@ bool initialize(const BackendConfig& c) noexcept {
   dc.localDrawBatching=g_config.gxm_local_draw_batching;
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
   dc.renderBudgetProbe=c.gxm_render_budget_probe;
+  dc.efbCopySnap1to1=c.gxm_efb_copy_snap_1to1;
 #endif
   dc.immediateDrawView=c.gxm_immediate_draw_view;
   dc.allowStreamedFixedVertexGpu=c.gxm_streamed_fixed_vertex_gpu;
@@ -884,6 +905,10 @@ void end_frame_now() noexcept {
         static_cast<unsigned long long>(finishDelta(gfx::FinishReason::StreamReuse)),
         static_cast<unsigned long long>(finishDelta(gfx::FinishReason::FrameDiscard)));
     g_lastProbeFinishCounts=s.nativeFinishReasonCalls;
+    if(g_frame<=4 || (g_frame%32)==0) std::fprintf(stderr,
+        "[wic-precomputed-geometry] frame=%llu enabled=%u draws=%u hits=%u misses=%u fallbacks=%u\n",
+        static_cast<unsigned long long>(g_frame),unsigned(g_config.gxm_precomputed_geometry),
+        s.nativePrecomputedDraws,s.nativePrecomputedHits,s.nativePrecomputedMisses,s.nativePrecomputedFallbacks);
     g_lastProbeFinishWaitUs=s.nativeFinishReasonWaitUs;
   }
 #endif

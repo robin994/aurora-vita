@@ -5,6 +5,7 @@ get_filename_component(AURORA_VITA_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABS
 # the rest of the Vita renderer retains its existing -fno-exceptions policy.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_property(SOURCE ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_native_assets.cpp
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gxm/gxm_program_cache.cpp
         APPEND PROPERTY COMPILE_OPTIONS -fexceptions)
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/aurora_vita_frontend.cmake")
@@ -152,6 +153,14 @@ if (AURORA_VITA_BUILD_BACKEND_TESTS AND NOT CMAKE_CROSSCOMPILING)
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_submission_test.cpp)
     target_link_libraries(aurora_vita_submission_test PRIVATE aurora::vita_backend Threads::Threads)
     add_test(NAME vita_submission COMMAND aurora_vita_submission_test)
+    add_executable(aurora_vita_precomputed_geometry_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_precomputed_geometry_test.cpp)
+    add_test(NAME vita_precomputed_geometry COMMAND aurora_vita_precomputed_geometry_test)
+    add_executable(aurora_vita_deferred_program_writes_test
+        ${AURORA_VITA_SOURCE_DIR}/tests/vita_deferred_program_writes_test.cpp)
+    target_include_directories(aurora_vita_deferred_program_writes_test PRIVATE
+        ${AURORA_VITA_SOURCE_DIR}/platforms/vita)
+    add_test(NAME vita_deferred_program_writes COMMAND aurora_vita_deferred_program_writes_test)
     add_executable(aurora_vita_cpu_workers_test
         ${AURORA_VITA_SOURCE_DIR}/tests/vita_cpu_workers_test.cpp
         ${AURORA_VITA_SOURCE_DIR}/platforms/vita/gfx/vita_cpu_workers.cpp)

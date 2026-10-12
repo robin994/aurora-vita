@@ -25,6 +25,143 @@ using namespace aurora::vita;
 unsigned failures=0,checks=0;
 #undef CHECK
 #define CHECK(x) do {++checks;if(!(x)){++failures;std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);}} while(0)
+std::array<uint8_t,16384> rawBpTexture{};
+const void* resolve_test_bp_texture(uint32_t address,uint32_t bytes) {
+  return address==0x4000 && bytes<=rawBpTexture.size()?rawBpTexture.data():nullptr;
+}
+void raw_bp_texture_address_oracle() {
+  auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+  std::array<uint8_t,16384> previousTexture{};
+  auto& slot=g.loadedTextures[0];
+  slot.data=previousTexture.data();slot.mWidth=256;slot.mHeight=128;slot.mFormat=GX_TF_CMPR;
+  slot.image0=255u|(127u<<10)|(14u<<20);
+  GXSetBPTextureAddressResolver(resolve_test_bp_texture);
+  std::vector<uint8_t> commands;
+  const auto bp=[&](uint8_t reg,uint32_t value) {
+    commands.push_back(0x61);value|=uint32_t(reg)<<24;
+    for(int shift=24;shift>=0;shift-=8)commands.push_back(uint8_t(value>>shift));
+  };
+  bp(0x88,255u|(127u<<10)|(14u<<20));bp(0x94,0x4000u>>5);
+  aurora::gx::fifo::process_sync(commands.data(),commands.size(),true);
+  const auto texture=gxbridge::translate_texture(0);
+  CHECK(texture.valid);
+  CHECK(texture.texture.data==rawBpTexture.data());
+  CHECK(texture.texture.sourceId==reinterpret_cast<uintptr_t>(rawBpTexture.data()));
+  CHECK(texture.texture.width==256&&texture.texture.height==128&&texture.texture.dataSize==16384);
+  // The largest legal 10-bit GX dimension is encoded as 1023, then plus one.
+  GXTexObj_ maximum{};maximum.image0=1023u|(1023u<<10);
+  CHECK(maximum.width()==1024&&maximum.height()==1024);
+  // Native metadata restores its pointer, and an equal raw IMAGE3 write must
+  // select guest memory again even if no BP register bits changed.
+  commands.clear();commands.push_back(0x50);
+  commands.push_back(uint8_t(GX_LOAD_AURORA_TEXOBJ>>8));commands.push_back(uint8_t(GX_LOAD_AURORA_TEXOBJ));
+  commands.push_back(0);
+  const auto append=[&](uint64_t value,unsigned bytes) {
+    for(int shift=int(bytes*8)-8;shift>=0;shift-=8)commands.push_back(uint8_t(value>>shift));
+  };
+  append(reinterpret_cast<uintptr_t>(previousTexture.data()),8);
+  append(256,4);append(128,4);append(GX_TF_CMPR,4);append(0,4);
+  commands.push_back(0);commands.push_back(0);append(77,4);append(2,4);
+  aurora::gx::fifo::process_sync(commands.data(),commands.size(),true);
+  CHECK((g.bpTextureSourceMask&1u)==0);
+  CHECK(gxbridge::translate_texture(0).texture.data==previousTexture.data());
+  commands.clear();bp(0xfe,0);bp(0x94,0x8000u>>5);
+  aurora::gx::fifo::process_sync(commands.data(),commands.size(),true);
+  CHECK(gxbridge::translate_texture(0).texture.data==previousTexture.data());
+  commands.clear();bp(0xfe,1);bp(0x94,(0x4000u>>5)|1u);
+  aurora::gx::fifo::process_sync(commands.data(),commands.size(),true);
+  CHECK(!gxbridge::translate_texture(0).valid);
+  commands.clear();bp(0x94,0x4000u>>5);
+  aurora::gx::fifo::process_sync(commands.data(),commands.size(),true);
+  CHECK(gxbridge::translate_texture(0).texture.data==rawBpTexture.data());
+  g.copyTextures[rawBpTexture.data()]={};
+  const auto copy=gxbridge::translate_texture(0);
+  CHECK(copy.dynamicCopy&&copy.texture.data==rawBpTexture.data());
+  g.copyTextures.clear();
+  // Mode-derived mip count and bank-1 texture addressing are independent of
+  // stale flags in the prior native object.
+  commands.clear();bp(0xa3,1u<<5);bp(0xa7,16u<<8);
+  bp(0xab,7u|(7u<<10)|(14u<<20));bp(0xb7,0x4000u>>5);
+  aurora::gx::fifo::process_sync(commands.data(),commands.size(),true);
+  const auto mip=gxbridge::translate_texture(7);
+  CHECK(mip.valid&&mip.texture.mipCount==2&&mip.texture.dataSize==64);
+  commands.clear();bp(0x94,0x8000u>>5);
+  aurora::gx::fifo::process_sync(commands.data(),commands.size(),true);
+  CHECK(!gxbridge::translate_texture(0).valid);
+  GXSetBPTextureAddressResolver(nullptr);
+  CHECK(!gxbridge::translate_texture(7).valid);
+  g=aurora::gx::GXState{};
+}
+void raw_bp_async_owner_oracle() {
+  BackendConfig config{};config.cpu_worker_threads=0;config.wait_vblank=false;
+  config.log_level=RuntimeLogLevel::Silent;
+  CHECK(initialize(config));CHECK(aurora::gx::fifo::start_worker());CHECK(begin_frame());
+  aurora::gx::fifo::run_sync([](void*) {
+    auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};g.numTevStages=1;
+  },nullptr);
+  std::atomic<bool> entered=false,release=false;
+  struct Blocker {std::atomic<bool>* entered;std::atomic<bool>* release;};
+  const Blocker blocker{&entered,&release};
+  aurora::gx::fifo::run_async([](void* opaque) {
+    const auto args=*static_cast<Blocker*>(opaque);
+    args.entered->store(true,std::memory_order_release);
+    while(!args.release->load(std::memory_order_acquire))std::this_thread::yield();
+  },&blocker,sizeof(blocker));
+  const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+  while(!entered.load(std::memory_order_acquire)&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+  CHECK(entered.load(std::memory_order_acquire));
+  GXApplyBPReg(0x00,2u<<10);
+  CHECK(aurora::gx::g_gxState.numTevStages==1);
+  release.store(true,std::memory_order_release);
+  end_frame();CHECK(aurora::gx::g_gxState.numTevStages==3);
+  shutdown();
+}
+void pal_mario_material_tev_oracle() {
+  // PAL material metadata: three stages, texture map/coord 1,0,2.
+  // These independent BP words exercise the real FIFO decoder, not GX setters.
+  auto& g=aurora::gx::g_gxState;g=aurora::gx::GXState{};
+  std::vector<uint8_t> commands;
+  const auto word=[&](uint32_t value) {
+    for(int shift=24;shift>=0;shift-=8)commands.push_back(uint8_t(value>>shift));
+  };
+  const auto bp=[&](uint8_t reg,uint32_t value) {commands.push_back(0x61);word((uint32_t(reg)<<24)|value);};
+  bp(0x00,3u|(1u<<4)|(2u<<10));
+  bp(0x28,(1u|(1u<<3)|(1u<<6))|((1u<<6)<<12));
+  bp(0x29,2u|(2u<<3)|(1u<<6));
+  const uint32_t colors[]{0x08f8ba,0x08f804,0x08f810};
+  const uint32_t alphas[]{0x08fff0,0x08f2f0,0x08dff0};
+  for(unsigned i=0;i<3;++i) {bp(uint8_t(0xc0+2*i),colors[i]);bp(uint8_t(0xc1+2*i),alphas[i]);}
+  commands.push_back(0x10);word(0x103f);word(3);
+  // NumTexGens alone does not specify valid coordinate generators. Complete
+  // the XF state with three 2x4 generators and identity post transforms.
+  for(unsigned i=0;i<3;++i) {
+    commands.push_back(0x10);word(0x1040+i);word((5u+i)<<7);
+    commands.push_back(0x10);word(0x1050+i);word(61);
+  }
+  aurora::gx::fifo::process_sync(commands.data(),commands.size(),true);
+  CHECK(g.numTexGens==3&&g.numTevStages==3);
+  gfx::PipelineDesc pipeline{};gfx::VertexDecodeLayout layout{};uint64_t key=0;
+  gxbridge::translate_current_pipeline_and_layout(GX_TRIANGLES,0,pipeline,layout,key);
+  CHECK(pipeline.texgenCount==3&&pipeline.tev.stageCount==3);
+  const unsigned maps[]{1,0,2};
+  const unsigned colorArgs[3][4]{{15,8,11,10},{15,8,0,4},{15,8,1,0}};
+  const unsigned alphaArgs[3][4]{{7,7,7,7},{7,4,5,7},{6,7,7,7}};
+  for(unsigned i=0;i<3;++i) {
+    const auto& stage=pipeline.tev.stages[i];
+    CHECK(stage.texture==maps[i]&&stage.texCoord==maps[i]);
+    CHECK(unsigned(stage.color.a)==colorArgs[i][0]&&unsigned(stage.color.b)==colorArgs[i][1]&&
+          unsigned(stage.color.c)==colorArgs[i][2]&&unsigned(stage.color.d)==colorArgs[i][3]);
+    CHECK(unsigned(stage.alpha.a)==alphaArgs[i][0]&&unsigned(stage.alpha.b)==alphaArgs[i][1]&&
+          unsigned(stage.alpha.c)==alphaArgs[i][2]&&unsigned(stage.alpha.d)==alphaArgs[i][3]);
+  }
+  g=aurora::gx::GXState{};
+}
+void draw_done_callback_presence() {
+  const auto saved=GXSetDrawDoneCallback(nullptr);
+  CHECK(GXVitaHasDrawDoneCallback()==GX_FALSE);
+  GXSetDrawDoneCallback(+[] {});CHECK(GXVitaHasDrawDoneCallback()==GX_TRUE);
+  GXSetDrawDoneCallback(saved);
+}
 void visible_raster_and_scratch_efb() {
   GXRenderModeObj mode{};mode.fbWidth=608;mode.efbHeight=456;mode.xfbHeight=456;
   VIConfigure(&mode);
@@ -735,5 +872,5 @@ void async_view_markers_preserve_fifo_order() {
 }
 
 }
-int main(){visible_raster_and_scratch_efb();pooled_snapshot_transitions();layouts();fragment_updates();cp_vertex_layout_transitions();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();async_view_markers_preserve_fifo_order();
+int main(){raw_bp_texture_address_oracle();raw_bp_async_owner_oracle();pal_mario_material_tev_oracle();draw_done_callback_presence();visible_raster_and_scratch_efb();pooled_snapshot_transitions();layouts();fragment_updates();cp_vertex_layout_transitions();encoded_xf_matrix_oracles();xf_equal_position_writes_oracle();state_transitions();fixed_geometry_vertex_program_transitions();fixed_geometry_vertex_program_transitions(true);completed_frame_does_not_fence();guest_memory_prepare_fences_async_gx();memory_write_notification_does_not_fence_async_gx();multiple_waiters_recheck_completed_serial();async_completion_signal_never_overflows();async_end_frame_is_a_lifetime_barrier();async_worker_rejects_direct_display_list_submit();async_display_list_uses_pinned_segment_without_fifo_copy();prepared_async_display_list_equivalence();async_view_markers_preserve_fifo_order();
   std::printf("frontend translation: %u checks, %u failures\n",checks,failures);return failures?1:0;}

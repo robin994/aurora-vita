@@ -378,6 +378,7 @@ bool start_worker() {
 }
 
 bool worker_running() { return sVitaWorker.running.load(std::memory_order_acquire); }
+bool current_thread_owns_worker() noexcept { return on_worker_thread(); }
 
 void write_view_marker(uint32_t view, uint64_t producerFrame) {
   auto& trace=aurora::vita::gfx::view_draw_capture();

@@ -38,6 +38,14 @@
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
 
+static GXBPTextureAddressResolver sBPTextureAddressResolver=nullptr;
+extern "C" void GXSetBPTextureAddressResolver(GXBPTextureAddressResolver resolver) {
+  sBPTextureAddressResolver=resolver;
+}
+extern "C" const void* GXResolveBPTextureAddress(u32 address,u32 bytes) {
+  return sBPTextureAddressResolver?sBPTextureAddressResolver(address,bytes):nullptr;
+}
+
 namespace {
 bool sXfEqualPositionWrites=false;
 XfEqualPositionStats sXfEqualPositionStats{};
@@ -809,6 +817,14 @@ static void handle_bp(u32 value, bool bigEndian) {
     return;
   } else {
     const u32 ssMask = g_gxState.bpRegCache[0xFE];
+    // Equal full-address writes still replace native metadata. A zero mask
+    // does not. A partial address cannot reconstruct an opaque native pointer.
+    if(ssMask&&((regId>=0x94&&regId<=0x97)||(regId>=0xb4&&regId<=0xb7))) {
+      const u8 bit=static_cast<u8>(1u<<((regId&3u)+(regId>=0xb4?4u:0u)));
+      if(ssMask==0xffffffu)g_gxState.bpTextureSourceInvalidMask&=static_cast<u8>(~bit);
+      else if(!(g_gxState.bpTextureSourceMask&bit))g_gxState.bpTextureSourceInvalidMask|=bit;
+      g_gxState.bpTextureSourceMask|=bit;
+    }
     // A preceding 0xFE write is rare; the common path only has to prove the mask is already wide open.
     if (ssMask != 0x00FFFFFF) UNLIKELY {
       g_gxState.bpRegCache[0xFE] = 0x00FFFFFF;
@@ -1558,12 +1574,22 @@ static void handle_bp(u32 value, bool bigEndian) {
 }
 
 extern "C" void GXApplyBPReg(u8 reg, u32 value) {
+  const u32 word=(static_cast<u32>(reg)<<24)|(value&0x00ffffffu);
+  if(in_display_list()
+#if defined(MKW_TARGET_VITA)
+     ||(worker_running()&&!current_thread_owns_worker())
+#endif
+     ) {
+    // Preserve both recorded display lists and async FIFO ownership. Raw BP
+    // producers bypass the optional material-write suppression cache.
+    invalidate_bp_write_cache();write_u8(0x61);write_u32(word);return;
+  }
 #if defined(MKW_TARGET_VITA)
   if (!worker_running()) invalidate_bp_write_cache();
 #else
   invalidate_bp_write_cache();
 #endif
-  handle_bp((static_cast<u32>(reg) << 24) | (value & 0x00FFFFFFu), true);
+  handle_bp(word, true);
 }
 
 static bool cacheable_cp_register(u8 addr) {
@@ -2811,6 +2837,8 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     const auto texMapId = data[pos];
     pos += 1;
     CHECK(texMapId < MaxTextures, "invalid texture map id {}", texMapId);
+    g_gxState.bpTextureSourceMask&=static_cast<u8>(~(1u<<texMapId));
+    g_gxState.bpTextureSourceInvalidMask&=static_cast<u8>(~(1u<<texMapId));
     auto& slot = g_gxState.loadedTextures[texMapId];
     GXTexObj_ next = slot;
     next.data = reinterpret_cast<const void*>(read_u64(data + pos, bigEndian));

@@ -147,6 +147,12 @@ void GXRestoreFrameBuffer(void);
 
 void GXApplyBPReg(u8 reg, u32 value);
 
+// Configure before guest GX work. Validate the full encoded span; return a
+// stable RAM alias without fencing or re-entering GX.
+typedef const void* (*GXBPTextureAddressResolver)(u32 physical_address, u32 bytes);
+void GXSetBPTextureAddressResolver(GXBPTextureAddressResolver resolver);
+const void* GXResolveBPTextureAddress(u32 physical_address, u32 bytes);
+
 #if __cplusplus
 }
 #endif

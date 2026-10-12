@@ -325,6 +325,8 @@ GXDrawDoneCallback GXSetDrawDoneCallback(GXDrawDoneCallback cb) {
   return old;
 }
 
+GXBool GXVitaHasDrawDoneCallback(void) {return DrawDoneCB?GX_TRUE:GX_FALSE;}
+
 void GXFlush() {
   if (__gx->dirtyState) {
     __GXSetDirtyState();

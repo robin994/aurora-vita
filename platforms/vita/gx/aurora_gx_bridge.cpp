@@ -617,7 +617,26 @@ TextureTranslation translate_texture(unsigned slot) noexcept {
   // The Vita frontend does not resolve GX textures into Dawn TextureBind objects.
   // The FIFO decoder keeps the complete guest metadata in loadedTextures instead,
   // which is exactly what the native Vita decoder needs.
-  const auto& o=aurora::gx::g_gxState.loadedTextures[slot];
+  const auto& loaded=aurora::gx::g_gxState.loadedTextures[slot];
+  GXTexObj_ raw{};
+  const GXTexObj_* selected=&loaded;
+  if(aurora::gx::g_gxState.bpTextureSourceMask&(1u<<slot)) {
+    if(aurora::gx::g_gxState.bpTextureSourceInvalidMask&(1u<<slot))return out;
+    raw=loaded;raw.mWidth=raw.mHeight=0;raw.mFormat=aurora::gfx::InvalidTextureFormat;
+    const unsigned minFilter=(raw.mode0>>5)&7u;
+    raw.flags=static_cast<u8>((minFilter==1||minFilter==2||minFilter==5||minFilter==6)?1u:0u);
+    bool supported=false;
+    const auto format=texture_format(static_cast<GXTexFmt>(raw.format()),supported);
+    if(!supported)return out;
+    const size_t bytes=gfx::encoded_mip_chain_size(raw.width(),raw.height(),format,raw.mip_count());
+    if(!bytes||bytes>UINT32_MAX)return out;
+    raw.data=GXResolveBPTextureAddress((raw.image3&0xffffffu)<<5,static_cast<u32>(bytes));
+    if(!raw.data)return out;
+    selected=&raw;
+  }
+  const auto& o=*selected;
+  out.texture.data=o.data;
+  out.texture.sourceId=static_cast<uint64_t>(reinterpret_cast<uintptr_t>(o.data));
 
   // Sampler state is meaningful for both static textures and GXCopyTex-backed textures.
   auto& sm=out.sampler;
@@ -635,6 +654,9 @@ TextureTranslation translate_texture(unsigned slot) noexcept {
   bool supported=false;
   const auto f=texture_format(static_cast<GXTexFmt>(o.format()),supported);
   if(!supported)return out;
+  // Raw CI/TMEM palette selection has no validated memory resolver yet. EFB
+  // identities above are safe; static CI must not borrow the native palette.
+  if(selected==&raw&&(f==gfx::TextureFormat::C4||f==gfx::TextureFormat::C8||f==gfx::TextureFormat::C14X2))return out;
   auto& d=out.texture;
   d.width=o.width();d.height=o.height();d.format=f;d.data=o.data;
   d.sourceId=static_cast<uint64_t>(reinterpret_cast<uintptr_t>(o.data));

@@ -451,6 +451,8 @@ bool Renderer::initialize() noexcept {
   c.cdramReserveBytes=cfg_.nativeCdramReserveBytes;
   c.d16Depth=cfg_.nativeD16Depth;
   c.fragmentPrepareCache=cfg_.nativeFragmentPrepareCache;
+  c.precomputedGeometry=cfg_.nativePrecomputedGeometry;
+  c.deferProgramCacheWrites=cfg_.nativeDeferProgramCacheWrites;
 #if defined(MKW_TARGET_VITA)
   c.sampleDrawTimings=cfg_.nativeSampleDrawTimings;
 #endif
@@ -480,6 +482,7 @@ bool Renderer::initialize() noexcept {
   }
   pipelines_.configure_hot_manifest(cfg_.pipelineWarmupPath,cfg_.pipelinePrewarmLimit);
   pipelines_.prewarm_hot(nullptr,cfg_.startupProgress,cfg_.startupProgressUser);
+  native_->flush_program_cache("startup");
   if(cfg_.sealRuntimeShaderCompilationAfterPrewarm)
     native_->set_runtime_shader_compilation_enabled(false);
   targetWidth_=efbWidth;targetHeight_=efbHeight;initialized_=true;failed_=false;

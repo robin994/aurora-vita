@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <dirent.h>
+#include <new>
 #include <psp2/io/stat.h>
 
 namespace aurora::vita::gxm {
@@ -18,7 +19,8 @@ std::string cache_file(const std::string& root, uint64_t hash, ProgramStage stag
 }
 }
 
-void ProgramBinaryCache::configure(const char* path) noexcept {
+void ProgramBinaryCache::configure(const char* path,bool deferWrites) noexcept {
+  pending_.clear();deferWrites_=deferWrites;ramHits_=0;
   root_.clear();
   hits_ = misses_ = archiveHits_ = 0;
   if (!path || !*path) return;
@@ -32,6 +34,11 @@ void ProgramBinaryCache::configure(const char* path) noexcept {
 
 bool ProgramBinaryCache::load(uint64_t sourceHash, ProgramStage stage,
                               std::vector<uint32_t>& words) noexcept {
+  if(deferWrites_)if(const auto* cached=pending_.find(sourceHash,static_cast<uint32_t>(stage))) {
+    try {
+      if(decode_gxm_program_cache(*cached,sourceHash,stage,words)) {++hits_;++ramHits_;return true;}
+    } catch(const std::bad_alloc&) {++misses_;return false;}
+  }
   const auto path = cache_file(root_, sourceHash, stage);
   std::vector<uint8_t> record;
   FILE* file = path.empty()?nullptr:std::fopen(path.c_str(), "rb");
@@ -58,28 +65,52 @@ bool ProgramBinaryCache::load(uint64_t sourceHash, ProgramStage stage,
   return true;
 }
 
-void ProgramBinaryCache::save(uint64_t sourceHash, ProgramStage stage,
-                              const std::vector<uint32_t>& words, size_t byteLength) noexcept {
-  const auto path = cache_file(root_, sourceHash, stage);
-  if (path.empty() || words.empty() || !byteLength || byteLength > words.size() * sizeof(uint32_t) ||
-      byteLength > gfx::MaxProgramCacheBytes) return;
-  GxmProgramCacheHeader header{};
-  header.sourceHash = sourceHash;
-  header.length = static_cast<uint32_t>(byteLength);
-  header.stage = static_cast<uint32_t>(stage);
-  header.binaryHash = gfx::program_cache_hash(words.data(), byteLength);
-  if (!valid_gxm_program_cache(header, words.data(), byteLength, sourceHash, stage)) return;
-  const std::string temporary = path + ".tmp";
-  FILE* file = std::fopen(temporary.c_str(), "wb");
-  if (!file) return;
-  const bool wrote = std::fwrite(&header, sizeof(header), 1, file) == 1 &&
-      std::fwrite(words.data(), 1, byteLength, file) == byteLength;
-  const bool closed = std::fclose(file) == 0;
-  if (wrote && closed) {
-    std::remove(path.c_str());
-    if (std::rename(temporary.c_str(), path.c_str()) == 0) return;
+bool ProgramBinaryCache::write_record(uint64_t sourceHash,ProgramStage stage,
+                                      const std::vector<uint8_t>& record) const {
+  const auto path=cache_file(root_,sourceHash,stage);
+  if(path.empty())return false;
+  const std::string temporary=path+".tmp";
+  FILE* file=std::fopen(temporary.c_str(),"wb");
+  if(!file)return false;
+  const bool wrote=std::fwrite(record.data(),1,record.size(),file)==record.size();
+  const bool closed=std::fclose(file)==0;
+  // Atomic replacement preserves the previous cache file on any failure.
+  if(wrote&&closed&&std::rename(temporary.c_str(),path.c_str())==0)return true;
+  std::remove(temporary.c_str());return false;
+}
+
+void ProgramBinaryCache::save(uint64_t sourceHash,ProgramStage stage,
+                              const std::vector<uint32_t>& words,size_t byteLength) noexcept {
+  if(root_.empty()||words.empty()||!byteLength||byteLength>words.size()*sizeof(uint32_t)||
+     byteLength>gfx::MaxProgramCacheBytes)return;
+  try {
+    GxmProgramCacheHeader header{};
+    header.sourceHash=sourceHash;header.length=static_cast<uint32_t>(byteLength);
+    header.stage=static_cast<uint32_t>(stage);
+    header.binaryHash=gfx::program_cache_hash(words.data(),byteLength);
+    if(!valid_gxm_program_cache(header,words.data(),byteLength,sourceHash,stage))return;
+    std::vector<uint8_t> record(sizeof header+byteLength);
+    std::memcpy(record.data(),&header,sizeof header);
+    std::memcpy(record.data()+sizeof header,words.data(),byteLength);
+    if(deferWrites_)pending_.stage(sourceHash,header.stage,record);
+    else write_record(sourceHash,stage,record);
+  } catch(const std::bad_alloc&) {
+    // The compiled shader remains valid even when persistence cannot allocate.
   }
-  std::remove(temporary.c_str());
+}
+
+void ProgramBinaryCache::flush(const char* phase) noexcept {
+  if(!deferWrites_)return;
+  size_t saved=0;
+  try {
+    saved=pending_.flush([this](uint64_t hash,uint32_t stage,const auto& bytes) {
+      return write_record(hash,static_cast<ProgramStage>(stage),bytes);
+    });
+  } catch(const std::bad_alloc&) {}
+  AURORA_VITA_LOG_INFO("[aurora-gxm] deferred_shader_cache flush=%s saved=%u written_bytes=%llu remaining=%u queued_bytes=%u dropped=%llu errors=%llu ram_hits=%llu\n",
+      phase?phase:"unknown",unsigned(saved),static_cast<unsigned long long>(pending_.written_bytes()),
+      unsigned(pending_.size()),unsigned(pending_.bytes()),static_cast<unsigned long long>(pending_.dropped()),
+      static_cast<unsigned long long>(pending_.errors()),static_cast<unsigned long long>(ramHits_));
 }
 
 size_t ProgramBinaryCache::preload(std::vector<PreloadedProgram>& programs, size_t maxPrograms) noexcept {

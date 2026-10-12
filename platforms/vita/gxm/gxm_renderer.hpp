@@ -22,6 +22,8 @@ struct Config {
   bool waitVblank = true;
   bool d16Depth = false;
   bool fragmentPrepareCache = false;
+  bool precomputedGeometry = false;
+  bool deferProgramCacheWrites = false;
 #if defined(MKW_TARGET_VITA)
   bool sampleDrawTimings = false;
 #endif
@@ -57,6 +59,7 @@ public:
   uint64_t runtime_shader_compiles() const noexcept;
   uint64_t runtime_shader_compile_us() const noexcept;
   uint64_t blocked_shader_compile_misses() const noexcept;
+  void flush_program_cache(const char* phase) noexcept;
   uint32_t program_cache_hits() const noexcept;
   uint32_t program_cache_misses() const noexcept;
   uint64_t create_pipeline(const gfx::PipelineDesc& desc);

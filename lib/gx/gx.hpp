@@ -377,6 +377,9 @@ struct GXState {
   std::array<TevStage, MaxTevStages> tevStages;
   std::array<gfx::TextureBind, MaxTextures> textures;
   std::array<GXTexObj_, MaxTextures> loadedTextures;
+  // Raw IMAGE3 selects guest physical memory; native metadata clears its bit.
+  u8 bpTextureSourceMask = 0;
+  u8 bpTextureSourceInvalidMask = 0;
   std::array<GXTlutObj_, MaxTluts> loadedTluts;
   AuroraViewportPolicy viewportPolicy = AURORA_VIEWPORT_FIT;
   gfx::Viewport logicalViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};

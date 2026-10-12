@@ -79,6 +79,10 @@ bool DrawSink::initialize(gfx::Renderer& renderer, const DrawSinkConfig& config)
   localDrawBatching_=config.localDrawBatching;
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
   renderBudgetProbe_=config.renderBudgetProbe;
+  efbCopySnap1to1_=config.efbCopySnap1to1;
+  if(renderBudgetProbe_ || efbCopySnap1to1_)
+    std::fprintf(stderr,"[wic-efb-snap-config] enabled=%u probe=%u\n",
+        unsigned(efbCopySnap1to1_),unsigned(renderBudgetProbe_));
 #endif
   immediateDrawView_=config.immediateDrawView;
   allowStreamedFixedVertexGpu_ = config.allowStreamedFixedVertexGpu;
@@ -189,11 +193,11 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
     // Quiet diagnostics intentionally disable AURORA_VITA_LOG_INFO. Use one
     // bounded stderr record per 32 frames instead, never one per draw.
     std::fprintf(stderr,
-        "[wic-draw-health] completed_frame=%llu submitted=%llu requested=%u merged=%u white_fallback_draws=%u dynamic_copy_fallback_draws=%u batching=%u efb_copies=%u efb_flush_us=%llu efb_capture_us=%llu efb_clear_us=%llu\n",
+        "[wic-draw-health] completed_frame=%llu submitted=%llu requested=%u merged=%u white_fallback_draws=%u dynamic_copy_fallback_draws=%u batching=%u efb_copies=%u efb_copy_snaps=%u efb_snap_retries=%u efb_flush_us=%llu efb_capture_us=%llu efb_clear_us=%llu\n",
         static_cast<unsigned long long>(frame-1),
         static_cast<unsigned long long>(submittedDraws_-frameStartSubmittedDraws_),
         frameDrawIndex_,frameBatchedDraws_,frameWhiteFallbackDraws_,frameDynamicCopyFallbackDraws_,
-        unsigned(localDrawBatching_),frameEfbCopyCalls_,
+        unsigned(localDrawBatching_),frameEfbCopyCalls_,frameEfbCopySnaps_,frameEfbSnapRetries_,
         static_cast<unsigned long long>(frameEfbFlushUs_),
         static_cast<unsigned long long>(frameEfbCaptureUs_),
         static_cast<unsigned long long>(frameEfbClearUs_));
@@ -203,6 +207,7 @@ void DrawSink::begin_frame(uint64_t frame) noexcept {
   frameDynamicCopyFallbackDraws_=0;
   frameBatchedDraws_=0;
   frameEfbCopyCalls_=0;
+  frameEfbCopySnaps_=frameEfbSnapRetries_=0;
   frameEfbFlushUs_=frameEfbCaptureUs_=frameEfbClearUs_=0;
   // Frame indices start at zero; the GXM sampler records completed frames
   // 32, 64, ... (and the first four for startup sanity).
@@ -525,6 +530,16 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
     if (strictUnsupported_) strictFailed_ = true;
     return false;
   }
+  gfx::Scissor captureSrc=src;
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+  const bool snapped=efbCopySnap1to1_&&
+      copyFormat==gfx::EfbCopyFormat::Passthrough&&
+      g.texCopySrc.width>0&&g.texCopySrc.height>0&&
+      gfx::efb_snap_one_to_one_capture(src,
+          static_cast<uint32_t>(g.texCopySrc.width),static_cast<uint32_t>(g.texCopySrc.height),
+          g.texCopyDstWidth,g.texCopyDstHeight,dstW,dstH,
+          renderer_->target_width(),renderer_->target_height(),captureSrc);
+#endif
   const uintptr_t copyKey = reinterpret_cast<uintptr_t>(dest);
   const auto oldIt = copyTextures_.find(copyKey);
   const gfx::Handle oldHandle = oldIt == copyTextures_.end() ? gfx::InvalidHandle : oldIt->second.handle;
@@ -577,7 +592,19 @@ bool DrawSink::copy_tex(const void* dest, bool clear) noexcept {
   } else
 #endif
   {
-    h=renderer_->capture_current(oldHandle, src, dstW, dstH, physicalFormat, physicalFlipX, physicalFlipY);
+    h=renderer_->capture_current(oldHandle,captureSrc,dstW,dstH,physicalFormat,physicalFlipX,physicalFlipY);
+#if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM) && !defined(AURORA_VITA_UPSTREAM_STUB)
+    if(snapped) {
+      if(h) ++frameEfbCopySnaps_;
+      else {
+        ++frameEfbSnapRetries_;
+        // A failed capture may have released oldHandle. Retry the original
+        // shader rectangle with a fresh target rather than a stale handle.
+        h=renderer_->capture_current(gfx::InvalidHandle,src,dstW,dstH,
+                                     physicalFormat,physicalFlipX,physicalFlipY);
+      }
+    }
+#endif
   }
 #if defined(MKW_TARGET_VITA) && defined(AURORA_VITA_RENDERER_GXM)
   const uint64_t afterCaptureProbe=renderBudgetFrame_?render_budget_now_us():0;
@@ -823,6 +850,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   uint8_t nativeWrapMask = 0;
   const bool reuseResolvedTextures=resolvedTextureBindingsValid_&&
                                    resolvedTextureStateIdentity_==aurora::gx::g_gxState.stateIdentity&&
+                                   resolvedBpTextureSourceMask_==aurora::gx::g_gxState.bpTextureSourceMask&&
+                                   resolvedBpTextureSourceInvalidMask_==aurora::gx::g_gxState.bpTextureSourceInvalidMask&&
                                    !broadDirty&&resolvedTextureRevision_==revisions.textures&&resolvedTextureMask_==textureMask&&
                                    resolvedVolatileTextureMask_==0;
   if(reuseResolvedTextures){
@@ -845,7 +874,7 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
       // Match translate_texture(): the native frontend populates loadedTextures,
       // not Dawn's resolved TextureBind table. Reading that table loses the
       // guest destination identity and turns a valid EFB copy into white fallback.
-      const auto ptr = reinterpret_cast<uintptr_t>(aurora::gx::g_gxState.loadedTextures[slot].data);
+      const auto ptr = reinterpret_cast<uintptr_t>(translated.texture.data);
       const auto ci = copyTextures_.find(ptr);
       if (ci != copyTextures_.end() && ci->second.handle) {
         bindings[slot] = gfx::TextureBinding{ci->second.handle, translated.sampler, gfx::TextureSource::Efb,
@@ -903,6 +932,8 @@ SubmitResult DrawSink::submit(uint8_t primitive, uint8_t fmt, const uint8_t* raw
   if(++resolvedTextureBindingVersion_==0)++resolvedTextureBindingVersion_;
   resolvedNativeWrapMask_=nativeWrapMask;
   resolvedTextureMask_=textureMask;
+  resolvedBpTextureSourceMask_=aurora::gx::g_gxState.bpTextureSourceMask;
+  resolvedBpTextureSourceInvalidMask_=aurora::gx::g_gxState.bpTextureSourceInvalidMask;
   resolvedVolatileTextureMask_=volatileTextureMask;
   resolvedFallbackTextureMask_=result.fallbackTextureMask;
   resolvedTextureWarnings_=static_cast<SubmitWarning>(static_cast<uint8_t>(result.warnings)&

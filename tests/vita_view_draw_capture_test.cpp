@@ -1,4 +1,5 @@
 #include "gfx/vita_view_draw_capture.hpp"
+#include "gfx/vita_texture_provenance.hpp"
 #include <array>
 #ifdef NDEBUG
 #undef NDEBUG
@@ -77,5 +78,37 @@ int main() {
     capture.suppressed_draw(); // Disabled shader must invalidate the capture.
     capture.stop();
     assert(capture.lost() == 3);
+    assert(aurora::vita::gfx::fingerprint_texture_source("hello",5)==0xa430d84680aabd0bull);
+    assert(aurora::vita::gfx::bounded_texture_fingerprint_bytes(2u*1024u*1024u)==1024u*1024u);
+    assert(!capture.start_filtered(4,true,3,2,0));
+    assert(!capture.start_filtered(4,true,0,2,0));
+    assert(!capture.start_filtered(4,true,2,3,0x10));
+    assert(capture.start_filtered(8,true,2,3,0));
+    capture.set_texture_probe(true);
+    assert(capture.texture_probe_enabled());
+    capture.mark(905,255);
+    assert(!capture.should_suppress_next(0x111));
+    capture.draw(first);
+    assert(capture.should_suppress_next(0x111));
+    AuroraViewTextureRecord texture{};
+    texture.handle=19;texture.width=256;texture.height=128;
+    texture.source_hash=0xa430d84680aabd0bull;
+    assert(capture.texture(texture));
+    texture.binding_source=2;
+    assert(capture.texture(texture));
+    assert(capture.texture_count()==1);
+    capture.draw(first);
+    assert(capture.should_suppress_next(0x222));
+    capture.stop();
+    AuroraViewTextureRecord actual[2]{};
+    assert(capture.read_texture(0,actual,2)==1);
+    assert(actual[0].handle==19 && actual[0].binding_source==2);
+    capture.set_texture_probe(false);
+    assert(!capture.texture_probe_enabled());
+    assert(capture.start_filtered(8,false,0,0,0x3344));
+    capture.mark(906,255);
+    assert(capture.should_suppress_next(0x3344));
+    assert(!capture.should_suppress_next(0x111));
+    capture.stop();
     std::puts("View/draw capture: ordered views, frame boundaries, bounded loss passed");
 }

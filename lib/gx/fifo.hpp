@@ -45,6 +45,7 @@ using VitaWorkerTask = void (*)(void*);
 bool start_worker();
 void shutdown_worker();
 bool worker_running();
+bool current_thread_owns_worker() noexcept;
 // Game-thread wait time accumulated since the previous call (microseconds).
 void take_wait_stats(uint64_t& producerWaitUs, uint64_t& consumerWaitUs);
 

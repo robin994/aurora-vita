@@ -262,6 +262,14 @@ int main() {
       require(cpu_core3_cpu_id()==3,"core3 physical id not verified");
       require(cpu_core3_affinity_mask()==SCE_KERNEL_CPU_MASK_SYSTEM,"core3 affinity not verified");
     }
+    for(unsigned iteration=0;iteration<512;++iteration) {
+      Job job;job.iteration=7;
+      require(cpu_parallel_for_vertex(6,task,&job),"small vertex callback failed");
+      require(job.laneMask.load()==1u,"tiny job dispatched to a helper");
+      require(job.active.load()==0,"tiny job returned before callback");
+      for(size_t i=0;i<job.visits.size();++i)
+        require(job.visits[i].load()==unsigned(i<6),"tiny range missing or duplicated");
+    }
     for(unsigned iteration=1;iteration<=3000;++iteration) {
       Job job;job.iteration=iteration;
       const size_t count=iteration%4==0?256:(iteration%4==1?192:(iteration%4==2?128:32));

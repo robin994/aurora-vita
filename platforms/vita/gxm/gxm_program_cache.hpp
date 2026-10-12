@@ -1,5 +1,6 @@
 #pragma once
 #include "gfx/vita_program_binary_cache.hpp"
+#include "gxm_deferred_program_writes.hpp"
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -41,7 +42,7 @@ inline bool valid_gxm_program_cache(const GxmProgramCacheHeader& header, const v
 }
 
 inline bool decode_gxm_program_cache(const std::vector<uint8_t>& record,uint64_t expectedSource,
-                                      ProgramStage stage,std::vector<uint32_t>& words) noexcept {
+                                      ProgramStage stage,std::vector<uint32_t>& words) {
   if(record.size()<sizeof(GxmProgramCacheHeader)||record.size()>sizeof(GxmProgramCacheHeader)+gfx::MaxProgramCacheBytes)return false;
   GxmProgramCacheHeader header{};std::memcpy(&header,record.data(),sizeof header);
   const auto* payload=record.data()+sizeof header;const size_t bytes=record.size()-sizeof header;
@@ -52,10 +53,11 @@ inline bool decode_gxm_program_cache(const std::vector<uint8_t>& record,uint64_t
 
 class ProgramBinaryCache {
 public:
-  void configure(const char* path) noexcept;
+  void configure(const char* path,bool deferWrites=false) noexcept;
   bool load(uint64_t sourceHash, ProgramStage stage, std::vector<uint32_t>& words) noexcept;
   void save(uint64_t sourceHash, ProgramStage stage, const std::vector<uint32_t>& words,
             size_t byteLength) noexcept;
+  void flush(const char* phase) noexcept;
   size_t preload(std::vector<PreloadedProgram>& programs, size_t maxPrograms = 1024) noexcept;
   uint32_t hits() const noexcept { return hits_; }
   uint32_t misses() const noexcept { return misses_; }
@@ -64,5 +66,10 @@ private:
   std::string root_;
   uint32_t hits_ = 0, archiveHits_ = 0;
   uint32_t misses_ = 0;
+  bool deferWrites_=false;
+  uint64_t ramHits_=0;
+  DeferredProgramWrites pending_;
+  bool write_record(uint64_t sourceHash,ProgramStage stage,
+                    const std::vector<uint8_t>& record) const;
 };
 } // namespace aurora::vita::gxm

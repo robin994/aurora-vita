@@ -667,6 +667,8 @@ struct FrameStats {
   uint64_t nativeVertexDeltaCopiedBytes=0;
   uint64_t nativeVertexDeltaSavedBytes=0;
   uint32_t nativeVertexUniformReuses = 0;
+  uint32_t nativePrecomputedDraws = 0, nativePrecomputedHits = 0;
+  uint32_t nativePrecomputedMisses = 0, nativePrecomputedFallbacks = 0;
   uint32_t nativeFragmentUniformReuses = 0;
   // Cumulative preparation-cache counters, retained across frame resets.
   uint64_t nativeFragmentPrepareHits = 0;

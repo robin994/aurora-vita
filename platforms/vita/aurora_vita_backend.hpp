@@ -202,6 +202,14 @@ struct BackendConfig {
   bool gxm_local_draw_batching=false;
   // Sampling is opt-in and scoped to the WiiCompiled GXM backend.
   bool gxm_render_budget_probe=false;
+  // These WiiCompiled extensions existed only in the lost Oct 11 worktree.
+  // Keep the configuration contract; experimental paths remain opt-in.
+  bool native_lyt_packets=false;
+  uint32_t gxm_native_primitive_min_vertices=0;
+  bool gxm_defer_program_cache_writes=false;
+  bool gxm_precomputed_geometry=false;
+  bool gxm_deferred_efb_targets=false;
+  bool gxm_efb_copy_snap_1to1=false;
   // Native GXM render-target scene budget. Gameplay telemetry should stay below
   // this in steady state; Strikers currently averages ~2.4 and peaks at 3.
   uint32_t gxm_scenes_per_frame=5;

@@ -1,5 +1,6 @@
 #include "gxm_renderer.hpp"
 #include "gxm_efb_ops.hpp"
+#include "gxm_precomputed_geometry.hpp"
 #include "../gfx/vita_frame_stats.hpp"
 #include "gxm_memory.hpp"
 #include "gxm_program_cache.hpp"
@@ -17,6 +18,7 @@
 #include "gfx/vita_shader_debug_registry.hpp"
 #include "gfx/vita_view_draw_capture.hpp"
 #include "gfx/vita_draw_payload_hash.hpp"
+#include "gfx/vita_texture_provenance.hpp"
 #include "../aurora_vita_backend.hpp"
 #include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
@@ -39,6 +41,28 @@
 
 namespace aurora::vita::gxm {
 namespace {
+using namespace gfx;
+AuroraViewTextureRecord native_texture_source_record(const TextureDesc& desc,
+                                                     size_t encodedBytes,bool hashBytes) noexcept {
+  AuroraViewTextureRecord out{};
+  out.width=desc.width;out.height=desc.height;
+  out.gx_format=static_cast<uint8_t>(desc.format);
+  out.palette_format=static_cast<uint8_t>(desc.paletteFormat);
+  out.mip_count=desc.mipCount;
+  out.source_id=desc.sourceId;
+  out.palette_source_id=desc.paletteSourceId;
+  out.source_revision=desc.revision;
+  out.source_bytes=static_cast<uint32_t>(std::min(encodedBytes,size_t(UINT32_MAX)));
+  if(hashBytes) {
+    const auto bytes=bounded_texture_fingerprint_bytes(encodedBytes);
+    out.source_hash_bytes=static_cast<uint32_t>(bytes);
+    out.source_hash=fingerprint_texture_source(desc.data,bytes);
+    const auto paletteBytes=desc.palette?bounded_texture_fingerprint_bytes(desc.paletteSize):0;
+    out.palette_hash_bytes=static_cast<uint32_t>(paletteBytes);
+    out.palette_hash=fingerprint_texture_source(desc.palette,paletteBytes);
+  }
+  return out;
+}
 using namespace gfx;
 #if defined(MKW_TARGET_VITA)
 // Only the WiiCompiled diagnostic observer reads this. 0=none, 1=EndScene,
@@ -341,7 +365,7 @@ extern "C" uint32_t aurora_vita_gxm_kernel_operation() noexcept {
 
 struct Renderer::Impl {
   struct Surface { MemoryBlock memory; SceGxmColorSurface color{}; SceGxmSyncObject* sync = nullptr; };
-  struct Buffer { MemoryBlock memory; size_t bytes = 0; bool inFlight = false; };
+  struct Buffer { MemoryBlock memory; size_t bytes = 0; bool inFlight = false, resident = false; };
   struct Texture {
     MemoryBlock memory, depth;
     SceGxmTexture descriptor{};
@@ -355,6 +379,7 @@ struct Renderer::Impl {
     SamplerDesc descriptorSampler{};
     bool descriptorSamplerValid = false;
     bool inFlight = false, depthValid = false;
+    AuroraViewTextureRecord provenance{};
     ~Texture() {
       if (sync) sceGxmSyncObjectDestroy(sync);
       if (target) sceGxmDestroyRenderTarget(target);
@@ -442,6 +467,14 @@ struct Renderer::Impl {
   gfx::FlatHashMap<Handle, std::unique_ptr<Texture>> textures;
   gfx::FlatHashMap<uint64_t, Handle> textureCache;
   FrameStats stats{};
+  using GeometryCache = PrecomputedGeometryCache<SceGxmPrecomputedDraw>;
+  static constexpr size_t PrecomputedSlotBytes = 512, PrecomputedSlots = 512;
+  std::unique_ptr<GeometryCache> precomputed;
+  MemoryBlock precomputedMemory;
+  SceneCompletion precomputedCompletion;
+  volatile unsigned int* precomputedNotification = nullptr;
+  bool precomputedOff = false;
+
   std::string error;
   std::atomic<int> displayError{0};
   size_t resourceBytes = 0;
@@ -498,16 +531,70 @@ struct Renderer::Impl {
 
   uint32_t width() const { return boundTarget ? textures.at(boundTarget)->width : config.width; }
   uint32_t height() const { return boundTarget ? textures.at(boundTarget)->height : config.height; }
+  void invalidate_precomputed_buffer(Handle handle) noexcept {
+    if (precomputed) precomputed->invalidate([=](const auto& key) {
+      return key.vertices == handle || key.indices == handle;
+    });
+  }
+  bool precomputed_failed(const char* operation, int code) noexcept {
+    precomputedOff = true;
+    AURORA_VITA_LOG_ERROR("[aurora-gxm] precomputed geometry disabled: %s (0x%08x); context fallback\n",
+                         operation, unsigned(code));
+    return false;
+  }
+  const SceGxmPrecomputedDraw* prepare_precomputed(const PrecomputedGeometryKey& key,
+      const SceGxmVertexProgram* program, const void* vertices, const void* indices,
+      SceGxmPrimitiveType primitive) {
+    if (!precomputed || precomputedOff) return nullptr;
+    precomputedCompletion.observe(*precomputedNotification);
+    if (!precomputedCompletion.can_submit()) {
+      precomputed_failed("scene sequence exhausted", -1); return nullptr;
+    }
+    if (auto* entry = precomputed->find(key, precomputedCompletion.next())) {
+      ++stats.nativePrecomputedHits;
+      return &entry->record; // No GPU-readable field is modified on a hit.
+    }
+    ++stats.nativePrecomputedMisses;
+    const size_t bytes = sceGxmGetPrecomputedDrawSize(program);
+    if (!bytes || bytes > PrecomputedSlotBytes) return nullptr;
+    if (!precomputedMemory.data()) {
+      constexpr size_t storageBytes = PrecomputedSlots * PrecomputedSlotBytes;
+      if (!has_budget(storageBytes)) { precomputed_failed("resource budget", -1); return nullptr; }
+      const int result = precomputedMemory.allocate(storageBytes, MemoryKind::CpuGpu);
+      if (result < 0) { precomputed_failed("allocate backing", result); return nullptr; }
+      resourceBytes += precomputedMemory.size();
+    }
+    auto* entry = precomputed->acquire(precomputedCompletion.completed());
+    if (!entry) return nullptr; // Never wait/finish to make cache space.
+    auto* backing = static_cast<uint8_t*>(precomputedMemory.data()) +
+        precomputed->slot(*entry) * PrecomputedSlotBytes;
+    std::memset(backing, 0, PrecomputedSlotBytes);
+    int result = sceGxmPrecomputedDrawInit(&entry->record, program, backing);
+    if (result < 0) { precomputed_failed("draw init", result); return nullptr; }
+    result = sceGxmPrecomputedDrawSetVertexStream(&entry->record, 0, vertices);
+    if (result < 0) { precomputed_failed("vertex stream", result); return nullptr; }
+    sceGxmPrecomputedDrawSetParams(&entry->record, primitive, SCE_GXM_INDEX_FORMAT_U16,
+                                  indices, key.indexCount);
+    precomputed->publish(*entry, key, precomputedCompletion.next());
+    return &entry->record;
+  }
   bool end_scene() {
     if (!inScene) return true;
     watch_kernel_operation(1);
-    const int result = sceGxmEndScene(context, nullptr, nullptr);
+    const SceGxmNotification completion{precomputedNotification,
+        static_cast<uint32_t>(precomputedCompletion.next())};
+    const int result = sceGxmEndScene(context, nullptr, precomputed ? &completion : nullptr);
+    if (precomputed) {
+      if (result >= 0) precomputedCompletion.submitted();
+      else precomputedOff = true;
+    }
     watch_kernel_operation(0);
     inScene = false;
     if (result >= 0 && gxm_disabled(GxmDiagSceneFinish)) {
       const uint64_t waitStart = diagnostic_now_us();
       watch_kernel_operation(4);
       sceGxmFinish(context);
+      if(precomputed)precomputedCompletion.finished();
       watch_kernel_operation(0);
       ++finishCalls;
       const unsigned slot = std::min<unsigned>(stats.nativeSceneCount ? stats.nativeSceneCount - 1u : 0u, 3u);
@@ -536,6 +623,7 @@ struct Renderer::Impl {
     if (!end_scene()) return;
     watch_kernel_operation(4);
     sceGxmFinish(context);
+      if(precomputed)precomputedCompletion.finished();
     watch_kernel_operation(0);
     const uint64_t gpuUs = diagnostic_now_us() - t0;
     char line[768];
@@ -639,6 +727,13 @@ struct Renderer::Impl {
     vertexUniformState.valid=false;fragmentUniformState.valid=false;
     pipelineStateValid=false;viewportValid=false;vertexStreamValid=false;
     textureBindingValidMask=0;boundPipelineKey=0;boundVertexBuffer=0;boundVertexBase=0;
+    if (precomputed) {
+      // Phase 1 consumes live context programs/uniforms/textures. No cached
+      // shader state is allowed to override the full BeginScene restoration.
+      sceGxmSetPrecomputedVertexState(context, nullptr);
+      sceGxmSetPrecomputedFragmentState(context, nullptr);
+    }
+
     inScene = true;
     return true;
   }
@@ -670,6 +765,10 @@ struct Renderer::Impl {
         rounded <= config.resourceBudgetBytes - resourceBytes;
   }
   void destroy_pipeline(Pipeline& p) noexcept {
+    if (precomputed && p.ownsVertex) precomputed->invalidate([&](const auto& key) {
+      return key.vertexProgram == reinterpret_cast<uintptr_t>(p.vertex);
+    });
+
     if (p.scissorFree) {
       destroy_pipeline(*p.scissorFree);
       delete p.scissorFree;
@@ -898,6 +997,15 @@ bool Renderer::initialize(const Config& config) {
   ctx.fragmentUsseRingBufferMem = d.fragmentUsseRing.data(); ctx.fragmentUsseRingBufferMemSize = d.fragmentUsseRing.size();
   ctx.fragmentUsseRingBufferOffset = d.fragmentUsseRing.usse_offset();
   if (!d.check(sceGxmCreateContext(&ctx, &d.context), "create context")) return abort();
+  if (config.precomputedGeometry) {
+    d.precomputedNotification = sceGxmGetNotificationRegion();
+    if (d.precomputedNotification) d.precomputed.reset(new (std::nothrow) Impl::GeometryCache);
+    if (d.precomputed) *d.precomputedNotification = 0;
+    else d.precomputed_failed("cache/notification unavailable", -1);
+    AURORA_VITA_LOG_INFO("[aurora-gxm] precomputed_geometry=%u records=%zu backing_limit=%zu\n",
+        unsigned(bool(d.precomputed)), Impl::PrecomputedSlots,
+        Impl::PrecomputedSlots * Impl::PrecomputedSlotBytes);
+  }
   SceGxmRenderTargetParams rt{};
   rt.width = config.width; rt.height = config.height; rt.scenesPerFrame = std::max(config.scenesPerFrame,1u);
   rt.multisampleMode = SCE_GXM_MULTISAMPLE_NONE; rt.driverMemBlock = -1;
@@ -938,7 +1046,7 @@ bool Renderer::initialize(const Config& config) {
   d.ownsCompiler = true;
   shark_install_log_cb(shader_log);
   shark_set_warnings_level(SHARK_WARN_HIGH);
-  d.programCache.configure(config.programCachePath);
+  d.programCache.configure(config.programCachePath,config.deferProgramCacheWrites);
   d.runtimeShaderCompileEnabled = true;
   d.pipelineCompileBlocked = false;
   if (config.preloadProgramCache && config.programCachePreloadLimit) {
@@ -1157,6 +1265,7 @@ Handle Renderer::create_buffer(const void* data, size_t bytes,bool resident) {
   Impl::Buffer buffer;
   if (!d.alloc(buffer.memory, bytes, resident&&d.config.residentGeometryInCdram?MemoryKind::GpuResource:MemoryKind::CpuGpu)) return 0;
   buffer.bytes = bytes;
+  buffer.resident = resident;
   if (data) std::memcpy(buffer.memory.data(), data, bytes);
   else std::memset(buffer.memory.data(), 0, bytes);
   d.resourceBytes += buffer.memory.size();
@@ -1216,6 +1325,8 @@ Handle Renderer::create_texture(const TextureDesc& desc,CompactTextureData* prep
           sceGxmTextureInitLinear(&texture.descriptor,texture.memory.data(),native.format,
                                   desc.width,desc.height,texture.mipCount);
       if(nativeResult>=0) {
+        texture.provenance=native_texture_source_record(
+            desc,encoded,gfx::view_draw_capture().texture_probe_enabled());
         if(d.diagnosticsEnabled)
           AURORA_VITA_LOG_DEBUG("[aurora-gxm] compact_texture fmt=%u size=%ux%u mips=%u bytes=%u bc1=%u\n",
             unsigned(desc.format),desc.width,desc.height,texture.mipCount,unsigned(native.pixels.size()),
@@ -1255,6 +1366,8 @@ Handle Renderer::create_texture(const TextureDesc& desc,CompactTextureData* prep
       sceGxmTextureInitLinear(&texture.descriptor, texture.memory.data(),
           SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, desc.width, desc.height, texture.mipCount);
   if (!d.check(textureResult, "initialize native texture")) return 0;
+  texture.provenance=native_texture_source_record(
+      desc,encoded,gfx::view_draw_capture().texture_probe_enabled());
   d.resourceBytes += texture.memory.size();
   const Handle handle = d.nextHandle++;
   d.textures.emplace(handle, std::move(owned));
@@ -1778,16 +1891,41 @@ bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
         static_cast<unsigned>(hardwareScissor.y+hardwareScissor.height-1));
     d.cachedScissor=hardwareScissor;d.scissorValid=true;
   }
-  if(!d.vertexStreamValid||d.boundVertexBuffer!=packet.vertices.buffer||d.boundVertexBase!=base) {
-    if (!d.check(sceGxmSetVertexStream(d.context, 0, static_cast<uint8_t*>(vi->second.memory.data()) + base), "bind native vertex stream")) return false;
-    d.vertexStreamValid=true;d.boundVertexBuffer=packet.vertices.buffer;d.boundVertexBase=base;
-  }
   const auto primitive = pipeline.primitive == Primitive::Triangles ? SCE_GXM_PRIMITIVE_TRIANGLES :
       pipeline.primitive == Primitive::TriangleFan ? SCE_GXM_PRIMITIVE_TRIANGLE_FAN : SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
-  watch_kernel_operation(3);
-  const int drawResult=sceGxmDraw(d.context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, packet.indexCount);
-  watch_kernel_operation(0);
-  if (!d.check(drawResult, "draw indexed")) return false;
+  const bool diagnosticSuppressed=traceDraw&&
+      viewTrace.should_suppress_next(p.fragmentCode?p.fragmentCode->sourceHash:0);
+  const auto* vertices=static_cast<const uint8_t*>(vi->second.memory.data())+base;
+  const SceGxmPrecomputedDraw* prepared=nullptr;
+  if (!diagnosticSuppressed && gameDraw && d.config.precomputedGeometry &&
+      vi->second.resident && ii->second.resident) {
+    const PrecomputedGeometryKey key{activeKey,reinterpret_cast<uintptr_t>(active->vertex),
+        packet.vertices.buffer,packet.indices.buffer,base,packet.indices.offset,
+        packet.indexCount,static_cast<uint32_t>(primitive)};
+    prepared=d.prepare_precomputed(key,active->vertex,vertices,indices,primitive);
+    if(!prepared)++d.stats.nativePrecomputedFallbacks;
+  }
+  if (!prepared && !diagnosticSuppressed &&
+      (!d.vertexStreamValid||d.boundVertexBuffer!=packet.vertices.buffer||d.boundVertexBase!=base)) {
+    if(!d.check(sceGxmSetVertexStream(d.context,0,vertices),"bind native vertex stream"))return false;
+    d.vertexStreamValid=true;d.boundVertexBuffer=packet.vertices.buffer;d.boundVertexBase=base;
+  }
+  int drawResult=0;
+  if(!diagnosticSuppressed) {
+    // Failed submission can still consume bindings: destruction must fence it.
+    pi->second->inFlight=true;active->inFlight=true;
+    vi->second.inFlight=true;ii->second.inFlight=true;
+    watch_kernel_operation(3);
+    drawResult=prepared?sceGxmDrawPrecomputed(d.context,prepared):
+        sceGxmDraw(d.context,primitive,SCE_GXM_INDEX_FORMAT_U16,indices,packet.indexCount);
+    watch_kernel_operation(0);
+    if(prepared) {
+      d.vertexStreamValid=false;
+      if(drawResult>=0)++d.stats.nativePrecomputedDraws;
+      else d.precomputedOff=true; // Never retry a possibly consumed draw.
+    }
+  }
+  if(!d.check(drawResult,"draw indexed"))return false;
   if(traceDraw) {
     AuroraViewDrawRecord row{};
     row.consumer_frame = aurora::vita::frame_index()+1;
@@ -1803,6 +1941,38 @@ bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
     row.tev_stages=p.desc.tev.stageCount;
     row.texture_mask=p.textureMask;
     row.texgen_mask=gfx::pipeline_texgen_compute_mask(p.desc);
+    row.diagnostic_suppressed=static_cast<uint8_t>(diagnosticSuppressed);
+    for(unsigned stage=0;stage<std::min<unsigned>(p.desc.tev.stageCount,16);++stage) {
+      const auto& s=p.desc.tev.stages[stage];
+      row.tev_maps[stage]=s.texture;
+      row.tev_coords[stage]=s.texCoord;
+      row.tev_color_args[stage][0]=static_cast<uint8_t>(s.color.a);
+      row.tev_color_args[stage][1]=static_cast<uint8_t>(s.color.b);
+      row.tev_color_args[stage][2]=static_cast<uint8_t>(s.color.c);
+      row.tev_color_args[stage][3]=static_cast<uint8_t>(s.color.d);
+      row.tev_alpha_args[stage][0]=static_cast<uint8_t>(s.alpha.a);
+      row.tev_alpha_args[stage][1]=static_cast<uint8_t>(s.alpha.b);
+      row.tev_alpha_args[stage][2]=static_cast<uint8_t>(s.alpha.c);
+      row.tev_alpha_args[stage][3]=static_cast<uint8_t>(s.alpha.d);
+    }
+    for(unsigned slot=0;slot<MaxTextures;++slot)if(p.textureMask&(1u<<slot)) {
+      const auto& binding=packet.texture_bindings()[slot];
+      row.texture_handles[slot]=binding.texture;
+      const auto it=d.textures.find(binding.texture);
+      if(it==d.textures.end()||!it->second) {
+        viewTrace.suppressed_draw();
+        continue;
+      }
+      auto source=it->second->provenance;
+      source.handle=binding.texture;
+      source.binding_source=static_cast<uint8_t>(binding.source);
+      if(!source.width) {
+        source.width=it->second->width;source.height=it->second->height;
+        source.gx_format=0xff;
+        source.mip_count=static_cast<uint8_t>(std::min(it->second->mipCount,255u));
+      }
+      (void)viewTrace.texture(source);
+    }
     row.program_native=static_cast<uint8_t>(p.nativeMaterial);
     row.indexed_pn=static_cast<uint8_t>(p.desc.fixedVertexIndexedPn);
     row.blend=static_cast<uint8_t>(p.desc.blendMode);
@@ -1838,8 +2008,6 @@ bool Renderer::draw(const DrawSubmissionView& packet, bool gameDraw) {
   }
   if(d.profileDraws) d.stats.nativeDrawUs+=sampled_now_us(true)-profileTick;
   if(gxm_disabled(GxmDiagDrawGpu)) d.diag_draw_gpu(packet,p);
-  pi->second->inFlight = true; active->inFlight = true;
-  vi->second.inFlight = true; ii->second.inFlight = true;
   bool countNativeDraws=d.diagnosticsEnabled;
 #if defined(MKW_TARGET_VITA)
   countNativeDraws=countNativeDraws||d.config.sampleDrawTimings;
@@ -1955,6 +2123,7 @@ bool Renderer::finish(FinishReason reason) {
   }
   watch_kernel_operation(4);
   sceGxmFinish(d.context);
+  if(d.precomputed)d.precomputedCompletion.finished();
   watch_kernel_operation(0);
   ++d.finishCalls;
   const auto reasonIndex=std::min(static_cast<size_t>(reason),FinishReasonCount-1);
@@ -1979,6 +2148,7 @@ bool Renderer::update_buffer(Handle handle,const void* data,size_t bytes,size_t 
     return d.fail("invalid buffer update");
   if(!bytes) return true;
   if(it->second.inFlight && !storageRetired && !finish(FinishReason::BufferMutation)) return false;
+  d.invalidate_precomputed_buffer(handle);
   // StreamingArena only sets storageRetired after its frames-in-flight interval.
   // At that point the corresponding display work has already rotated through
   // GXM's bounded queue, so a second global finish here would serialize every
@@ -2022,6 +2192,12 @@ bool Renderer::update_texture(Handle handle,const TextureDesc& desc,bool storage
   // display queue can retain, matching StreamingArena's retirement contract.
   if(storageRetired) texture.inFlight=false;
   std::memcpy(texture.memory.data(),pixels,pixelBytes);
+  const auto encoded=encoded_mip_chain_size(desc.width,desc.height,desc.format,
+                                             std::max<uint8_t>(desc.mipCount,1));
+  if(encoded&&encoded<=desc.dataSize)
+    texture.provenance=native_texture_source_record(
+        desc,encoded,gfx::view_draw_capture().texture_probe_enabled());
+  else texture.provenance={};
   texture.descriptorSamplerValid=false;
   return true;
 }
@@ -2036,6 +2212,7 @@ void Renderer::destroy_buffer(Handle handle,bool storageRetired) {
 #endif
   if(it->second.inFlight && !storageRetired && !finish(FinishReason::ResourceDestroy)) return;
   if(d.boundVertexBuffer==handle){d.vertexStreamValid=false;d.boundVertexBuffer=0;}
+  d.invalidate_precomputed_buffer(handle);
   d.resourceBytes-=it->second.memory.size();
   d.buffers.erase(it);
 }
@@ -2508,10 +2685,19 @@ void Renderer::set_presentation_aspect(float aspect) noexcept {
   impl_->presentationAspect=std::isfinite(aspect)&&aspect>0.f?aspect:0.f;
 }
 
+void Renderer::flush_program_cache(const char* phase) noexcept {impl_->programCache.flush(phase);}
+
 void Renderer::shutdown() noexcept {
   auto& d = *impl_;
+  d.programCache.flush("shutdown");
   if (d.inScene && d.context) { sceGxmEndScene(d.context, nullptr, nullptr); d.inScene = false; }
   if (d.context) sceGxmFinish(d.context);
+  if(d.precomputed)d.precomputedCompletion.finished();
+  // Drop GPU-readable records only after the actual context fence, before GXM
+  // termination. A failed EndScene also reaches this conservative teardown.
+  d.precomputed.reset(); d.precomputedMemory.reset();
+  d.precomputedNotification = nullptr; d.precomputedCompletion = {}; d.precomputedOff = false;
+
   if (d.ownsGxm) sceGxmDisplayQueueFinish();
   // Stop scanout before releasing display backing storage.
   if (d.displayed) { sceDisplaySetFrameBuf(nullptr, SCE_DISPLAY_SETBUF_NEXTFRAME); sceDisplayWaitVblankStart(); }
